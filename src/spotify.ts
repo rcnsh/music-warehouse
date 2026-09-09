@@ -4,12 +4,23 @@ export const AUTHORIZE_URL = 'https://accounts.spotify.com/authorize';
 export const TOKEN_URL = 'https://accounts.spotify.com/api/token';
 export const RECENTLY_PLAYED_URL = 'https://api.spotify.com/v1/me/player/recently-played';
 /**
- * `user-read-recently-played` drives ingestion. The other two exist so the
+ * `user-read-recently-played` drives ingestion. The next two exist so the
  * Worker can serve rcn.sh's live widgets, which keeps the website free of any
  * Spotify credential of its own — one token, one six-month clock, one place to
  * re-authorize. Changing this list requires a fresh /login.
+ *
+ * `user-library-read` is not used by ingestion at all: it exists solely so the
+ * album backfill can read Saved Tracks and Saved Albums. Those are the only
+ * endpoints that hand back cover art for tracks that predate the Worker — the
+ * catalog endpoints that would otherwise do it (/v1/tracks, /v1/albums) return
+ * 403 to apps in development mode. See src/albums.ts.
  */
-export const SCOPE = ['user-read-recently-played', 'user-read-currently-playing', 'user-top-read'].join(' ');
+export const SCOPE = [
+  'user-read-recently-played',
+  'user-read-currently-playing',
+  'user-top-read',
+  'user-library-read',
+].join(' ');
 
 export type SpotifyErrorKind =
   /** HTTP 429. Back off; do not advance the cursor (R7). */

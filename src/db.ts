@@ -130,8 +130,10 @@ export async function readState(db: D1Database): Promise<{ sync: SyncState; toke
  *
  * `tracks` upserts rather than ignoring so that an API poll upgrades a stub row
  * left behind by the export importer (which knows a track's name but not its
- * duration, album or ISRC). The WHERE guard means a track that is already
- * complete is not rewritten, keeping steady-state row writes near zero.
+ * duration, album or ISRC) or by the album backfill (Saved Albums return
+ * simplified tracks, which carry a duration but no ISRC). The WHERE guard
+ * means a row is rewritten only when the payload fills a hole in it, keeping
+ * steady-state row writes at zero.
  */
 export function writeStatements(db: D1Database, rows: NormalizedRows): D1PreparedStatement[] {
   return [
@@ -148,7 +150,15 @@ export function writeStatements(db: D1Database, rows: NormalizedRows): D1Prepare
           'album_id = COALESCE(excluded.album_id, tracks.album_id), ' +
           'isrc = COALESCE(excluded.isrc, tracks.isrc), ' +
           'first_seen_ms = MIN(tracks.first_seen_ms, excluded.first_seen_ms) ' +
-          'WHERE tracks.duration_ms IS NULL OR tracks.first_seen_ms > excluded.first_seen_ms',
+          // Fire only when this payload actually supplies something the row
+          // lacks. Testing `tracks.isrc IS NULL` alone would rewrite every
+          // track that genuinely has no ISRC on every single poll; pairing it
+          // with `excluded.<column> IS NOT NULL` keeps steady state at zero
+          // writes while still healing a partially-filled row.
+          'WHERE tracks.first_seen_ms > excluded.first_seen_ms ' +
+          'OR (tracks.duration_ms IS NULL AND excluded.duration_ms IS NOT NULL) ' +
+          'OR (tracks.album_id IS NULL AND excluded.album_id IS NOT NULL) ' +
+          'OR (tracks.isrc IS NULL AND excluded.isrc IS NOT NULL)',
       }),
 
     ...buildInserts(db, 'artists', ['artist_id', 'name'], rows.artists),

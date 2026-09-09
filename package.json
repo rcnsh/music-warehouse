@@ -11,7 +11,9 @@
     "typecheck": "tsc --noEmit",
     "migrate:local": "wrangler d1 migrations apply music_warehouse --local",
     "migrate:remote": "wrangler d1 migrations apply music_warehouse --remote",
-    "import": "node scripts/import-export.mjs"
+    "import": "node scripts/import-export.mjs",
+    "backfill:albums": "node scripts/backfill-albums.mjs",
+    "authorize": "node scripts/authorize.mjs"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.22.0",

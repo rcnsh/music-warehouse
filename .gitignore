@@ -7,3 +7,4 @@ dist/
 export-data/
 fixtures/recently-played.json
 .import-state.json
+.albums-state.json

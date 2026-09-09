@@ -1,0 +1,244 @@
+import { json } from './api';
+import { MAX_BOUND_PARAMS, buildInserts } from './db';
+import { pickImageUrl } from './normalize';
+import { spotifyGet } from './spotify';
+import { getAccessToken } from './tokens';
+import { readState } from './db';
+import type { Env, SpotifyAlbum, SpotifyTrack } from './types';
+
+/**
+ * Backfill album art for tracks the export could only name.
+ *
+ * The export carries an album *name* but no album id, and the catalog
+ * endpoints keyed by id (/v1/albums, /v1/tracks) return 403 to apps in
+ * Spotify's development mode. The way through is that every TrackObject the
+ * API returns embeds a SimplifiedAlbumObject — id, name, release_date and
+ * images — so any user-scoped endpoint that hands back tracks also hands back
+ * cover art, no catalog access required.
+ *
+ * Three such sources, in descending coverage:
+ *   `saved`  — /me/tracks, the whole Liked Songs library, offset-paged.
+ *   `albums` — /me/albums, Saved Albums, whose track lists map many ids at once.
+ *   `top`    — /me/top/tracks, roughly 50 per time range, but needs no scope
+ *              beyond the one ingestion already holds.
+ *
+ * None is exhaustive: a track played twice in 2021 and never saved appears in
+ * none of them, and nothing user-scoped will ever mention it.
+ */
+
+export const SOURCES = ['saved', 'top', 'albums'] as const;
+export type AlbumSource = (typeof SOURCES)[number];
+
+export const TIME_RANGES = ['short_term', 'medium_term', 'long_term'] as const;
+
+/** Spotify's paging ceiling for all three sources. */
+const PAGE_SIZE = 50;
+const DEFAULT_PAGES = 4;
+const MAX_PAGES = 20;
+
+export interface AlbumCandidate {
+  track_id: string;
+  album: SpotifyAlbum;
+  duration_ms: number | null;
+  isrc: string | null;
+}
+
+interface SavedTrackPage {
+  items?: Array<{ track?: SpotifyTrack | null } | null> | null;
+  total?: number | null;
+}
+interface TopTrackPage {
+  items?: Array<SpotifyTrack | null> | null;
+  total?: number | null;
+}
+interface SavedAlbumPage {
+  items?: Array<{
+    album?: (SpotifyAlbum & { tracks?: { items?: Array<SpotifyTrack | null> | null } | null }) | null;
+  } | null> | null;
+  total?: number | null;
+}
+
+function candidateFrom(track: SpotifyTrack | null | undefined, album: SpotifyAlbum | null | undefined): AlbumCandidate | null {
+  if (!track?.id || !album?.id) return null;
+  return {
+    track_id: track.id,
+    album,
+    duration_ms: track.duration_ms ?? null,
+    isrc: track.external_ids?.isrc ?? null,
+  };
+}
+
+/**
+ * Flatten one page of any of the three sources into track→album pairs.
+ *
+ * Pure, so the differing envelope of each source is testable without a network.
+ * `total` is Spotify's count for the collection, used only to decide when the
+ * walk is finished.
+ */
+export function extractCandidates(
+  source: AlbumSource,
+  payload: unknown,
+): { candidates: AlbumCandidate[]; itemCount: number; total: number | null } {
+  const candidates: AlbumCandidate[] = [];
+  let itemCount = 0;
+  let total: number | null = null;
+
+  if (source === 'saved') {
+    const page = (payload ?? {}) as SavedTrackPage;
+    total = page.total ?? null;
+    for (const item of page.items ?? []) {
+      itemCount++;
+      const candidate = candidateFrom(item?.track, item?.track?.album);
+      if (candidate) candidates.push(candidate);
+    }
+  } else if (source === 'top') {
+    const page = (payload ?? {}) as TopTrackPage;
+    total = page.total ?? null;
+    for (const track of page.items ?? []) {
+      itemCount++;
+      const candidate = candidateFrom(track, track?.album);
+      if (candidate) candidates.push(candidate);
+    }
+  } else {
+    const page = (payload ?? {}) as SavedAlbumPage;
+    total = page.total ?? null;
+    for (const item of page.items ?? []) {
+      itemCount++;
+      const album = item?.album;
+      // A saved album maps many track ids to one cover in a single item.
+      for (const track of album?.tracks?.items ?? []) {
+        const candidate = candidateFrom(track, album);
+        if (candidate) candidates.push(candidate);
+      }
+    }
+  }
+
+  return { candidates, itemCount, total };
+}
+
+function pageUrl(source: AlbumSource, offset: number, range: string): string {
+  if (source === 'saved') return `/me/tracks?limit=${PAGE_SIZE}&offset=${offset}`;
+  if (source === 'albums') return `/me/albums?limit=${PAGE_SIZE}&offset=${offset}`;
+  return `/me/top/tracks?time_range=${range}&limit=${PAGE_SIZE}&offset=${offset}`;
+}
+
+function clampInt(raw: string | null, fallback: number, min: number, max: number): number {
+  const value = Number(raw ?? fallback);
+  if (!Number.isFinite(value)) return fallback;
+  return Math.min(max, Math.max(min, Math.trunc(value)));
+}
+
+/**
+ * Walk one slice of one source and fill in whatever albums it reveals.
+ *
+ * Only tracks already in `plays` history get touched: a Liked Song never
+ * actually played has no row here, and inventing one would put a track in the
+ * warehouse that was never listened to.
+ */
+export async function backfillAlbums(env: Env, request: Request): Promise<Response> {
+  const url = new URL(request.url);
+  const requestedSource = url.searchParams.get('source') ?? 'saved';
+  if (!SOURCES.includes(requestedSource as AlbumSource)) {
+    return json({ error: `source must be one of ${SOURCES.join(', ')}` }, 400);
+  }
+  const source = requestedSource as AlbumSource;
+
+  const requestedRange = url.searchParams.get('range') ?? 'long_term';
+  const range = (TIME_RANGES as readonly string[]).includes(requestedRange) ? requestedRange : 'long_term';
+  const startOffset = clampInt(url.searchParams.get('offset'), 0, 0, Number.MAX_SAFE_INTEGER);
+  const pages = clampInt(url.searchParams.get('pages'), DEFAULT_PAGES, 1, MAX_PAGES);
+
+  const { token } = await readState(env.DB);
+  const accessToken = await getAccessToken(env.DB, env, token, Date.now());
+
+  const candidates = new Map<string, AlbumCandidate>();
+  let offset = startOffset;
+  let total: number | null = null;
+  let exhausted = false;
+
+  for (let page = 0; page < pages; page++) {
+    const payload = await spotifyGet(accessToken, pageUrl(source, offset, range));
+    const extracted = extractCandidates(source, payload);
+    total = extracted.total ?? total;
+
+    for (const candidate of extracted.candidates) {
+      if (!candidates.has(candidate.track_id)) candidates.set(candidate.track_id, candidate);
+    }
+
+    offset += extracted.itemCount;
+    // A short page is the end of the collection; Spotify sends no more.
+    if (extracted.itemCount < PAGE_SIZE) {
+      exhausted = true;
+      break;
+    }
+  }
+
+  // Which of these do we actually have plays for, and still lack an album on?
+  const ids = [...candidates.keys()];
+  const needing = new Set<string>();
+  for (let start = 0; start < ids.length; start += MAX_BOUND_PARAMS) {
+    const chunk = ids.slice(start, start + MAX_BOUND_PARAMS);
+    const query = await env.DB.prepare(
+      `SELECT track_id FROM tracks
+        WHERE album_id IS NULL AND track_id IN (${chunk.map(() => '?').join(', ')})`,
+    )
+      .bind(...chunk)
+      .all<{ track_id: string }>();
+    for (const row of query.results ?? []) needing.add(row.track_id);
+  }
+
+  const matched = [...needing].map((id) => candidates.get(id)!);
+
+  // Only albums we are about to reference, so the dimension stays free of rows
+  // for music that was never played.
+  const albums = new Map<string, { album_id: string; name: string; release_date: string | null; image_url: string | null }>();
+  for (const candidate of matched) {
+    const id = candidate.album.id!;
+    if (albums.has(id)) continue;
+    albums.set(id, {
+      album_id: id,
+      name: candidate.album.name ?? '',
+      release_date: candidate.album.release_date ?? null,
+      image_url: pickImageUrl(candidate.album.images),
+    });
+  }
+
+  let tracksUpdated = 0;
+  let rowsWritten = 0;
+
+  if (matched.length > 0) {
+    const statements = [
+      ...buildInserts(env.DB, 'albums', ['album_id', 'name', 'release_date', 'image_url'], [...albums.values()]),
+      ...matched.map((candidate) =>
+        env.DB
+          .prepare(
+            `UPDATE tracks
+                SET album_id    = ?,
+                    duration_ms = COALESCE(duration_ms, ?),
+                    isrc        = COALESCE(isrc, ?)
+              WHERE track_id = ? AND album_id IS NULL`,
+          )
+          .bind(candidate.album.id, candidate.duration_ms, candidate.isrc, candidate.track_id),
+      ),
+    ];
+
+    const results = await env.DB.batch(statements);
+    for (const result of results) {
+      rowsWritten += result.meta?.rows_written ?? 0;
+    }
+    tracksUpdated = matched.length;
+  }
+
+  return json({
+    source,
+    range: source === 'top' ? range : null,
+    scanned: offset - startOffset,
+    next_offset: offset,
+    total,
+    candidates: candidates.size,
+    tracks_updated: tracksUpdated,
+    albums_written: albums.size,
+    rows_written: rowsWritten,
+    done: exhausted || (total !== null && offset >= total),
+  });
+}

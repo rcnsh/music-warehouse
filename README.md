@@ -25,6 +25,7 @@ therefore costs nothing: the next run asks for exactly the same window again.
 | `GET /api/daily?from=&to=&tz=` | Plays per local calendar day. |
 | `POST /admin/poll` | Runs the same code path as the cron trigger. |
 | `POST /admin/import` | Accepts one chunk of Extended Streaming History records. |
+| `POST /admin/backfill-albums?source=&range=&offset=&pages=` | Fills album art from Top Tracks, Liked Songs or Saved Albums. `source` is `top`, `saved` or `albums`. |
 | `GET /api/now-playing` | Live proxy to Spotify's currently-playing. `{ item: null }` when idle. |
 | `GET /api/top?range=&limit=` | Live proxy to Spotify's top tracks and artists. `range` is `short_term`, `medium_term` or `long_term`. |
 | `POST /admin/alert-check?force=1` | Runs the daily alert sweep on demand. `force=1` ignores the resend window. |
@@ -138,6 +139,14 @@ entry character for character, scheme included.
 `/login` is bearer-authenticated like every other route, so it is driven with
 curl rather than opened in a browser — that keeps the admin token in a header
 instead of a URL.
+
+```bash
+set -a && . ./.dev.vars && set +a
+npm run authorize -- --url https://music-api.rcn.sh
+```
+
+That prints the consent URL (add `--open` to launch it), then polls `/health`
+until the callback lands and reports the new expiry. By hand it is:
 
 ```bash
 export WORKER_URL=https://music-api.rcn.sh
@@ -340,9 +349,21 @@ transitions are handled: a 23-hour and a 25-hour local day both bucket correctly
     time the same spelling arrives.
   - `albums` is not populated from the export at all; there is no name-keyed
     album ID worth inventing.
-- **The export has no album art or track durations.** Both come from the API,
-  so export-only tracks have `duration_ms`, `album_id` and `isrc` NULL. A track
-  later caught by a live poll is upgraded in place by the `tracks` upsert.
+- **Album art reaches most of the history, but not all of it.** The export has
+  no album ids, and the catalog endpoints keyed by id (`/v1/albums`,
+  `/v1/tracks`) are 403 in development mode. The way through is that every
+  `TrackObject` the API returns embeds its album — id, name, release date and
+  images — so `npm run backfill:albums` walks the user-scoped endpoints that
+  return tracks (Top Tracks, Liked Songs, Saved Albums) and fills album art and
+  durations in from there. See `src/albums.ts`.
+
+  That covers roughly 91% of plays. The remainder is the genuine long tail —
+  tracks played once or twice and never saved, which no user-scoped endpoint
+  mentions. They keep `album_id`, `duration_ms` and `isrc` NULL, and `/api/plays`
+  returns NULL `album_name` and `image_url` for them, so a frontend needs a
+  placeholder. A tail track caught by a live poll is upgraded in place by the
+  `tracks` upsert. Re-run the backfill occasionally: as Top Tracks and Liked
+  Songs shift, it reaches a little further each time.
 - **Listening duration is not derivable from polled data.** `played_at`'s exact
   meaning is undocumented, and analysis of Spotify's own export data shows
   consecutive streams overlapping. Never compute duration from the gap between
