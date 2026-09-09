@@ -1,0 +1,33 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "music-warehouse",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-22",
+  "observability": { "enabled": true },
+
+  // Custom domain on the rcn.sh zone. Wrangler manages the DNS record.
+  "routes": [{ "pattern": "music-api.rcn.sh", "custom_domain": true }],
+
+  // Poll cadence. 48 invocations/day against a 100,000/day free-plan budget.
+  // Tighten to "*/15 * * * *" if gaps ever appear (see README, gap check).
+  // Two of the free plan's five cron slots: ingestion every 30 minutes, and a
+  // daily sweep that pushes to ALERT_WEBHOOK_URL when something needs a human.
+  "triggers": {
+    "crons": ["*/30 * * * *", "0 9 * * *"]
+  },
+
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "music_warehouse",
+      "database_id": "cd50aaf2-62d6-47cf-a5bd-ae99a8d32556",
+      "migrations_dir": "migrations"
+    }
+  ],
+
+  "vars": {
+    // Must exactly match a redirect URI registered in the Spotify dashboard.
+    // `wrangler dev` overrides this from .dev.vars with the loopback URL.
+    "SPOTIFY_REDIRECT_URI": "https://music-api.rcn.sh/callback"
+  }
+}

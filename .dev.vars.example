@@ -1,0 +1,8 @@
+# Copy to .dev.vars for `wrangler dev`. Never commit .dev.vars.
+SPOTIFY_CLIENT_ID=
+SPOTIFY_CLIENT_SECRET=
+# openssl rand -hex 32
+ADMIN_TOKEN=
+# Read-only credential for the /api/* routes, for a frontend that should not be
+# able to poll or write. openssl rand -hex 32
+READ_TOKEN=

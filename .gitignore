@@ -1,0 +1,9 @@
+node_modules/
+.wrangler/
+.dev.vars
+dist/
+*.log
+# Spotify export data — personal, and far too large for git.
+export-data/
+fixtures/recently-played.json
+.import-state.json

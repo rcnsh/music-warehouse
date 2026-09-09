@@ -1,0 +1,60 @@
+{
+  "_note": "SYNTHETIC placeholder, hand-written to the documented response shape. Phase 1 replaces it with a real captured dump at fixtures/recently-played.json (gitignored). Tests prefer the real dump when present.",
+  "href": "https://api.spotify.com/v1/me/player/recently-played?limit=50",
+  "limit": 50,
+  "next": null,
+  "cursors": { "after": "1757340000000", "before": "1757330000000" },
+  "items": [
+    {
+      "played_at": "2026-09-08T18:20:00.123Z",
+      "context": { "uri": "spotify:playlist:37i9dQZF1DXcBWIGoYBM5M", "type": "playlist" },
+      "track": {
+        "id": "11dFghVXANMlKmJXsNCbNl",
+        "name": "Cut To The Feeling",
+        "duration_ms": 207959,
+        "external_ids": { "isrc": "USUM71703861" },
+        "album": {
+          "id": "0tGPJ0bkWOUmH7MEOR77qc",
+          "name": "Cut To The Feeling",
+          "release_date": "2017-05-26",
+          "images": [
+            { "url": "https://i.scdn.co/image/large.jpg", "width": 640 },
+            { "url": "https://i.scdn.co/image/small.jpg", "width": 64 }
+          ]
+        },
+        "artists": [{ "id": "6sFIWsNpZYqfjUpaCgueju", "name": "Carly Rae Jepsen" }]
+      }
+    },
+    {
+      "played_at": "2026-09-08T18:10:00.000Z",
+      "context": null,
+      "track": {
+        "id": "3n3Ppam7vgaVa1iaRUc9Lp",
+        "name": "Mr. Brightside",
+        "duration_ms": 222586,
+        "external_ids": { "isrc": "USIR20400274" },
+        "album": {
+          "id": "4piJq7R3gjUOxnYs6lDCTg",
+          "name": "Hot Fuss",
+          "release_date": "2004-06-07",
+          "images": [{ "url": "https://i.scdn.co/image/hotfuss.jpg", "width": 640 }]
+        },
+        "artists": [
+          { "id": "0C0XlULifJtAgn6ZNCW2eu", "name": "The Killers" },
+          { "id": "1dfeR4HaWDbWqFHLkxsg1d", "name": "Guest Artist" }
+        ]
+      }
+    },
+    {
+      "played_at": "2026-09-08T18:05:00.000Z",
+      "context": null,
+      "track": {
+        "id": null,
+        "name": "some-local-file.mp3",
+        "duration_ms": 180000,
+        "album": { "id": null, "name": "", "release_date": null, "images": [] },
+        "artists": [{ "id": null, "name": "Unknown" }]
+      }
+    }
+  ]
+}

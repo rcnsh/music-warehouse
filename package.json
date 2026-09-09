@@ -1,0 +1,29 @@
+{
+  "name": "music-warehouse",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "migrate:local": "wrangler d1 migrations apply music_warehouse --local",
+    "migrate:remote": "wrangler d1 migrations apply music_warehouse --remote",
+    "import": "node scripts/import-export.mjs"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.22.0",
+    "@cloudflare/workers-types": "^5.20260908.1",
+    "@types/node": "^26.5.0",
+    "typescript": "^5.9.2",
+    "vitest": "^4.1.0",
+    "wrangler": "^4.130.0"
+  },
+  "allowScripts": {
+    "esbuild@0.28.1": true,
+    "workerd@1.20260815.1": true,
+    "workerd@1.20260908.1": true
+  }
+}
