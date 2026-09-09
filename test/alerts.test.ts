@@ -138,6 +138,36 @@ describe('runAlertCheck', () => {
     expect(body.severity).toBe('critical');
   });
 
+  it('leads the body with ALERT_MENTION so the receiver pings a human', async () => {
+    await env.DB.prepare('UPDATE oauth_token SET authorized_at_ms = ?, needs_reauth = 1 WHERE id = 1')
+      .bind(Date.now() - 10 * DAY)
+      .run();
+    const bodies = stubWebhook();
+
+    await runAlertCheck(
+      testEnv({ ALERT_WEBHOOK_URL: 'https://hook.test/x', ALERT_MENTION: '<@123>' }),
+    );
+
+    const body = bodies[0]!;
+    expect(String(body.content).startsWith('<@123> ')).toBe(true);
+    // Every key carries the same text, whichever one the receiver reads.
+    expect(body.text).toBe(body.content);
+    expect(body.message).toBe(body.content);
+    // The title field stays clean, for receivers that render it separately.
+    expect(String(body.title)).not.toContain('<@123>');
+  });
+
+  it('omits the prefix entirely when no mention is configured', async () => {
+    await env.DB.prepare('UPDATE oauth_token SET authorized_at_ms = ?, needs_reauth = 1 WHERE id = 1')
+      .bind(Date.now() - 10 * DAY)
+      .run();
+    const bodies = stubWebhook();
+
+    await runAlertCheck(testEnv({ ALERT_WEBHOOK_URL: 'https://hook.test/x', ALERT_MENTION: undefined }));
+
+    expect(String(bodies[0]!.content).startsWith('🔴')).toBe(true);
+  });
+
   it('suppresses a repeat inside the resend window, then sends again after it', async () => {
     await env.DB.prepare('UPDATE oauth_token SET authorized_at_ms = ?, needs_reauth = 1 WHERE id = 1')
       .bind(Date.now() - 10 * DAY)

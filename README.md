@@ -189,6 +189,12 @@ Any URL that accepts a JSON POST works. The body repeats the same text under
 
 Leave it unset and conditions are logged but never pushed.
 
+`ALERT_MENTION` in `wrangler.jsonc` leads every alert body with whatever syntax
+the receiver uses to notify a human — a Discord `<@id>`, a Slack `<@U…>`, an
+ntfy tag. Discord parses mentions in `content` by default, so no
+`allowed_mentions` field is needed. It applies to every condition rather than
+only the critical ones, because every condition here needs manual intervention.
+
 ### What fires
 
 | Key | Severity | Condition |

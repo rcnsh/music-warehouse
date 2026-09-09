@@ -111,9 +111,13 @@ export function evaluate(
  * The body carries the same text under several keys so one URL works with
  * Discord (`content`), Slack (`text`) and generic receivers (`message`),
  * alongside structured fields for anything that parses JSON.
+ *
+ * ALERT_MENTION, when set, leads the text. Discord parses mentions in `content`
+ * by default, so a `<@id>` there pings without any allowed_mentions field.
  */
-async function send(webhookUrl: string, alert: Alert): Promise<void> {
-  const text = `${alert.severity === 'critical' ? '🔴' : '🟠'} ${alert.title}\n${alert.message}`;
+async function send(webhookUrl: string, alert: Alert, mention?: string): Promise<void> {
+  const prefix = mention ? `${mention} ` : '';
+  const text = `${prefix}${alert.severity === 'critical' ? '🔴' : '🟠'} ${alert.title}\n${alert.message}`;
 
   const response = await fetch(webhookUrl, {
     method: 'POST',
@@ -198,7 +202,7 @@ export async function runAlertCheck(
     }
 
     try {
-      await send(env.ALERT_WEBHOOK_URL, alert);
+      await send(env.ALERT_WEBHOOK_URL, alert, env.ALERT_MENTION);
       result.sent.push(alert.key);
       writes.push(
         env.DB

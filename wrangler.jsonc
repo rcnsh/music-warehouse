@@ -28,6 +28,10 @@
   "vars": {
     // Must exactly match a redirect URI registered in the Spotify dashboard.
     // `wrangler dev` overrides this from .dev.vars with the loopback URL.
-    "SPOTIFY_REDIRECT_URI": "https://music-api.rcn.sh/callback"
+    "SPOTIFY_REDIRECT_URI": "https://music-api.rcn.sh/callback",
+
+    // Leads every alert body, so the webhook pings rather than just posting.
+    // Discord user id; not a credential.
+    "ALERT_MENTION": "<@442005563451244544>"
   }
 }

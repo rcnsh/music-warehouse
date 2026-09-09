@@ -15,6 +15,13 @@ export interface Env {
    * unset means conditions are logged but never pushed anywhere.
    */
   ALERT_WEBHOOK_URL?: string;
+  /**
+   * Optional prefix for every alert body, for whatever syntax the receiver
+   * uses to notify a human — a Discord `<@id>`, a Slack `<@U…>`, an ntfy tag.
+   * Every condition alerted on needs manual intervention, so it applies to all
+   * of them rather than only the critical ones.
+   */
+  ALERT_MENTION?: string;
 }
 
 /**
