@@ -1,5 +1,5 @@
 import { BadRequest, dailyCounts, json, recentPlays, topArtists } from './api';
-import { backfillAlbums } from './albums';
+import { backfillAlbums, backfillFromCatalog } from './albums';
 import { health } from './health';
 import { importChunk } from './import';
 import { poll } from './ingest';
@@ -156,6 +156,7 @@ const worker = {
               '/admin/alert-check',
               '/admin/import',
               '/admin/backfill-albums',
+              '/admin/backfill-catalog',
               '/admin/raw',
             ],
           });
@@ -181,6 +182,8 @@ const worker = {
           return await importChunk(env, request);
         case 'POST /admin/backfill-albums':
           return await backfillAlbums(env, request);
+        case 'POST /admin/backfill-catalog':
+          return await backfillFromCatalog(env, request);
         case 'GET /admin/raw':
           return await rawRecentlyPlayed(env, url);
         default:

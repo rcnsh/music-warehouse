@@ -26,6 +26,7 @@ therefore costs nothing: the next run asks for exactly the same window again.
 | `POST /admin/poll` | Runs the same code path as the cron trigger. |
 | `POST /admin/import` | Accepts one chunk of Extended Streaming History records. |
 | `POST /admin/backfill-albums?source=&range=&offset=&pages=` | Fills album art from Top Tracks, Liked Songs or Saved Albums. `source` is `top`, `saved` or `albums`. |
+| `POST /admin/backfill-catalog?after=&limit=&spacingMs=` | Fills album art one track at a time via Get Track, for the tail no user-scoped endpoint reaches. |
 | `GET /api/now-playing` | Live proxy to Spotify's currently-playing. `{ item: null }` when idle. |
 | `GET /api/top?range=&limit=` | Live proxy to Spotify's top tracks and artists. `range` is `short_term`, `medium_term` or `long_term`. |
 | `POST /admin/alert-check?force=1` | Runs the daily alert sweep on demand. `force=1` ignores the resend window. |
@@ -357,13 +358,21 @@ transitions are handled: a 23-hour and a 25-hour local day both bucket correctly
   return tracks (Top Tracks, Liked Songs, Saved Albums) and fills album art and
   durations in from there. See `src/albums.ts`.
 
-  That covers roughly 91% of plays. The remainder is the genuine long tail —
-  tracks played once or twice and never saved, which no user-scoped endpoint
-  mentions. They keep `album_id`, `duration_ms` and `isrc` NULL, and `/api/plays`
-  returns NULL `album_name` and `image_url` for them, so a frontend needs a
-  placeholder. A tail track caught by a live poll is upgraded in place by the
-  `tracks` upsert. Re-run the backfill occasionally: as Top Tracks and Liked
-  Songs shift, it reaches a little further each time.
+  That covers roughly 91% of plays. The tail beyond it — tracks played once or
+  twice and never saved — is reachable too, but only one track at a time:
+  `GET /v1/tracks/{id}` is the single catalog endpoint still open in
+  development mode, while the batch forms it would be natural to use
+  (`/v1/tracks?ids=`, `/v1/albums?ids=`) both return 403. `npm run
+  backfill:catalog` walks it.
+
+  **Pace that walk.** One request per track means it sets its own request rate,
+  and Spotify answers a breached rolling window with a `Retry-After` measured
+  in tens of minutes — 3875 seconds, once. The defaults (25 per batch, 350ms
+  between requests, 2s between batches) hold it near 2 requests/second. The
+  script stops on a rate limit and reports when to resume rather than retrying
+  into it; progress is a saved cursor, so re-running continues where it left
+  off. Ingestion is unaffected either way: it runs on the user token against
+  `/me/*`, and a 429 there never advances the cursor.
 - **Listening duration is not derivable from polled data.** `played_at`'s exact
   meaning is undocumented, and analysis of Spotify's own export data shows
   consecutive streams overlapping. Never compute duration from the gap between

@@ -13,6 +13,7 @@
     "migrate:remote": "wrangler d1 migrations apply music_warehouse --remote",
     "import": "node scripts/import-export.mjs",
     "backfill:albums": "node scripts/backfill-albums.mjs",
+    "backfill:catalog": "node scripts/backfill-catalog.mjs",
     "authorize": "node scripts/authorize.mjs"
   },
   "devDependencies": {

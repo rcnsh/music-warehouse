@@ -135,6 +135,19 @@ export function refreshAccessToken(env: Env, refreshToken: string): Promise<Toke
   );
 }
 
+/**
+ * An app-only token, via the client credentials grant.
+ *
+ * Get Track (`/v1/tracks/{id}`) is reachable in development mode where the
+ * batch forms (`/v1/tracks?ids=`, `/v1/albums?ids=`) return 403, and it needs
+ * no user context at all. Minting an app token for it keeps the catalog
+ * backfill off the user grant entirely: no extra scope, and a failure there
+ * cannot disturb ingestion.
+ */
+export function appAccessToken(env: Env): Promise<TokenResponse> {
+  return postToken(env, new URLSearchParams({ grant_type: 'client_credentials' }));
+}
+
 export function authorizeUrl(env: Env, state: string): string {
   const params = new URLSearchParams({
     client_id: env.SPOTIFY_CLIENT_ID,

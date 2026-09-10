@@ -65,8 +65,19 @@ async function callOnce(params) {
   const endpoint = `${args.url.replace(/\/$/, '')}/admin/backfill-albums?${query}`;
 
   for (let attempt = 0; attempt <= args.maxRetries; attempt++) {
-    const response = await fetch(endpoint, { method: 'POST', headers: { Authorization: `Bearer ${adminToken}` } });
-    const text = await response.text();
+    let response;
+    let text;
+    try {
+      response = await fetch(endpoint, { method: 'POST', headers: { Authorization: `Bearer ${adminToken}` } });
+      text = await response.text();
+    } catch (cause) {
+      // A dropped connection or DNS blip is transient in exactly the way a 5xx
+      // is. Left uncaught it aborts a walk that is otherwise resumable.
+      const waitSeconds = 2 ** attempt;
+      console.log(`\n  ${cause.code ?? cause.name} — waiting ${waitSeconds}s (attempt ${attempt + 1}/${args.maxRetries})`);
+      await sleep(waitSeconds * 1000);
+      continue;
+    }
     if (response.ok) return JSON.parse(text);
 
     if (response.status === 429 || response.status >= 500) {

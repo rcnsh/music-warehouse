@@ -1,7 +1,7 @@
 import { json } from './api';
 import { MAX_BOUND_PARAMS, buildInserts } from './db';
 import { pickImageUrl } from './normalize';
-import { spotifyGet } from './spotify';
+import { appAccessToken, spotifyGet } from './spotify';
 import { getAccessToken } from './tokens';
 import { readState } from './db';
 import type { Env, SpotifyAlbum, SpotifyTrack } from './types';
@@ -240,5 +240,135 @@ export async function backfillAlbums(env: Env, request: Request): Promise<Respon
     albums_written: albums.size,
     rows_written: rowsWritten,
     done: exhausted || (total !== null && offset >= total),
+  });
+}
+
+/**
+ * Fill album art straight from the catalog, one track at a time.
+ *
+ * `GET /v1/tracks/{id}` is the one catalog endpoint still open to an app in
+ * development mode — the batch forms it would be natural to reach for
+ * (`/v1/tracks?ids=`, `/v1/albums?ids=`) both return 403. One request per
+ * track is the cost of that, roughly 120ms each, which is cheap enough for the
+ * few thousand tracks the user-scoped sources cannot reach.
+ *
+ * Paged by a cursor over `track_id` rather than by re-querying "still missing
+ * an album": tracks Spotify 404s stay missing forever, and a not-yet-done
+ * predicate would hand them back on every call and never terminate.
+ */
+export async function backfillFromCatalog(env: Env, request: Request): Promise<Response> {
+  const url = new URL(request.url);
+  const cursor = url.searchParams.get('after') ?? '';
+  const limit = clampInt(url.searchParams.get('limit'), 25, 1, 200);
+  // One request per track means the walk sets its own request rate, and a
+  // 25-track batch fired back-to-back is enough to trip Spotify's rolling
+  // window. Space them out rather than relying on the caller to throttle.
+  const spacingMs = clampInt(url.searchParams.get('spacingMs'), 350, 0, 2000);
+
+  const query = await env.DB.prepare(
+    `SELECT track_id FROM tracks
+      WHERE track_id > ? AND album_id IS NULL
+      ORDER BY track_id LIMIT ?`,
+  )
+    .bind(cursor, limit)
+    .all<{ track_id: string }>();
+
+  const pending = (query.results ?? []).map((row) => row.track_id);
+  if (pending.length === 0) {
+    return json({ done: true, examined: 0, tracks_updated: 0, missing: 0, next_cursor: cursor, rows_written: 0 });
+  }
+
+  const { access_token: appToken } = await appAccessToken(env);
+
+  const candidates: AlbumCandidate[] = [];
+  let missing = 0;
+  let examined = 0;
+  let rateLimited = false;
+  let retryAfterSeconds: number | null = null;
+
+  for (const trackId of pending) {
+    if (examined > 0 && spacingMs > 0) await new Promise((resolve) => setTimeout(resolve, spacingMs));
+
+    let response: Response;
+    try {
+      response = await fetch(`https://api.spotify.com/v1/tracks/${trackId}`, {
+        headers: { Authorization: `Bearer ${appToken}` },
+      });
+    } catch {
+      // A transport failure mid-walk: keep what we have and let the cursor
+      // stop here, rather than losing the whole batch.
+      break;
+    }
+
+    // Stop on a rate limit but still write what this call already gathered.
+    // Retry-After is the only thing that says how long the wait actually is —
+    // Spotify has returned an hour here — so it has to reach the caller rather
+    // than leaving it to guess with a blind exponential backoff.
+    if (response.status === 429) {
+      rateLimited = true;
+      const header = response.headers.get('Retry-After');
+      retryAfterSeconds =
+        header !== null && header.trim() !== '' && Number.isFinite(Number(header)) ? Number(header) : null;
+      break;
+    }
+    examined++;
+    // 404 is a track withdrawn from the catalog. Nothing to fetch, ever.
+    if (response.status === 404) {
+      missing++;
+      continue;
+    }
+    if (!response.ok) {
+      missing++;
+      continue;
+    }
+
+    const track = (await response.json()) as SpotifyTrack;
+    const candidate = candidateFrom(track, track.album);
+    if (candidate) candidates.push(candidate);
+    else missing++;
+  }
+
+  const albums = new Map<string, { album_id: string; name: string; release_date: string | null; image_url: string | null }>();
+  for (const candidate of candidates) {
+    const id = candidate.album.id!;
+    if (albums.has(id)) continue;
+    albums.set(id, {
+      album_id: id,
+      name: candidate.album.name ?? '',
+      release_date: candidate.album.release_date ?? null,
+      image_url: pickImageUrl(candidate.album.images),
+    });
+  }
+
+  let rowsWritten = 0;
+  if (candidates.length > 0) {
+    const results = await env.DB.batch([
+      ...buildInserts(env.DB, 'albums', ['album_id', 'name', 'release_date', 'image_url'], [...albums.values()]),
+      ...candidates.map((candidate) =>
+        env.DB
+          .prepare(
+            `UPDATE tracks
+                SET album_id    = ?,
+                    duration_ms = COALESCE(duration_ms, ?),
+                    isrc        = COALESCE(isrc, ?)
+              WHERE track_id = ? AND album_id IS NULL`,
+          )
+          .bind(candidate.album.id, candidate.duration_ms, candidate.isrc, candidate.track_id),
+      ),
+    ]);
+    for (const result of results) rowsWritten += result.meta?.rows_written ?? 0;
+  }
+
+  return json({
+    // Advances past everything examined, resolved or not, so the walk ends.
+    next_cursor: examined > 0 ? pending[examined - 1] : cursor,
+    examined,
+    tracks_updated: candidates.length,
+    missing,
+    albums_written: albums.size,
+    rows_written: rowsWritten,
+    rate_limited: rateLimited,
+    retry_after_seconds: retryAfterSeconds,
+    done: !rateLimited && pending.length < limit && examined === pending.length,
   });
 }
