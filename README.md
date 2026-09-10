@@ -94,27 +94,19 @@ they are done.**
 
 ## Deployment
 
-Already deployed and configured:
+### Setting it up from scratch
 
-- **Worker**: `music-warehouse`, on the account `31e51704ff7169c03d7014c3a1e5f110`
-- **URL**: <https://music-api.rcn.sh> (custom domain on the `rcn.sh` zone;
-  Wrangler manages the DNS record)
-- **Database**: D1 `music_warehouse`, id `cd50aaf2-62d6-47cf-a5bd-ae99a8d32556`,
-  region WEUR, migration `0001_init.sql` applied
-- **Cron**: `*/30 * * * *` (ingest) and `0 9 * * *` (alert sweep)
-- **Secrets set**: `SPOTIFY_CLIENT_ID`, `SPOTIFY_CLIENT_SECRET`, `ADMIN_TOKEN`,
-  `READ_TOKEN`. `ALERT_WEBHOOK_URL` is optional and currently unset.
+Three values in [`wrangler.jsonc`](wrangler.jsonc) belong to one specific
+deployment and must be replaced first. They are marked `[1]`, `[2]` and `[3]`
+in that file:
 
-`ADMIN_TOKEN` and `READ_TOKEN` are also in `.dev.vars` (gitignored, mode 600) —
-that is the only local copy, so keep it.
+1. **`routes`** — the custom domain. Delete the block entirely to deploy to
+   `<name>.<subdomain>.workers.dev` instead; nothing here needs a custom domain.
+2. **`database_id`** — filled in by the second command below.
+3. **`SPOTIFY_REDIRECT_URI`** — must match the Spotify dashboard character for
+   character, scheme included.
 
-To redeploy after a change:
-
-```bash
-npm test && npx wrangler deploy
-```
-
-### Setting it up again from scratch
+Then:
 
 ```bash
 npm install
@@ -125,13 +117,43 @@ npx wrangler deploy
 npx wrangler secret put SPOTIFY_CLIENT_ID
 npx wrangler secret put SPOTIFY_CLIENT_SECRET
 npx wrangler secret put ADMIN_TOKEN          # openssl rand -hex 32
-npx wrangler secret put READ_TOKEN           # openssl rand -hex 32
+npx wrangler secret put READ_TOKEN           # optional, openssl rand -hex 32
 npx wrangler secret put ALERT_WEBHOOK_URL    # optional, see Alerting
+npx wrangler secret put ALERT_MENTION        # optional, see Alerting
 ```
 
-`SPOTIFY_REDIRECT_URI` lives in `wrangler.jsonc` (production) and is overridden
-by `.dev.vars` for `wrangler dev`. Either value must match the Spotify dashboard
-entry character for character, scheme included.
+`npx wrangler secret list` shows what is set. For local work, copy
+`.dev.vars.example` to `.dev.vars` — it is gitignored, and worth keeping at
+mode 600, since it is the only copy of those tokens outside Cloudflare.
+
+Nothing ingests until a human approves the Spotify consent screen: finish at
+[Authorizing](#authorizing).
+
+### Before exposing the URL publicly
+
+Every route but `/callback` is bearer-authenticated, so the data is not
+readable without a token. What remains is a budget exposure: on the Workers
+free plan, unauthenticated junk still counts against the 100,000 requests/day
+that the ingestion cron shares, and a stalled cron loses plays permanently.
+
+A Cloudflare WAF **custom rule** turns that away at the edge, before the Worker
+is invoked — and it uses a different quota from the single rate limiting rule
+the free plan allows:
+
+```txt
+(http.host eq "your-hostname.example" and http.request.uri.path ne "/callback" and not len(http.request.headers["authorization"][0]) > 0)
+```
+
+Action: _Block_. Every legitimate caller sends `Authorization: Bearer …`, so
+this is the same check the Worker already makes, moved one hop earlier.
+`/callback` stays open for Spotify's browser redirect, guarded by its
+single-use `state` value.
+
+### Redeploying
+
+```bash
+npm test && npx wrangler deploy
+```
 
 ---
 
@@ -199,11 +221,18 @@ Any URL that accepts a JSON POST works. The body repeats the same text under
 
 Leave it unset and conditions are logged but never pushed.
 
-`ALERT_MENTION` in `wrangler.jsonc` leads every alert body with whatever syntax
-the receiver uses to notify a human — a Discord `<@id>`, a Slack `<@U…>`, an
-ntfy tag. Discord parses mentions in `content` by default, so no
-`allowed_mentions` field is needed. It applies to every condition rather than
-only the critical ones, because every condition here needs manual intervention.
+`ALERT_MENTION` leads every alert body with whatever syntax the receiver uses
+to notify a human — a Discord `<@id>`, a Slack `<@U…>`, an ntfy tag. It is a
+secret rather than a var in `wrangler.jsonc`, because it names a specific
+person on a specific service:
+
+```bash
+npx wrangler secret put ALERT_MENTION
+```
+
+Discord parses mentions in `content` by default, so no `allowed_mentions`
+field is needed. It applies to every condition rather than only the critical
+ones, because every condition here needs manual intervention.
 
 ### What fires
 
@@ -285,13 +314,19 @@ not duplicated.
 npm test
 ```
 
-55 tests run against a real local D1 instance via `@cloudflare/vitest-pool-workers`,
+102 tests run against a real local D1 instance via `@cloudflare/vitest-pool-workers`,
 covering idempotent ingestion, cursor behaviour on failure, the token lifecycle,
 rate-limit handling, timezone bucketing, import de-duplication, and route auth.
 
 ```bash
 npm run typecheck
 ```
+
+`npm audit` reports advisories against `sharp`, pulled in transitively by
+`miniflare` for local image transforms. It is a devDependency of the test
+runner and never reaches the deployed Worker, whose bundle is `src/` plus
+nothing. Upgrading past it means a breaking `@cloudflare/vitest-pool-workers`
+major.
 
 ---
 
@@ -416,6 +451,10 @@ Captured 2026-09-08 from the real account and recorded in
 Still open: **A4** (whether plays under ~30 seconds are omitted) and **A7**
 (whether a 30-minute cadence ever drops plays) both need the export to arrive
 before they can be measured against real overlapping days.
+
+## Licence
+
+[MIT](LICENSE).
 
 ## Terms
 

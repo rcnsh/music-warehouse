@@ -1,8 +1,29 @@
 # Copy to .dev.vars for `wrangler dev`. Never commit .dev.vars.
+#
+# In production these are set with `npx wrangler secret put <NAME>` rather than
+# from this file. See README, "Setting it up from scratch".
+
 SPOTIFY_CLIENT_ID=
 SPOTIFY_CLIENT_SECRET=
+
 # openssl rand -hex 32
 ADMIN_TOKEN=
+
 # Read-only credential for the /api/* routes, for a frontend that should not be
-# able to poll or write. openssl rand -hex 32
+# able to poll or write. Optional — unset means /api/* is admin-only.
+# openssl rand -hex 32
 READ_TOKEN=
+
+# Optional. Where the daily alert cron POSTs when something needs a human —
+# a Discord or Slack webhook URL, or https://ntfy.sh/<your-topic>.
+# Unset means conditions are logged but never pushed. See README, "Alerting".
+ALERT_WEBHOOK_URL=
+
+# Optional. Leads every alert body so the receiver pings a human rather than
+# just posting: a Discord `<@id>`, a Slack `<@U…>`, an ntfy tag.
+ALERT_MENTION=
+
+# Overrides the production value in wrangler.jsonc for local dev. Spotify
+# permits plain HTTP only on the loopback address, and this must match a
+# redirect URI registered in the Spotify dashboard character for character.
+SPOTIFY_REDIRECT_URI=http://127.0.0.1:8787/callback
