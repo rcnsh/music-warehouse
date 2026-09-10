@@ -9,13 +9,17 @@
  *   ADMIN_TOKEN=... npm run backfill:catalog -- --url https://music-api.rcn.sh
  *
  * One Spotify request per track, so it is slower than the user-scoped sources
- * — but it needs no user scope at all, and reaches everything. The defaults
- * hold it near 2 requests/second: fast enough to finish the tail in under an
- * hour, slow enough not to trip Spotify's rolling window, which answers a
- * breach with a Retry-After measured in tens of minutes.
+ * — but it needs no user scope at all, and reaches everything it is allowed to.
  *
- * Progress is a cursor over track_id in .catalog-state.json; safe to interrupt
- * and safe to re-run.
+ * Expect roughly 600 tracks per run. Measured over two runs, that ceiling did
+ * not move when the rate dropped from ~8 requests/second to ~2, and the second
+ * 429 carried Retry-After: 86088 — 24 hours. That reads as a daily quota on
+ * catalog endpoints for a development-mode app, not a rolling window, so
+ * running faster gains nothing and running slower costs time for free.
+ *
+ * The script stops on a 429 and prints when the next window opens. Progress is
+ * a cursor over track_id in .catalog-state.json; safe to interrupt, safe to
+ * re-run, and finishing a large tail means one run per day.
  */
 import { readFile, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';

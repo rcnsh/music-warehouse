@@ -365,14 +365,23 @@ transitions are handled: a 23-hour and a 25-hour local day both bucket correctly
   (`/v1/tracks?ids=`, `/v1/albums?ids=`) both return 403. `npm run
   backfill:catalog` walks it.
 
-  **Pace that walk.** One request per track means it sets its own request rate,
-  and Spotify answers a breached rolling window with a `Retry-After` measured
-  in tens of minutes — 3875 seconds, once. The defaults (25 per batch, 350ms
-  between requests, 2s between batches) hold it near 2 requests/second. The
-  script stops on a rate limit and reports when to resume rather than retrying
-  into it; progress is a saved cursor, so re-running continues where it left
-  off. Ingestion is unaffected either way: it runs on the user token against
-  `/me/*`, and a 429 there never advances the cursor.
+  **Expect ~600 tracks per run, and do not try to go faster.** Measured over
+  two runs, the walk stopped at 566 and 599 tracks; dropping the rate from ~8
+  requests/second to ~2 bought 33 extra tracks. The first 429 carried
+  `Retry-After: 3875` (about an hour), the second `86088` (about 24 hours).
+  That reads as a daily quota on catalog endpoints for a development-mode app
+  rather than a rolling window — so pacing is politeness, not a workaround, and
+  a large tail means one run per day.
+
+  The script stops on a 429 and prints when the next window opens, rather than
+  retrying into it; progress is a saved cursor, so re-running continues where
+  it left off. Ingestion is unaffected throughout: it runs on the user token
+  against `/me/*`, which is metered separately, and a 429 there never advances
+  the cursor.
+
+  Whether finishing the tail is worth it is a judgement call. At 94.7% of plays
+  covered, the remainder averages 2.4 plays per track — and closing it means
+  hitting the catalog quota ceiling on consecutive days.
 - **Listening duration is not derivable from polled data.** `played_at`'s exact
   meaning is undocumented, and analysis of Spotify's own export data shows
   consecutive streams overlapping. Never compute duration from the gap between

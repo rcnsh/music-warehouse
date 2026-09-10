@@ -260,9 +260,12 @@ export async function backfillFromCatalog(env: Env, request: Request): Promise<R
   const url = new URL(request.url);
   const cursor = url.searchParams.get('after') ?? '';
   const limit = clampInt(url.searchParams.get('limit'), 25, 1, 200);
-  // One request per track means the walk sets its own request rate, and a
-  // 25-track batch fired back-to-back is enough to trip Spotify's rolling
-  // window. Space them out rather than relying on the caller to throttle.
+  // Spacing is politeness, not a workaround: measured across two runs, a
+  // development-mode app gets ~600 catalog requests before a 429, whether they
+  // are fired at 8/s or at 2/s. What changes is the penalty — the second
+  // breach returned Retry-After: 86088, almost exactly 24 hours — so this
+  // looks like a daily quota rather than a rolling window. Do not raise the
+  // rate expecting to finish sooner; there is nothing to outrun.
   const spacingMs = clampInt(url.searchParams.get('spacingMs'), 350, 0, 2000);
 
   const query = await env.DB.prepare(
