@@ -152,6 +152,16 @@ describe('streaks', () => {
     expect(set.active_share).toBeCloseTo(4 / 10);
   });
 
+  it('never calls a past year\'s streak running, even one that reaches 31 December', () => {
+    const list: Array<[string, number]> = [];
+    for (let d = 20; d <= 31; d++) list.push([`2024-12-${d}`, 1]);
+    const set = streaksFrom(days(list), 1, '2024-12-31', { live: false, firstDay: '2024-01-01' });
+
+    expect(set.current_weeks).toBe(0);
+    expect(set.longest).toEqual({ days: 12, weeks: 1, from: '2024-12', to: '2024-12', running: false });
+    expect(set.active_share).toBeCloseTo(12 / 366);
+  });
+
   it('breaks a streak on a day below the threshold', () => {
     const set = streaksFrom(
       days([
@@ -231,6 +241,21 @@ describe('top albums', () => {
       expect.objectContaining({ name: 'Album record', artist: 'Band', plays: 12, songs: 4 }),
     ]);
     expect(body.albums[0]!.from).toMatch(/^\d{4}-\d{2}$/);
+  });
+
+  it('gives the same list for each calendar year', async () => {
+    const year = (y: number) => Date.UTC(y, 5, 1);
+    const album = (y: number, plays: number) =>
+      ['a', 'b', 'c', 'd'].flatMap((id, i) => session(`${y}${id}`, year(y) + i * DAY, plays, { album: `lp${y}`, artist: 'Band' }));
+    await seed([...album(2022, 2), ...album(2023, 5)]);
+
+    const body = (await (await stat('albums')).json()) as {
+      years: Array<{ year: string; partial: boolean; albums: Array<{ name: string; plays: number }> }>;
+    };
+    expect(body.years.map((y) => [y.year, y.partial, y.albums.map((a) => [a.name, a.plays])])).toEqual([
+      ['2022', false, [['Album lp2022', 8]]],
+      ['2023', false, [['Album lp2023', 20]]],
+    ]);
   });
 });
 

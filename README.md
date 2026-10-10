@@ -87,10 +87,10 @@ daily counts are only for songs already on repeat.
 | Route | What it holds | Fresh for | D1 rows read per compute |
 |---|---|---|---|
 | `on-repeat` | Songs with 5+ plays on 3+ days in the last 14, at least twice their usual rate; albums with 4+ such songs | 3 h | ~47k |
-| `rhythm` | Daily-listening streaks (1, 10, 25 plays a day) and plays by local hour, per era | 6 h | ~190k |
+| `rhythm` | Daily-listening streaks (1, 10, 25 plays a day) and plays by local hour, per era, all time and per year | 6 h | ~190k |
 | `top-over-time` | Top artists and songs per quarter and year, and the seven biggest artists' share per quarter | 24 h | ~395k |
 | `eras` | Artist drift between the Newcastle and Singapore eras, against the normal churn between windows of the same length | 24 h | ~315k |
-| `albums` | The ten most-played albums with at least four different songs played, so a single on loop doesn't count | 24 h | ~222k |
+| `albums` | The ten most-played albums with at least four different songs played, so a single on loop doesn't count, all time and per year | 24 h | ~270k |
 
 **Caching.** Each stat is held in `stats_snapshots` (migration 0004) and in
 the Cache API for five minutes. Only a request that wins a claim computes:
@@ -376,7 +376,7 @@ not duplicated.
 npm test
 ```
 
-128 tests run against a real local D1 instance via `@cloudflare/vitest-pool-workers`,
+130 tests run against a real local D1 instance via `@cloudflare/vitest-pool-workers`,
 covering idempotent ingestion, cursor behaviour on failure, the token lifecycle,
 rate-limit handling, timezone bucketing, import de-duplication, route auth, and
 the stats routes (era local time against `Intl`, streaks, on-repeat rules,

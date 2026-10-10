@@ -27,7 +27,7 @@ const STATS = {
   rhythm: { freshForSeconds: 6 * 60 * 60, compute: computeRhythm }, // ~190k rows
   'top-over-time': { freshForSeconds: 24 * 60 * 60, compute: computeTopOverTime }, // ~395k rows
   eras: { freshForSeconds: 24 * 60 * 60, compute: computeDrift }, // ~315k rows
-  albums: { freshForSeconds: 24 * 60 * 60, compute: computeTopAlbums }, // ~222k rows
+  albums: { freshForSeconds: 24 * 60 * 60, compute: computeTopAlbums }, // ~270k rows
 } as const;
 
 export type StatName = keyof typeof STATS;

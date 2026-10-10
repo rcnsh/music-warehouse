@@ -13,7 +13,11 @@ import { localDayKey } from '../tz';
  *   its first day against the cut-off.
  * - An era's hour profile waits for HOURS_MIN_DAYS and its weekday × hour
  *   grid for GRID_MIN_DAYS. Before then each figure describes particular
- *   nights rather than a routine.
+ *   nights rather than a routine. The same floors apply to each era's share
+ *   of each calendar year.
+ *
+ * Everything is also broken down by local calendar year, so the page can
+ * switch between years without another request.
  */
 
 const THRESHOLDS = [1, 10, 25] as const;
@@ -53,12 +57,23 @@ export interface EraRhythm {
   grid_available_from: string | null;
 }
 
+export interface RhythmYear {
+  year: string;
+  /** The current year, so far. */
+  partial: boolean;
+  /** Runs clipped to the year; only the current year can have one still running. */
+  streaks: StreakSet[];
+  /** Only the eras that cover part of the year. */
+  eras: EraRhythm[];
+}
+
 export interface Rhythm {
   /** The data runs up to (not including) this instant: local midnight starting this week. */
   as_of: string;
   range: { from: string; to: string };
   streaks: StreakSet[];
   eras: EraRhythm[];
+  years: RhythmYear[];
 }
 
 const round = (value: number, places = 3) => Math.round(value * 10 ** places) / 10 ** places;
@@ -68,7 +83,12 @@ const dayNumber = (day: string) => Date.parse(`${day}T00:00:00Z`) / DAY_MS;
  * Runs of consecutive local days whose play count meets the threshold.
  * `lastDay` is the final day the series covers; a run ending on it is running.
  */
-export function streaksFrom(days: Array<{ day: string; plays: number }>, threshold: number, lastDay: string): StreakSet {
+export function streaksFrom(
+  days: Array<{ day: string; plays: number }>,
+  threshold: number,
+  lastDay: string,
+  { live = true, firstDay }: { live?: boolean; firstDay?: string } = {},
+): StreakSet {
   const runs: Array<{ start: string; end: string; days: number }> = [];
   let active = 0;
   let previous: number | null = null;
@@ -87,7 +107,7 @@ export function streaksFrom(days: Array<{ day: string; plays: number }>, thresho
   }
 
   const toStreak = (run: (typeof runs)[number]): Streak => {
-    const running = run.end === lastDay;
+    const running = live && run.end === lastDay;
     return {
       days: running ? null : run.days,
       weeks: Math.floor(run.days / 7),
@@ -99,12 +119,12 @@ export function streaksFrom(days: Array<{ day: string; plays: number }>, thresho
 
   const ranked = [...runs].sort((a, b) => b.days - a.days || b.start.localeCompare(a.start));
   const latest = runs[runs.length - 1];
-  const first = days[0]?.day ?? lastDay;
+  const first = firstDay ?? days[0]?.day ?? lastDay;
   const span = dayNumber(lastDay) - dayNumber(first) + 1;
 
   return {
     threshold,
-    current_weeks: latest && latest.end === lastDay ? Math.floor(latest.days / 7) : 0,
+    current_weeks: live && latest && latest.end === lastDay ? Math.floor(latest.days / 7) : 0,
     longest: ranked[0] ? toStreak(ranked[0]) : null,
     top: ranked.slice(0, TOP_STREAKS).map(toStreak),
     active_share: span > 0 ? round(active / span) : 0,
@@ -129,9 +149,9 @@ export async function computeRhythm(db: D1Database, now: number, eras: readonly 
        SELECT 'day' AS kind, NULL AS era, date(ls, 'unixepoch') AS day, NULL AS dow, NULL AS hour, SUM(n) AS plays
          FROM loc GROUP BY day
        UNION ALL
-       SELECT 'cell', era, NULL, CAST(strftime('%w', ls, 'unixepoch') AS INTEGER),
+       SELECT 'cell', era, strftime('%Y', ls, 'unixepoch'), CAST(strftime('%w', ls, 'unixepoch') AS INTEGER),
               CAST(strftime('%H', ls, 'unixepoch') AS INTEGER), SUM(n)
-         FROM loc GROUP BY era, 4, 5`,
+         FROM loc GROUP BY era, 3, 4, 5`,
     )
     .bind(HISTORY_START_MS, cutoff)
     .all<{ kind: string; era: number | null; day: string | null; dow: number | null; hour: number | null; plays: number }>();
@@ -141,42 +161,89 @@ export async function computeRhythm(db: D1Database, now: number, eras: readonly 
     .filter((row) => row.kind === 'day')
     .map((row) => ({ day: row.day!, plays: row.plays }))
     .sort((a, b) => a.day.localeCompare(b.day));
+  const range = { from: monthOf(HISTORY_START_MS, eras[0]!.timeZone), to: lastDay.slice(0, 7) };
 
-  const cells = eras.map(() => Array.from({ length: 7 }, () => new Array<number>(24).fill(0)));
+  type Grid = number[][];
+  const emptyGrid = (): Grid => Array.from({ length: 7 }, () => new Array<number>(24).fill(0));
+  // Per era, per local year ('YYYY'), plays in each weekday × hour cell.
+  const cells = eras.map(() => new Map<string, Grid>());
   for (const row of results) {
     if (row.kind !== 'cell') continue;
+    const byYear = cells[row.era!]!;
+    if (!byYear.has(row.day!)) byYear.set(row.day!, emptyGrid());
     // SQLite's %w is Sunday-first; the grid is Monday-first.
-    const cellRow = cells[row.era!]![(row.dow! + 6) % 7]!;
+    const cellRow = byYear.get(row.day!)![(row.dow! + 6) % 7]!;
     cellRow[row.hour!] = (cellRow[row.hour!] ?? 0) + row.plays;
   }
 
-  const eraRhythms = eras.map((era, index): EraRhythm => {
+  const sumGrids = (grids: Grid[]): Grid => {
+    const out = emptyGrid();
+    for (const grid of grids) grid.forEach((row, d) => row.forEach((n, h) => (out[d]![h]! += n)));
+    return out;
+  };
+
+  /** One era's figures over [fromMs, toMs), gated on how much of the era that span covers. */
+  const eraRhythm = (index: number, grid: Grid, fromMs: number, toMs: number, live: boolean): EraRhythm => {
+    const era = eras[index]!;
     const endMs = eraEndMs(eras, era);
-    const coveredDays = Math.max(0, ((endMs ?? cutoff) - era.fromMs) / DAY_MS);
-    const grid = cells[index]!;
+    const coveredFrom = Math.max(era.fromMs, fromMs);
+    const coveredTo = Math.min(endMs ?? cutoff, toMs, cutoff);
+    const coveredDays = Math.max(0, (coveredTo - coveredFrom) / DAY_MS);
     const total = grid.flat().reduce((sum, n) => sum + n, 0);
     const share = (n: number) => (total ? round(n / total) : 0);
     const hoursReady = coveredDays >= HOURS_MIN_DAYS && total > 0;
     const gridReady = coveredDays >= GRID_MIN_DAYS && total > 0;
+    // "Available from" only means something while the span is still growing,
+    // and only if it will get there before the span ends.
+    const availableFrom = (minDays: number, ready: boolean) => {
+      const at = coveredFrom + minDays * DAY_MS;
+      return ready || !live || at >= toMs ? null : monthOf(at, era.timeZone);
+    };
 
     return {
       key: era.key,
       label: era.label,
-      from: monthOf(era.fromMs, era.timeZone),
-      to: endMs === null ? null : monthOf(endMs - 1, era.timeZone),
+      from: monthOf(coveredFrom, era.timeZone),
+      to: live && endMs === null ? null : monthOf(coveredTo - 1, era.timeZone),
       hour_share: hoursReady
         ? Array.from({ length: 24 }, (_, hour) => share(grid.reduce((sum, row) => sum + row[hour]!, 0)))
         : null,
       grid: gridReady ? grid.map((row) => row.map(share)) : null,
-      hours_available_from: hoursReady ? null : monthOf(era.fromMs + HOURS_MIN_DAYS * DAY_MS, era.timeZone),
-      grid_available_from: gridReady ? null : monthOf(era.fromMs + GRID_MIN_DAYS * DAY_MS, era.timeZone),
+      hours_available_from: availableFrom(HOURS_MIN_DAYS, hoursReady),
+      grid_available_from: availableFrom(GRID_MIN_DAYS, gridReady),
+    };
+  };
+
+  const eraRhythms = eras.map((_, index) =>
+    eraRhythm(index, sumGrids([...cells[index]!.values()]), HISTORY_START_MS, Infinity, true),
+  );
+
+  const currentYear = lastDay.slice(0, 4);
+  const yearKeys = [...new Set(days.map((d) => d.day.slice(0, 4)))].sort();
+  const years = yearKeys.map((year): RhythmYear => {
+    const live = year === currentYear;
+    const yearDays = days.filter((d) => d.day.startsWith(year));
+    const yearLast = live ? lastDay : `${year}-12-31`;
+    const firstDay = year === range.from.slice(0, 4) ? yearDays[0]?.day : `${year}-01-01`;
+    // Local years differ from UTC by hours at most; the gate only needs days.
+    const fromMs = Date.UTC(Number(year), 0, 1);
+    const toMs = Date.UTC(Number(year) + 1, 0, 1);
+    return {
+      year,
+      partial: live,
+      streaks: THRESHOLDS.map((threshold) => streaksFrom(yearDays, threshold, yearLast, { live, firstDay })),
+      eras: eras.flatMap((_, index) => {
+        const grid = cells[index]!.get(year);
+        return grid ? [eraRhythm(index, grid, fromMs, toMs, live)] : [];
+      }),
     };
   });
 
   return {
     as_of: new Date(cutoff).toISOString(),
-    range: { from: monthOf(HISTORY_START_MS, eras[0]!.timeZone), to: lastDay.slice(0, 7) },
+    range,
     streaks: THRESHOLDS.map((threshold) => streaksFrom(days, threshold, lastDay)),
     eras: eraRhythms,
+    years,
   };
 }
