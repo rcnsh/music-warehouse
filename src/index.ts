@@ -154,7 +154,7 @@ const worker = {
               '/api/daily',
               '/api/now-playing',
               '/api/top',
-              '/api/stats/{on-repeat,rhythm,top-over-time,eras,obsessions}',
+              '/api/stats/{on-repeat,rhythm,top-over-time,eras,albums}',
               '/admin/poll',
               '/admin/alert-check',
               '/admin/import',

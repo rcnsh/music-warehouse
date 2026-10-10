@@ -2,7 +2,8 @@ import { erasFor } from '../eras';
 import { snapshot } from '../snapshots';
 import type { Env } from '../types';
 import { computeDrift } from './drift';
-import { computeObsessions, computeOnRepeat } from './repeat';
+import { computeTopAlbums } from './albums';
+import { computeOnRepeat } from './repeat';
 import { computeRhythm } from './rhythm';
 import { computeTopOverTime } from './top';
 
@@ -26,8 +27,7 @@ const STATS = {
   rhythm: { freshForSeconds: 6 * 60 * 60, compute: computeRhythm }, // ~190k rows
   'top-over-time': { freshForSeconds: 24 * 60 * 60, compute: computeTopOverTime }, // ~395k rows
   eras: { freshForSeconds: 24 * 60 * 60, compute: computeDrift }, // ~315k rows
-  // Past binges only change when a new one peaks.
-  obsessions: { freshForSeconds: 7 * 24 * 60 * 60, compute: computeObsessions }, // ~1.18M rows
+  albums: { freshForSeconds: 24 * 60 * 60, compute: computeTopAlbums }, // ~222k rows
 } as const;
 
 export type StatName = keyof typeof STATS;

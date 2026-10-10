@@ -164,7 +164,7 @@ export async function computeTopOverTime(db: D1Database, now: number, eras: read
     return { name: rows[0]!.name, plays: rows.reduce((sum, row) => sum + row.plays, 0), share };
   });
   // Ordered by peak quarter, so a stacked chart reads in the order the
-  // obsessions happened and colour follows the artist, not their rank.
+  // artists peaked and colour follows the artist, not their rank.
   const peakIndex = (share: number[]) => share.indexOf(Math.max(...share));
   leaders.sort((a, b) => peakIndex(a.share) - peakIndex(b.share));
 

@@ -23,7 +23,7 @@ therefore costs nothing: the next run asks for exactly the same window again.
 | `GET /api/plays?limit=&before=&after=` | Recent plays with track, album and artist names. |
 | `GET /api/top-artists?from=&to=&tz=&limit=` | Artist play counts over a local-calendar range. |
 | `GET /api/daily?from=&to=&tz=` | Plays per local calendar day. |
-| `GET /api/stats/{on-repeat,rhythm,top-over-time,eras,obsessions}` | Aggregate listening stats, built to be republished. See [Listening stats](#listening-stats). |
+| `GET /api/stats/{on-repeat,rhythm,top-over-time,eras,albums}` | Aggregate listening stats, built to be republished. See [Listening stats](#listening-stats). |
 | `POST /admin/poll` | Runs the same code path as the cron trigger. |
 | `POST /admin/import` | Accepts one chunk of Extended Streaming History records. |
 | `POST /admin/backfill-albums?source=&range=&offset=&pages=` | Fills album art from Top Tracks, Liked Songs or Saved Albums. `source` is `top`, `saved` or `albums`. |
@@ -78,7 +78,7 @@ body was computed up to, is the one exception).
 Nothing may change from one day to the next in a way that isolates a day.
 A count that ticks daily, set beside today's date, dates whatever it counts
 from, and diffing two days of the page reveals one day's listening. So
-`rhythm`, `top-over-time` and `obsessions` stop at the start of the current
+`rhythm`, `top-over-time` and `albums` stop at the start of the current
 local week, `eras` at the start of the current month, and a running streak is
 reported in whole weeks. `on-repeat` is meant to be current, so it is the
 exception: it covers complete days up to local midnight, and its per-song
@@ -90,7 +90,7 @@ daily counts are only for songs already on repeat.
 | `rhythm` | Daily-listening streaks (1, 10, 25 plays a day) and plays by local hour, per era | 6 h | ~190k |
 | `top-over-time` | Top artists and songs per quarter and year, and the seven biggest artists' share per quarter | 24 h | ~395k |
 | `eras` | Artist drift between the Newcastle and Singapore eras, against the normal churn between windows of the same length | 24 h | ~315k |
-| `obsessions` | The biggest single-song weeks ever, one per binge | 7 d | ~1.18M |
+| `albums` | The ten most-played albums with at least four different songs played, so a single on loop doesn't count | 24 h | ~222k |
 
 **Caching.** Each stat is held in `stats_snapshots` (migration 0004) and in
 the Cache API for five minutes. Only a request that wins a claim computes:
@@ -117,9 +117,9 @@ month of the move, never the day.
 
 **What counts.** Rankings credit the primary artist only, because export rows
 carry nothing else, and group by lowercased name so `name:` placeholders fold
-into real ids. On-repeat and obsessions drop plays shorter than 30 seconds,
+into real ids. On-repeat drops plays shorter than 30 seconds,
 measured as the gap since the previous play ended. The export records every
-skip, and without the filter a 2020 skipping spree outranks real obsessions.
+skip, and without the filter a 2020 skipping spree outranks what is really on repeat.
 An era's hour profile stays `null` until the era spans four weeks, and its
 weekday-by-hour grid until 26 weeks. Before that, each figure describes
 particular nights rather than a routine.
@@ -376,7 +376,7 @@ not duplicated.
 npm test
 ```
 
-127 tests run against a real local D1 instance via `@cloudflare/vitest-pool-workers`,
+128 tests run against a real local D1 instance via `@cloudflare/vitest-pool-workers`,
 covering idempotent ingestion, cursor behaviour on failure, the token lifecycle,
 rate-limit handling, timezone bucketing, import de-duplication, route auth, and
 the stats routes (era local time against `Intl`, streaks, on-repeat rules,

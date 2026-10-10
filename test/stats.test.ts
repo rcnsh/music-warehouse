@@ -9,7 +9,7 @@ import { edgeRequest } from '../src/snapshots';
 const BASE = 'https://warehouse.test';
 const READ = { Authorization: 'Bearer test-read-token' };
 const DAY = 86_400_000;
-const STATS = ['on-repeat', 'rhythm', 'top-over-time', 'eras', 'obsessions'];
+const STATS = ['on-repeat', 'rhythm', 'top-over-time', 'eras', 'albums'];
 const ERAS = erasFor(env.MOVED_AT);
 const MOVE_MS = ERAS[1]!.fromMs;
 
@@ -212,6 +212,28 @@ describe('on repeat', () => {
   });
 });
 
+describe('top albums', () => {
+  it('ranks albums listened to as albums, not one song on loop', async () => {
+    const start = Date.now() - 60 * DAY;
+    const record = ['r1', 'r2', 'r3', 'r4'].flatMap((id, i) =>
+      session(id, start + i * DAY, 3, { album: 'record', artist: 'Band' }),
+    );
+    const single = session('single', start, 40, { album: 'single', artist: 'Band' });
+    await seed([...record, ...single]);
+
+    const body = (await (await stat('albums')).json()) as {
+      min_songs: number;
+      albums: Array<{ name: string; artist: string; plays: number; songs: number; from: string; to: string }>;
+    };
+
+    expect(body.min_songs).toBe(4);
+    expect(body.albums).toEqual([
+      expect.objectContaining({ name: 'Album record', artist: 'Band', plays: 12, songs: 4 }),
+    ]);
+    expect(body.albums[0]!.from).toMatch(/^\d{4}-\d{2}$/);
+  });
+});
+
 describe('artist drift', () => {
   it('measures change as the share of listening that moved', () => {
     const a = new Map([
@@ -284,14 +306,14 @@ describe('snapshots', () => {
   it('does not compute a key someone else has claimed, even when nothing is cached yet', async () => {
     // Another isolate is mid-compute (or backing off from a failure).
     await env.DB.prepare('INSERT INTO stats_snapshots (key, claimed_until_ms) VALUES (?, ?)')
-      .bind('obsessions:v1', Date.now() + 60_000)
+      .bind('albums:v1', Date.now() + 60_000)
       .run();
 
-    const response = await stat('obsessions');
+    const response = await stat('albums');
     expect(response.status).toBe(503);
     expect(Number(response.headers.get('Retry-After'))).toBeGreaterThan(0);
     const row = await env.DB.prepare('SELECT body FROM stats_snapshots WHERE key = ?')
-      .bind('obsessions:v1')
+      .bind('albums:v1')
       .first<{ body: string | null }>();
     expect(row!.body).toBeNull();
   });
