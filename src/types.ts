@@ -22,6 +22,13 @@ export interface Env {
    * of them rather than only the critical ones.
    */
   ALERT_MENTION?: string;
+  /**
+   * ISO instant the listener moved from Newcastle to Singapore, which splits
+   * the listening stats into two eras with their own local time. A secret
+   * rather than a var because this repo is public and the stats deliberately
+   * publish only the month. Unset means a single Newcastle era.
+   */
+  MOVED_AT?: string;
 }
 
 /**

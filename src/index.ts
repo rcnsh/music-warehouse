@@ -8,6 +8,8 @@ import { nowPlaying, topMusic } from './live';
 import { SpotifyError, authorizeUrl, exchangeCode, fetchRecentlyPlayed } from './spotify';
 import { NeedsReauthError, getAccessToken, persistTokenResponse } from './tokens';
 import { readState } from './db';
+import { SnapshotPending } from './snapshots';
+import { isStatName, statRoute } from './stats';
 import type { Env } from './types';
 
 /** The cron expression reserved for the alert sweep; everything else polls. */
@@ -125,7 +127,7 @@ async function rawRecentlyPlayed(env: Env, url: URL): Promise<Response> {
 }
 
 const worker = {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
     const path = url.pathname.replace(/\/+$/, '') || '/';
 
@@ -152,6 +154,7 @@ const worker = {
               '/api/daily',
               '/api/now-playing',
               '/api/top',
+              '/api/stats/{on-repeat,rhythm,top-over-time,eras,obsessions}',
               '/admin/poll',
               '/admin/alert-check',
               '/admin/import',
@@ -186,11 +189,19 @@ const worker = {
           return await backfillFromCatalog(env, request);
         case 'GET /admin/raw':
           return await rawRecentlyPlayed(env, url);
-        default:
+        default: {
+          const stat = /^GET \/api\/stats\/([a-z-]+)$/.exec(route)?.[1];
+          if (stat && isStatName(stat)) return await statRoute(env, ctx, stat);
           return json({ error: 'Not found' }, 404);
+        }
       }
     } catch (error) {
       if (error instanceof BadRequest) return json({ error: error.message }, 400);
+      if (error instanceof SnapshotPending) {
+        const response = json({ error: error.message }, 503);
+        response.headers.set('Retry-After', String(error.retryAfterSeconds));
+        return response;
+      }
       // The live proxy routes depend on a working Spotify grant, unlike the
       // stored-data routes. Say which of the two failed rather than a blank 500.
       if (error instanceof NeedsReauthError) {
