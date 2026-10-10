@@ -32,6 +32,8 @@ export default defineConfig({
           SPOTIFY_REDIRECT_URI: 'http://127.0.0.1:8787/callback',
           ADMIN_TOKEN: 'test-admin-token',
           READ_TOKEN: 'test-read-token',
+          // Synthetic: the real move instant is a secret, kept out of this public repo.
+          MOVED_AT: '2025-03-10T00:00:00Z',
         },
       },
     }),
