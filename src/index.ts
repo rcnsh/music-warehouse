@@ -10,6 +10,8 @@ import { NeedsReauthError, getAccessToken, persistTokenResponse } from './tokens
 import { readState } from './db';
 import { SnapshotPending } from './snapshots';
 import { isStatName, statRoute } from './stats';
+import { artistRoute, onThisDayRoute, trackRoute } from './history';
+import { warmWrappedPresets, wrappedRangesRoute, wrappedRoute } from './wrapped';
 import type { Env } from './types';
 
 /** The cron expression reserved for the alert sweep; everything else polls. */
@@ -155,6 +157,11 @@ const worker = {
               '/api/now-playing',
               '/api/top',
               '/api/stats/{on-repeat,rhythm,top-over-time,eras,albums}',
+              '/api/wrapped',
+              '/api/wrapped/ranges',
+              '/api/artist',
+              '/api/track',
+              '/api/on-this-day',
               '/admin/poll',
               '/admin/alert-check',
               '/admin/import',
@@ -177,6 +184,16 @@ const worker = {
           return await nowPlaying(env);
         case 'GET /api/top':
           return await topMusic(env, url);
+        case 'GET /api/wrapped':
+          return await wrappedRoute(env, ctx, url, access);
+        case 'GET /api/wrapped/ranges':
+          return await wrappedRangesRoute(env);
+        case 'GET /api/artist':
+          return await artistRoute(env, url);
+        case 'GET /api/track':
+          return await trackRoute(env, url);
+        case 'GET /api/on-this-day':
+          return await onThisDayRoute(env, url);
         case 'POST /admin/poll':
           return json(await poll(env));
         case 'POST /admin/alert-check':
@@ -224,7 +241,8 @@ const worker = {
 
   async scheduled(event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
     // The daily alert sweep shares the scheduled handler, dispatched on which
-    // cron expression fired.
+    // cron expression fired. So does warming one Wrapped preset a day: one
+    // compute, so its row reads stay well inside the daily budget.
     if (event.cron === ALERT_CRON) {
       ctx.waitUntil(
         runAlertCheck(env)
@@ -233,6 +251,15 @@ const worker = {
           })
           .catch((error) => {
             console.error('alert-check failed', error);
+          }),
+      );
+      ctx.waitUntil(
+        warmWrappedPresets(env, ctx)
+          .then((warmed) => {
+            console.log('wrapped-warm', JSON.stringify(warmed));
+          })
+          .catch((error) => {
+            console.error('wrapped-warm failed', error);
           }),
       );
       return;

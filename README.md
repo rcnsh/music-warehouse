@@ -24,12 +24,17 @@ therefore costs nothing: the next run asks for exactly the same window again.
 | `GET /api/top-artists?from=&to=&tz=&limit=` | Artist play counts over a local-calendar range. |
 | `GET /api/daily?from=&to=&tz=` | Plays per local calendar day. |
 | `GET /api/stats/{on-repeat,rhythm,top-over-time,eras,albums}` | Aggregate listening stats, built to be republished. See [Listening stats](#listening-stats). |
+| `GET /api/wrapped?from=&to=` | A year-in-review for any closed range of local days. `READ_TOKEN` computes only the presets. See [Wrapped](#wrapped). |
+| `GET /api/wrapped/ranges` | The preset Wrapped ranges, newest first, and whether each is computed yet. |
+| `GET /api/artist?id=&name=&tz=` | One artist's whole history: plays, minutes, first and last play, plays per month, top songs. See [History](#history). |
+| `GET /api/track?id=&tz=` | The same for one song, every edition folded together. |
+| `GET /api/on-this-day?date=&tz=` | What was played on this day in each earlier year. |
 | `POST /admin/poll` | Runs the same code path as the cron trigger. |
 | `POST /admin/import` | Accepts one chunk of Extended Streaming History records. |
 | `POST /admin/backfill-albums?source=&range=&offset=&pages=` | Fills album art from Top Tracks, Liked Songs or Saved Albums. `source` is `top`, `saved` or `albums`. |
 | `POST /admin/backfill-catalog?after=&limit=&spacingMs=` | Fills album art one track at a time via Get Track, for the tail no user-scoped endpoint reaches. |
 | `GET /api/now-playing` | Live proxy to Spotify's currently-playing. `{ item: null }` when idle. |
-| `GET /api/top?range=&limit=` | Live proxy to Spotify's top tracks and artists. `range` is `short_term`, `medium_term` or `long_term`. |
+| `GET /api/top?range=&limit=&type=` | Live proxy to Spotify's top tracks and artists. `range` is `short_term`, `medium_term` or `long_term`; `type=artists` or `type=tracks` fetches just one list (the other comes back `null`), and `type=artists` reads nothing from D1. |
 | `POST /admin/alert-check?force=1` | Runs the daily alert sweep on demand. `force=1` ignores the resend window. |
 | `GET /admin/raw?after=` | The unmodified upstream payload, for capturing fixtures and diagnosing shape changes. Read-only; never touches the cursor. |
 
@@ -40,7 +45,7 @@ Every route except `/callback` requires a bearer token.
 | Token | Reaches |
 |---|---|
 | `ADMIN_TOKEN` | Everything. |
-| `READ_TOKEN` | `/api/*` only — not `/health`, `/login`, or any `/admin/*` route. |
+| `READ_TOKEN` | `/api/*` only — not `/health`, `/login`, or any `/admin/*` route. Of Wrapped ranges not yet computed, only the presets. |
 
 `READ_TOKEN` exists so a frontend can render listening data without holding a
 credential that could trigger a poll or write rows. It is optional; leave it
@@ -126,6 +131,92 @@ particular nights rather than a routine.
 
 There is no genre data: Spotify's artist catalogue endpoint is closed to this
 app, so `eras` compares artists, not genres.
+
+### Wrapped
+
+`/api/wrapped?from=YYYY-MM-DD&to=YYYY-MM-DD` summarizes a range the way
+Spotify Wrapped does: estimated minutes, top artists, songs and albums,
+biggest day, longest streak, listening by hour and weekday, the top artist and
+song of each month, discoveries (artists and songs first played inside the
+range), and a listening age. It feeds
+[music-warehouse-wrapped](https://github.com/rcnsh/music-warehouse-wrapped),
+which turns it into a story and an MP4.
+
+It is private, not a public stat: it names days. It also takes parameters, so
+anyone holding a token could mint new keys and force scans. `ADMIN_TOKEN`
+computes any range. `READ_TOKEN` reads any range already computed, computes
+only a preset, and gets `403` otherwise. `to` must be before today, and a
+range is stored in `stats_snapshots` under `wrapped:v2:{from}:{to}`. Once it
+ended more than two days ago it is never recomputed.
+
+The presets are a bounded list, so a read token can't mint keys: every closed
+calendar year that has plays, and this year so far. "So far" ends with the
+last complete local week, so it moves once a week rather than daily, for the
+same reason the public stats stop at a week boundary. `/api/wrapped/ranges`
+lists them, newest first:
+
+```json
+{ "ranges": [
+  { "from": "2026-01-01", "to": "2026-10-11", "label": "2026 so far", "kind": "year_to_date", "computed": true },
+  { "from": "2025-01-01", "to": "2025-12-31", "label": "2025", "kind": "year", "computed": false }
+] }
+```
+
+Listing them costs one primary-key probe per candidate year. The daily cron
+(`0 9 * * *`) computes one preset not yet computed, newest first, so most are
+ready before anyone asks; one compute a day keeps it well inside the row budget.
+
+Days and hours are in each era's local time. Minutes are estimated: a play
+ran for at most the gap since the play before it and at most the track's
+length, and plays under 30 seconds are skips that count for nothing.
+Listening age is the age of someone whose late teens fall in the middle of
+the five-year span of release years you played most, and is `null` when
+fewer than half of the minutes have a release date.
+
+### History
+
+`/api/artist`, `/api/track` and `/api/on-this-day` are for a client app's
+artist, song and "on this day" pages. They are private like `/api/plays`:
+they name days. `tz` is an IANA zone (default `UTC`) used for months and days,
+as in `/api/daily`; these take the caller's zone rather than the eras'.
+
+```json
+GET /api/artist?id=4NJhFmfw43RLBLjQvxDuRS&name=Porter%20Robinson&tz=Asia/Singapore
+{ "artist": { "id": "4NJhFmfw43RLBLjQvxDuRS", "name": "Porter Robinson" },
+  "plays": 812, "minutes": 2410,
+  "first_played": "2020-07-03T21:14:02.000Z", "last_played": "2026-10-12T13:40:11.000Z",
+  "months": [ { "month": "2020-07", "plays": 14 }, … ],
+  "top_tracks": [ { "id": "…", "name": "Shelter", "plays": 96, "image": "https://i.scdn.co/…" }, … ] }
+
+GET /api/track?id=…&tz=…
+{ "track": { "id": "…", "name": "Shelter", "artist": "Porter Robinson", "image": "…" },
+  "plays": 96, "minutes": 301, "first_played": "…", "last_played": "…", "months": [ … ] }
+
+GET /api/on-this-day?date=2026-10-13&tz=Asia/Singapore
+{ "date": "2026-10-13",
+  "years": [ { "year": 2025, "plays": 41,
+               "top_tracks": [ { "id": "…", "name": "…", "artist": "…", "image": "…", "plays": 6 } ] } ] }
+```
+
+An artist is matched by id and by lowercased name, as the stats group them,
+so export-era `name:` placeholders count; `name` is the fallback for an id
+the warehouse has never seen. Credit is the primary artist's only. A track
+folds every edition with the same title and primary artist, and its `id` is
+the one asked for. An unknown artist or track is a `200` with zero plays, empty
+lists, `null` dates (and a `null` track name, artist and art), never a `404`.
+
+`plays` counts every stored play, as `/api/top-artists` does. `minutes` is
+Wrapped's estimate, so a skip is a play worth no minutes. `months` runs from
+the first month with a play to the last, quiet months as zero. `top_tracks`
+is up to ten songs for an artist and five for a day, editions folded, with the
+id and art of the most-played edition. On this day covers each earlier year
+with plays on that local date, newest first; 29 February looks only at leap
+years.
+
+Each is index seeks only: an artist or song reads about two rows per play of
+it (the play, and the play before it for the minutes estimate), and on this
+day one range per year. The `X-Rows-Read` header carries D1's count. The
+artist name match needs migration 0006.
 
 ---
 
@@ -376,11 +467,12 @@ not duplicated.
 npm test
 ```
 
-130 tests run against a real local D1 instance via `@cloudflare/vitest-pool-workers`,
+179 tests run against a real local D1 instance via `@cloudflare/vitest-pool-workers`,
 covering idempotent ingestion, cursor behaviour on failure, the token lifecycle,
 rate-limit handling, timezone bucketing, import de-duplication, route auth, and
 the stats routes (era local time against `Intl`, streaks, on-repeat rules,
-snapshot caching, and that no body carries play rows or exact dates).
+snapshot caching, and that no body carries play rows or exact dates), Wrapped
+and its presets, and the history routes.
 
 ```bash
 npm run typecheck

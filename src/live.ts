@@ -32,7 +32,11 @@ export async function nowPlaying(env: Env): Promise<Response> {
   return json({ item: await spotifyGet(accessToken, '/me/player/currently-playing') });
 }
 
-/** `GET /api/top?range=&limit=` → Spotify's top tracks and artists for that range. */
+/**
+ * `GET /api/top?range=&limit=&type=` → Spotify's top tracks and artists for that
+ * range. `type=artists` or `type=tracks` fetches one list and leaves the other
+ * null: artists alone skip the edition relabel, the only D1 read here.
+ */
 export async function topMusic(env: Env, url: URL): Promise<Response> {
   const requested = url.searchParams.get('range');
   const range = requested && TOP_RANGES.has(requested) ? requested : 'long_term';
@@ -42,13 +46,15 @@ export async function topMusic(env: Env, url: URL): Promise<Response> {
     ? requestedLimit
     : 12;
 
+  const type = url.searchParams.get('type');
+
   const accessToken = await accessTokenFor(env);
   const [tracks, artists] = await Promise.all([
-    spotifyGet(accessToken, `/me/top/tracks?time_range=${range}&limit=${limit}`),
-    spotifyGet(accessToken, `/me/top/artists?time_range=${range}&limit=${limit}`),
+    type === 'artists' ? null : spotifyGet(accessToken, `/me/top/tracks?time_range=${range}&limit=${limit}`),
+    type === 'tracks' ? null : spotifyGet(accessToken, `/me/top/artists?time_range=${range}&limit=${limit}`),
   ]);
 
-  await relabelEditions(env.DB, tracks);
+  if (tracks) await relabelEditions(env.DB, tracks);
   return json({ range, limit, tracks, artists });
 }
 
@@ -105,13 +111,18 @@ async function relabelEditions(db: D1Database, payload: unknown): Promise<void> 
              FROM wanted w
              JOIN track_artists ta ON ta.artist_id = w.artist AND ta.position = 0
              JOIN tracks t ON t.track_id = ta.track_id AND t.name = w.name AND +t.isrc IS NULL
-         )
+         ),
          -- Counted per candidate so each is an index seek, not a scan of every play.
-         SELECT c.i, a.album_id, a.name, a.image_url,
-                SUM((SELECT COUNT(*) FROM plays p WHERE p.track_id = c.track_id)) AS plays
-           FROM candidates c JOIN albums a ON a.album_id = c.album_id
+         -- Materialized so the count runs once: inline, SELECT, HAVING and ORDER BY
+         -- each re-ran it, reading every play of every candidate three times.
+         counted AS MATERIALIZED (
+           SELECT c.i, c.album_id, (SELECT COUNT(*) FROM plays p WHERE p.track_id = c.track_id) AS plays
+             FROM candidates c
+         )
+         SELECT c.i, a.album_id, a.name, a.image_url, SUM(c.plays) AS plays
+           FROM counted c JOIN albums a ON a.album_id = c.album_id
           GROUP BY c.i, a.album_id
-         HAVING plays > 0
+         HAVING SUM(c.plays) > 0
           ORDER BY c.i, plays DESC`,
       )
       .bind(JSON.stringify(wanted))

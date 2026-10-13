@@ -17,7 +17,7 @@ function intParam(url: URL, name: string, fallback: number, min: number, max: nu
   return value;
 }
 
-function timeZoneParam(url: URL): string {
+export function timeZoneParam(url: URL): string {
   const timeZone = url.searchParams.get('tz') ?? DEFAULT_TIMEZONE;
   if (!isValidTimeZone(timeZone)) throw new BadRequest(`Unknown IANA timezone: ${timeZone}`);
   return timeZone;
