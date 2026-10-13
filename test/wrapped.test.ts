@@ -52,7 +52,7 @@ function session(trackId: string, startMs: number, count: number, extra: Partial
 async function wrapped(from: string, to: string, headers: Record<string, string> = ADMIN) {
   // setup.ts empties stats_snapshots but not the Cache API, where a body from
   // an earlier test would otherwise answer.
-  await (await caches.open('stats')).delete(edgeRequest(`wrapped:v1:${from}:${to}`));
+  await (await caches.open('stats')).delete(edgeRequest(`wrapped:v2:${from}:${to}`));
   return SELF.fetch(`${BASE}/api/wrapped?from=${from}&to=${to}`, { headers });
 }
 
@@ -128,6 +128,17 @@ describe('wrapped: body', () => {
     expect(body.streak).toEqual({ days: 3, from: '2024-03-02', to: '2024-03-04' });
     expect(body.totals.days_listened).toBe(4);
     expect(body.months).toEqual([expect.objectContaining({ month: '2024-03', top_artist: 'Big', top_song: 'Song t1' })]);
+  });
+
+  it('ranks songs by plays but artists by minutes', async () => {
+    await seed([
+      ...session('long', MARCH_2, 3, { artist: 'Epic', durationMs: 280_000 }),
+      // A minute apart: each counts one minute.
+      ...Array.from({ length: 5 }, (_, i) => ({ ms: MARCH_2 + DAY + i * MIN, trackId: 'short', artist: 'Brief' })),
+    ]);
+    const body = (await (await wrapped('2024-03-01', '2024-03-31')).json()) as Wrapped;
+    expect(body.top_songs.map((s) => s.name)).toEqual(['Song short', 'Song long']);
+    expect(body.top_artists.map((a) => a.name)).toEqual(['Epic', 'Brief']);
   });
 
   it('folds editions of one song and credits the most-played edition art', async () => {

@@ -142,7 +142,7 @@ It is private, not a public stat: it names days. It also takes parameters, so
 anyone holding a token could mint new keys and force scans. Only
 `ADMIN_TOKEN` computes a range; `READ_TOKEN` reads ranges already computed
 and gets `403` otherwise. `to` must be before today, and a range is stored in
-`stats_snapshots` under `wrapped:v1:{from}:{to}`. Once it ended more than two
+`stats_snapshots` under `wrapped:v2:{from}:{to}`. Once it ended more than two
 days ago it is never recomputed.
 
 Days and hours are in each era's local time. Minutes are estimated: a play

@@ -367,7 +367,10 @@ function summarize(
     };
   });
 
-  const topSongs: WrappedSong[] = [...songs].sort(byMs).slice(0, TOP_N).map(([, song]) => ({
+  // Songs rank by plays, as Spotify's do ("you played it 149 times");
+  // artists and albums by minutes.
+  const byPlays = (a: [string, Song], b: [string, Song]) => b[1].plays - a[1].plays || b[1].ms - a[1].ms || a[0].localeCompare(b[0]);
+  const topSongs: WrappedSong[] = [...songs].sort(byPlays).slice(0, TOP_N).map(([, song]) => ({
     name: song.name,
     artist: song.artist,
     album: song.album,
@@ -537,7 +540,7 @@ export async function wrappedRoute(env: Env, ctx: ExecutionContext, url: URL, ac
   const eras = erasFor(env.MOVED_AT);
   const range = wrappedRange(eras, url, now);
   // The version suffix retires every stored body when the shape changes.
-  const key = `wrapped:v1:${range.from}:${range.to}`;
+  const key = `wrapped:v2:${range.from}:${range.to}`;
 
   let result: { body: string; computedMs: number; source: string };
   if (access === 'admin') {
