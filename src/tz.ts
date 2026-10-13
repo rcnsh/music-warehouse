@@ -88,3 +88,10 @@ export function endOfLocalDayUtcMs(dateStr: string, timeZone: string): number {
   const nextDayKey = localDayKey(start + 36 * 60 * 60 * 1000, timeZone);
   return startOfLocalDayUtcMs(nextDayKey, timeZone);
 }
+
+/** Whether `day` is a real 'YYYY-MM-DD' calendar date (not 02-30, say, which Date.UTC rolls over). */
+export function isRealDay(day: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return false;
+  const ms = Date.parse(`${day}T00:00:00Z`);
+  return Number.isFinite(ms) && new Date(ms).toISOString().startsWith(day);
+}

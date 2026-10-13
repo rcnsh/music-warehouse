@@ -24,7 +24,8 @@ therefore costs nothing: the next run asks for exactly the same window again.
 | `GET /api/top-artists?from=&to=&tz=&limit=` | Artist play counts over a local-calendar range. |
 | `GET /api/daily?from=&to=&tz=` | Plays per local calendar day. |
 | `GET /api/stats/{on-repeat,rhythm,top-over-time,eras,albums}` | Aggregate listening stats, built to be republished. See [Listening stats](#listening-stats). |
-| `GET /api/wrapped?from=&to=` | A year-in-review for any closed range of local days. Only `ADMIN_TOKEN` computes a new range. See [Wrapped](#wrapped). |
+| `GET /api/wrapped?from=&to=` | A year-in-review for any closed range of local days. `READ_TOKEN` computes only the presets. See [Wrapped](#wrapped). |
+| `GET /api/wrapped/ranges` | The preset Wrapped ranges, newest first, and whether each is computed yet. |
 | `POST /admin/poll` | Runs the same code path as the cron trigger. |
 | `POST /admin/import` | Accepts one chunk of Extended Streaming History records. |
 | `POST /admin/backfill-albums?source=&range=&offset=&pages=` | Fills album art from Top Tracks, Liked Songs or Saved Albums. `source` is `top`, `saved` or `albums`. |
@@ -41,7 +42,7 @@ Every route except `/callback` requires a bearer token.
 | Token | Reaches |
 |---|---|
 | `ADMIN_TOKEN` | Everything. |
-| `READ_TOKEN` | `/api/*` only — not `/health`, `/login`, or any `/admin/*` route. |
+| `READ_TOKEN` | `/api/*` only — not `/health`, `/login`, or any `/admin/*` route. Of Wrapped ranges not yet computed, only the presets. |
 
 `READ_TOKEN` exists so a frontend can render listening data without holding a
 credential that could trigger a poll or write rows. It is optional; leave it
@@ -139,11 +140,28 @@ range), and a listening age. It feeds
 which turns it into a story and an MP4.
 
 It is private, not a public stat: it names days. It also takes parameters, so
-anyone holding a token could mint new keys and force scans. Only
-`ADMIN_TOKEN` computes a range; `READ_TOKEN` reads ranges already computed
-and gets `403` otherwise. `to` must be before today, and a range is stored in
-`stats_snapshots` under `wrapped:v2:{from}:{to}`. Once it ended more than two
-days ago it is never recomputed.
+anyone holding a token could mint new keys and force scans. `ADMIN_TOKEN`
+computes any range. `READ_TOKEN` reads any range already computed, computes
+only a preset, and gets `403` otherwise. `to` must be before today, and a
+range is stored in `stats_snapshots` under `wrapped:v2:{from}:{to}`. Once it
+ended more than two days ago it is never recomputed.
+
+The presets are a bounded list, so a read token can't mint keys: every closed
+calendar year that has plays, and this year so far. "So far" ends with the
+last complete local week, so it moves once a week rather than daily, for the
+same reason the public stats stop at a week boundary. `/api/wrapped/ranges`
+lists them, newest first:
+
+```json
+{ "ranges": [
+  { "from": "2026-01-01", "to": "2026-10-11", "label": "2026 so far", "kind": "year_to_date", "computed": true },
+  { "from": "2025-01-01", "to": "2025-12-31", "label": "2025", "kind": "year", "computed": false }
+] }
+```
+
+Listing them costs one primary-key probe per candidate year. The daily cron
+(`0 9 * * *`) computes one preset not yet computed, newest first, so most are
+ready before anyone asks; one compute a day keeps it well inside the row budget.
 
 Days and hours are in each era's local time. Minutes are estimated: a play
 ran for at most the gap since the play before it and at most the track's
@@ -401,11 +419,12 @@ not duplicated.
 npm test
 ```
 
-130 tests run against a real local D1 instance via `@cloudflare/vitest-pool-workers`,
+159 tests run against a real local D1 instance via `@cloudflare/vitest-pool-workers`,
 covering idempotent ingestion, cursor behaviour on failure, the token lifecycle,
 rate-limit handling, timezone bucketing, import de-duplication, route auth, and
 the stats routes (era local time against `Intl`, streaks, on-repeat rules,
-snapshot caching, and that no body carries play rows or exact dates).
+snapshot caching, and that no body carries play rows or exact dates), Wrapped
+and its presets.
 
 ```bash
 npm run typecheck
