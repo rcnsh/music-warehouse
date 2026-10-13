@@ -114,6 +114,20 @@ describe('GET /api/top', () => {
     ].sort());
   });
 
+  it('fetches only artists for type=artists', async () => {
+    await seedAuthorized();
+    const calls = stubSpotify(() => jsonResponse({ items: [{ name: 'an artist' }] }));
+
+    const body = (await (await SELF.fetch(`${BASE}/api/top?range=medium_term&limit=50&type=artists`, { headers: READ })).json()) as {
+      tracks: unknown;
+      artists: { items: Array<{ name: string }> };
+    };
+
+    expect(body.tracks).toBeNull();
+    expect(body.artists.items[0]!.name).toBe('an artist');
+    expect(calls).toEqual(['/v1/me/top/artists?time_range=medium_term&limit=50']);
+  });
+
   it('falls back to long_term and a limit of 12 for junk input', async () => {
     await seedAuthorized();
     const calls = stubSpotify(() => jsonResponse({ items: [] }));
