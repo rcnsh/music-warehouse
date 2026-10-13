@@ -26,6 +26,9 @@ therefore costs nothing: the next run asks for exactly the same window again.
 | `GET /api/stats/{on-repeat,rhythm,top-over-time,eras,albums}` | Aggregate listening stats, built to be republished. See [Listening stats](#listening-stats). |
 | `GET /api/wrapped?from=&to=` | A year-in-review for any closed range of local days. `READ_TOKEN` computes only the presets. See [Wrapped](#wrapped). |
 | `GET /api/wrapped/ranges` | The preset Wrapped ranges, newest first, and whether each is computed yet. |
+| `GET /api/artist?id=&name=&tz=` | One artist's whole history: plays, minutes, first and last play, plays per month, top songs. See [History](#history). |
+| `GET /api/track?id=&tz=` | The same for one song, every edition folded together. |
+| `GET /api/on-this-day?date=&tz=` | What was played on this day in each earlier year. |
 | `POST /admin/poll` | Runs the same code path as the cron trigger. |
 | `POST /admin/import` | Accepts one chunk of Extended Streaming History records. |
 | `POST /admin/backfill-albums?source=&range=&offset=&pages=` | Fills album art from Top Tracks, Liked Songs or Saved Albums. `source` is `top`, `saved` or `albums`. |
@@ -169,6 +172,51 @@ length, and plays under 30 seconds are skips that count for nothing.
 Listening age is the age of someone whose late teens fall in the middle of
 the five-year span of release years you played most, and is `null` when
 fewer than half of the minutes have a release date.
+
+### History
+
+`/api/artist`, `/api/track` and `/api/on-this-day` are for a client app's
+artist, song and "on this day" pages. They are private like `/api/plays`:
+they name days. `tz` is an IANA zone (default `UTC`) used for months and days,
+as in `/api/daily`; these take the caller's zone rather than the eras'.
+
+```json
+GET /api/artist?id=4NJhFmfw43RLBLjQvxDuRS&name=Porter%20Robinson&tz=Asia/Singapore
+{ "artist": { "id": "4NJhFmfw43RLBLjQvxDuRS", "name": "Porter Robinson" },
+  "plays": 812, "minutes": 2410,
+  "first_played": "2020-07-03T21:14:02.000Z", "last_played": "2026-10-12T13:40:11.000Z",
+  "months": [ { "month": "2020-07", "plays": 14 }, … ],
+  "top_tracks": [ { "id": "…", "name": "Shelter", "plays": 96, "image": "https://i.scdn.co/…" }, … ] }
+
+GET /api/track?id=…&tz=…
+{ "track": { "id": "…", "name": "Shelter", "artist": "Porter Robinson", "image": "…" },
+  "plays": 96, "minutes": 301, "first_played": "…", "last_played": "…", "months": [ … ] }
+
+GET /api/on-this-day?date=2026-10-13&tz=Asia/Singapore
+{ "date": "2026-10-13",
+  "years": [ { "year": 2025, "plays": 41,
+               "top_tracks": [ { "id": "…", "name": "…", "artist": "…", "image": "…", "plays": 6 } ] } ] }
+```
+
+An artist is matched by id and by lowercased name, as the stats group them,
+so export-era `name:` placeholders count; `name` is the fallback for an id
+the warehouse has never seen. Credit is the primary artist's only. A track
+folds every edition with the same title and primary artist, and its `id` is
+the one asked for. An unknown artist or track is a `200` with zero plays, empty
+lists, `null` dates (and a `null` track name, artist and art), never a `404`.
+
+`plays` counts every stored play, as `/api/top-artists` does. `minutes` is
+Wrapped's estimate, so a skip is a play worth no minutes. `months` runs from
+the first month with a play to the last, quiet months as zero. `top_tracks`
+is up to ten songs for an artist and five for a day, editions folded, with the
+id and art of the most-played edition. On this day covers each earlier year
+with plays on that local date, newest first; 29 February looks only at leap
+years.
+
+Each is index seeks only: an artist or song reads about two rows per play of
+it (the play, and the play before it for the minutes estimate), and on this
+day one range per year. The `X-Rows-Read` header carries D1's count. The
+artist name match needs migration 0006.
 
 ---
 
@@ -419,12 +467,12 @@ not duplicated.
 npm test
 ```
 
-159 tests run against a real local D1 instance via `@cloudflare/vitest-pool-workers`,
+179 tests run against a real local D1 instance via `@cloudflare/vitest-pool-workers`,
 covering idempotent ingestion, cursor behaviour on failure, the token lifecycle,
 rate-limit handling, timezone bucketing, import de-duplication, route auth, and
 the stats routes (era local time against `Intl`, streaks, on-repeat rules,
 snapshot caching, and that no body carries play rows or exact dates), Wrapped
-and its presets.
+and its presets, and the history routes.
 
 ```bash
 npm run typecheck

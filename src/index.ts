@@ -10,6 +10,7 @@ import { NeedsReauthError, getAccessToken, persistTokenResponse } from './tokens
 import { readState } from './db';
 import { SnapshotPending } from './snapshots';
 import { isStatName, statRoute } from './stats';
+import { artistRoute, onThisDayRoute, trackRoute } from './history';
 import { warmWrappedPresets, wrappedRangesRoute, wrappedRoute } from './wrapped';
 import type { Env } from './types';
 
@@ -158,6 +159,9 @@ const worker = {
               '/api/stats/{on-repeat,rhythm,top-over-time,eras,albums}',
               '/api/wrapped',
               '/api/wrapped/ranges',
+              '/api/artist',
+              '/api/track',
+              '/api/on-this-day',
               '/admin/poll',
               '/admin/alert-check',
               '/admin/import',
@@ -184,6 +188,12 @@ const worker = {
           return await wrappedRoute(env, ctx, url, access);
         case 'GET /api/wrapped/ranges':
           return await wrappedRangesRoute(env);
+        case 'GET /api/artist':
+          return await artistRoute(env, url);
+        case 'GET /api/track':
+          return await trackRoute(env, url);
+        case 'GET /api/on-this-day':
+          return await onThisDayRoute(env, url);
         case 'POST /admin/poll':
           return json(await poll(env));
         case 'POST /admin/alert-check':
