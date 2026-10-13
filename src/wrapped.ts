@@ -1,8 +1,8 @@
-import { BadRequest } from './api';
-import { HISTORY_START_MS, type Era, eraAt, erasFor, localTimeSql } from './eras';
+import { BadRequest, json } from './api';
+import { HISTORY_START_MS, type Era, eraAt, erasFor, localTimeSql, startOfLocalWeek } from './eras';
 import { peekSnapshot, snapshot } from './snapshots';
 import { PRIMARY_ARTIST_SQL } from './stats/sql';
-import { endOfLocalDayUtcMs, localDayKey, startOfLocalDayUtcMs } from './tz';
+import { endOfLocalDayUtcMs, isRealDay, localDayKey, startOfLocalDayUtcMs } from './tz';
 import type { Env } from './types';
 
 /**
@@ -11,8 +11,9 @@ import type { Env } from './types';
  * Unlike /api/stats/*, this is private and takes parameters, so it is not
  * held to the public page's month-only rule: it names the biggest day and a
  * streak's dates. Taking parameters also means a caller could mint keys and
- * force scans, so only ADMIN_TOKEN computes. READ_TOKEN gets bodies already
- * computed and a 403 otherwise.
+ * force scans, so ADMIN_TOKEN computes any range and READ_TOKEN only the
+ * presets (see wrappedPresets). READ_TOKEN gets any other body already
+ * computed, and a 403 otherwise.
  *
  * Local time is the era's, as everywhere else: a range that spans the move
  * buckets Newcastle plays in London time and Singapore plays in Singapore
@@ -25,9 +26,9 @@ import type { Env } from './types';
  */
 
 const DAY_MS = 86_400_000;
-const MIN_PLAY_MS = 30_000;
+export const MIN_PLAY_MS = 30_000;
 /** Used when a track has no stored duration. */
-const FALLBACK_DURATION_MS = 180_000;
+export const FALLBACK_DURATION_MS = 180_000;
 const MAX_RANGE_DAYS = 3660;
 const TOP_N = 5;
 const NEW_ARTISTS = 3;
@@ -506,17 +507,20 @@ export function listeningAge(
   };
 }
 
+export interface WrappedRange {
+  from: string;
+  to: string;
+  fromMs: number;
+  toMs: number;
+}
+
 /** Validate `from`/`to` local dates into a closed range that has already ended. */
-export function wrappedRange(eras: readonly Era[], url: URL, now: number) {
-  const from = url.searchParams.get('from') ?? '';
-  const to = url.searchParams.get('to') ?? '';
-  const pattern = /^\d{4}-\d{2}-\d{2}$/;
-  // The round trip catches dates Date.UTC would roll over, like 02-30.
-  const real = (day: string) => {
-    const ms = Date.parse(`${day}T00:00:00Z`);
-    return pattern.test(day) && Number.isFinite(ms) && new Date(ms).toISOString().startsWith(day);
-  };
-  if (!real(from) || !real(to)) throw new BadRequest('from and to must be real YYYY-MM-DD dates');
+export function wrappedRange(eras: readonly Era[], url: URL, now: number): WrappedRange {
+  return closedRange(eras, url.searchParams.get('from') ?? '', url.searchParams.get('to') ?? '', now);
+}
+
+function closedRange(eras: readonly Era[], from: string, to: string, now: number): WrappedRange {
+  if (!isRealDay(from) || !isRealDay(to)) throw new BadRequest('from and to must be real YYYY-MM-DD dates');
 
   const zoneOf = (day: string) => eraAt(eras, Date.parse(`${day}T12:00:00Z`)).timeZone;
   let fromMs: number;
@@ -535,29 +539,121 @@ export function wrappedRange(eras: readonly Era[], url: URL, now: number) {
   return { from, to, fromMs, toMs };
 }
 
+/** The version suffix retires every stored body when the shape changes. */
+export const wrappedKey = (range: { from: string; to: string }) => `wrapped:v2:${range.from}:${range.to}`;
+
+/**
+ * A range that ended a while ago will never change; one that just ended might
+ * still gain plays from a late poll, so it settles first.
+ */
+const freshForSeconds = (range: WrappedRange, now: number) =>
+  now - range.toMs > SETTLE_MS ? 10 * 365 * 86_400 : 60 * 60;
+
+export interface WrappedPreset {
+  from: string;
+  to: string;
+  label: string;
+  kind: 'year' | 'year_to_date';
+  computed: boolean;
+}
+
+/** Most closed years a preset list will offer, which also bounds its bound parameters. */
+const MAX_PRESET_YEARS = 30;
+
+/**
+ * The ranges READ_TOKEN may compute: every closed calendar year that has
+ * plays, and this year so far. A bounded, enumerated set, so a read-only
+ * caller cannot mint keys and force scans the way an arbitrary range would.
+ *
+ * "So far" ends with the last complete local week, not yesterday. It then
+ * changes weekly, so there is one new key a week rather than one a day, and
+ * diffing two days of it cannot isolate a day's listening.
+ *
+ * Years are in each era's local time, like the ranges themselves. Two cheap
+ * reads: one existence probe per candidate off the plays primary key, and the
+ * candidates' rows in stats_snapshots.
+ */
+export async function wrappedPresets(db: D1Database, eras: readonly Era[], now: number): Promise<WrappedPreset[]> {
+  const { timeZone } = eraAt(eras, now);
+  const thisYear = Number(localDayKey(now, timeZone).slice(0, 4));
+  const firstYear = Math.max(new Date(HISTORY_START_MS).getUTCFullYear(), thisYear - MAX_PRESET_YEARS);
+
+  const candidates: Array<Omit<WrappedPreset, 'computed'> & WrappedRange> = [];
+  const lastSunday = localDayKey(startOfLocalWeek(eras, now) - 1, timeZone);
+  if (lastSunday.startsWith(`${thisYear}-`)) {
+    const range = closedRange(eras, `${thisYear}-01-01`, lastSunday, now);
+    candidates.push({ ...range, label: `${thisYear} so far`, kind: 'year_to_date' });
+  }
+  for (let year = thisYear - 1; year >= firstYear; year--) {
+    const range = closedRange(eras, `${year}-01-01`, `${year}-12-31`, now);
+    candidates.push({ ...range, label: String(year), kind: 'year' });
+  }
+  if (candidates.length === 0) return [];
+
+  const [played, stored] = await db.batch([
+    db
+      .prepare(
+        `WITH r(i, a, b) AS (VALUES ${candidates.map(() => '(?, ?, ?)').join(', ')})
+         SELECT i FROM r WHERE EXISTS (SELECT 1 FROM plays WHERE played_at_ms >= r.a AND played_at_ms < r.b)`,
+      )
+      .bind(...candidates.flatMap((c, i) => [i, c.fromMs, c.toMs])),
+    db
+      .prepare(`SELECT key FROM stats_snapshots WHERE body IS NOT NULL AND key IN (${candidates.map(() => '?').join(', ')})`)
+      .bind(...candidates.map(wrappedKey)),
+  ]);
+  const withPlays = new Set((played!.results as Array<{ i: number }>).map((row) => row.i));
+  const computed = new Set((stored!.results as Array<{ key: string }>).map((row) => row.key));
+
+  return candidates
+    .filter((_, i) => withPlays.has(i))
+    .map((c) => ({ from: c.from, to: c.to, label: c.label, kind: c.kind, computed: computed.has(wrappedKey(c)) }));
+}
+
+export async function wrappedRangesRoute(env: Env): Promise<Response> {
+  return json({ ranges: await wrappedPresets(env.DB, erasFor(env.MOVED_AT), Date.now()) });
+}
+
+/**
+ * Compute presets nobody has asked for yet, newest first, so a reader rarely
+ * waits on a cold compute. Run from the daily cron, `limit` at a time: each
+ * compute reads a year of plays several times over, and the D1 row budget is
+ * shared with ingestion. Returns the keys computed.
+ */
+export async function warmWrappedPresets(env: Env, ctx: ExecutionContext, now = Date.now(), limit = 1): Promise<string[]> {
+  const eras = erasFor(env.MOVED_AT);
+  const pending = (await wrappedPresets(env.DB, eras, now)).filter((preset) => !preset.computed).slice(0, limit);
+  const warmed: string[] = [];
+  for (const preset of pending) {
+    const range = closedRange(eras, preset.from, preset.to, now);
+    await snapshot(env.DB, ctx, wrappedKey(range), freshForSeconds(range, now), () => computeWrapped(env.DB, eras, range));
+    warmed.push(wrappedKey(range));
+  }
+  return warmed;
+}
+
 export async function wrappedRoute(env: Env, ctx: ExecutionContext, url: URL, access: 'admin' | 'read'): Promise<Response> {
   const now = Date.now();
   const eras = erasFor(env.MOVED_AT);
   const range = wrappedRange(eras, url, now);
-  // The version suffix retires every stored body when the shape changes.
-  const key = `wrapped:v2:${range.from}:${range.to}`;
+  const key = wrappedKey(range);
 
-  let result: { body: string; computedMs: number; source: string };
-  if (access === 'admin') {
-    // A range that ended a while ago will never change; one that just ended
-    // might still gain plays from a late poll, so it settles first.
-    const freshForSeconds = now - range.toMs > SETTLE_MS ? 10 * 365 * 86_400 : 60 * 60;
-    result = await snapshot(env.DB, ctx, key, freshForSeconds, () => computeWrapped(env.DB, eras, range));
-  } else {
+  let result: { body: string; computedMs: number; source: string } | null = null;
+  if (access === 'read') {
+    // READ_TOKEN reads whatever is stored, and computes only a preset.
     const stored = await peekSnapshot(env.DB, key);
-    if (!stored) {
-      return new Response(JSON.stringify({ error: 'This range has not been computed. An admin token computes new ranges.' }), {
-        status: 403,
-        headers: { 'Content-Type': 'application/json; charset=utf-8' },
-      });
+    if (stored) {
+      result = { ...stored, source: 'snapshot' };
+    } else {
+      const presets = await wrappedPresets(env.DB, eras, now);
+      if (!presets.some((preset) => preset.from === range.from && preset.to === range.to)) {
+        return json(
+          { error: 'This range has not been computed. A read token computes only the ranges at /api/wrapped/ranges.' },
+          403,
+        );
+      }
     }
-    result = { ...stored, source: 'snapshot' };
   }
+  result ??= await snapshot(env.DB, ctx, key, freshForSeconds(range, now), () => computeWrapped(env.DB, eras, range));
 
   return new Response(result.body, {
     headers: {

@@ -1,7 +1,8 @@
-import { SELF, env } from 'cloudflare:test';
+import { SELF, createExecutionContext, env, waitOnExecutionContext } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
+import { erasFor } from '../src/eras';
 import { edgeRequest } from '../src/snapshots';
-import { listeningAge, type Wrapped } from '../src/wrapped';
+import { listeningAge, warmWrappedPresets, wrappedPresets, type Wrapped, type WrappedPreset } from '../src/wrapped';
 
 const BASE = 'https://warehouse.test';
 const ADMIN = { Authorization: 'Bearer test-admin-token' };
@@ -179,6 +180,89 @@ describe('wrapped: body', () => {
     const body = (await (await wrapped('2024-03-01', '2024-03-31')).json()) as Wrapped;
     expect(body.totals.plays).toBe(2);
     expect(JSON.stringify(body)).not.toContain('Song out');
+  });
+});
+
+describe('wrapped: presets', () => {
+  const eras = erasFor('2025-03-10T00:00:00Z');
+  // Wednesday 14 October 2026, midday in Singapore.
+  const NOW = Date.UTC(2026, 9, 14, 4);
+
+  it('offers every closed year with plays and this year to the last complete week, newest first', async () => {
+    await seed([
+      ...session('a', MARCH_2, 1),
+      ...session('b', Date.UTC(2026, 1, 3, 4), 1),
+      // 2025 has no plays, so it is not offered.
+    ]);
+    expect(await wrappedPresets(env.DB, eras, NOW)).toEqual<WrappedPreset[]>([
+      { from: '2026-01-01', to: '2026-10-11', label: '2026 so far', kind: 'year_to_date', computed: false },
+      { from: '2024-01-01', to: '2024-12-31', label: '2024', kind: 'year', computed: false },
+    ]);
+  });
+
+  it('moves "so far" once a week, not once a day', async () => {
+    await seed(session('b', Date.UTC(2026, 1, 3, 4), 1));
+    const toOn = async (now: number) => (await wrappedPresets(env.DB, eras, now))[0]!.to;
+    expect(await toOn(Date.UTC(2026, 9, 12, 4))).toBe('2026-10-11'); // Monday
+    expect(await toOn(Date.UTC(2026, 9, 18, 4))).toBe('2026-10-11'); // Sunday
+    expect(await toOn(Date.UTC(2026, 9, 19, 4))).toBe('2026-10-18'); // next Monday
+  });
+
+  it('offers no "so far" until the year has a complete week, but does offer the year just closed', async () => {
+    await seed(session('b', Date.UTC(2026, 1, 3, 4), 1));
+    // Sunday 3 January 2027: the last complete week ended in 2026.
+    expect(await wrappedPresets(env.DB, eras, Date.UTC(2027, 0, 3, 4))).toEqual([
+      expect.objectContaining({ from: '2026-01-01', to: '2026-12-31', kind: 'year' }),
+    ]);
+  });
+
+  it('lets READ_TOKEN compute a preset but no other range', async () => {
+    await seed(session('a', MARCH_2, 3));
+    expect((await wrapped('2024-01-01', '2024-03-31', READ)).status).toBe(403);
+    // 2024 is a closed year with plays whatever today is.
+    const response = await wrapped('2024-01-01', '2024-12-31', READ);
+    expect(response.status).toBe(200);
+    expect(response.headers.get('X-Stats-Source')).toBe('computed');
+    expect(((await response.json()) as Wrapped).totals.plays).toBe(3);
+  });
+
+  it('refuses READ_TOKEN a closed year with no plays', async () => {
+    await seed(session('a', MARCH_2, 3));
+    expect((await wrapped('2023-01-01', '2023-12-31', READ)).status).toBe(403);
+  });
+
+  it('lists the presets at /api/wrapped/ranges and marks the computed ones', async () => {
+    await seed(session('a', MARCH_2, 3));
+    const list = async () =>
+      ((await (await SELF.fetch(`${BASE}/api/wrapped/ranges`, { headers: READ })).json()) as { ranges: WrappedPreset[] }).ranges;
+    expect((await list()).find((r) => r.label === '2024')).toEqual({
+      from: '2024-01-01',
+      to: '2024-12-31',
+      label: '2024',
+      kind: 'year',
+      computed: false,
+    });
+    await wrapped('2024-01-01', '2024-12-31', READ);
+    expect((await list()).find((r) => r.label === '2024')?.computed).toBe(true);
+    expect((await SELF.fetch(`${BASE}/api/wrapped/ranges`)).status).toBe(401);
+  });
+
+  it('warms one uncomputed preset per run, newest first', async () => {
+    await seed([...session('a', Date.UTC(2023, 2, 2, 12), 1), ...session('b', MARCH_2, 1)]);
+    // An earlier test's body would otherwise answer from the Cache API.
+    const edge = await caches.open('stats');
+    for (const year of [2023, 2024]) await edge.delete(edgeRequest(`wrapped:v2:${year}-01-01:${year}-12-31`));
+    const warm = async () => {
+      const ctx = createExecutionContext();
+      const warmed = await warmWrappedPresets(env, ctx, NOW);
+      await waitOnExecutionContext(ctx);
+      return warmed;
+    };
+    expect(await warm()).toEqual(['wrapped:v2:2024-01-01:2024-12-31']);
+    expect(await warm()).toEqual(['wrapped:v2:2023-01-01:2023-12-31']);
+    expect(await warm()).toEqual([]);
+    const stored = await env.DB.prepare('SELECT COUNT(*) AS n FROM stats_snapshots WHERE body IS NOT NULL').first<{ n: number }>();
+    expect(stored?.n).toBe(2);
   });
 });
 
