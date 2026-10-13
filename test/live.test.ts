@@ -123,6 +123,90 @@ describe('GET /api/top', () => {
   });
 });
 
+describe('GET /api/top edition relabelling', () => {
+  const COVER = (id: string) => `https://i.scdn.co/image/ab67616d0000b273${id}`;
+
+  async function seedPlays(rows: Array<{ track: string; album: string; isrc: string | null; plays: number }>) {
+    const statements = [
+      env.DB.prepare("INSERT OR IGNORE INTO artists (artist_id, name) VALUES ('kdot', 'Kendrick Lamar')"),
+    ];
+    let at = 1;
+    for (const row of rows) {
+      statements.push(
+        env.DB.prepare('INSERT OR IGNORE INTO albums (album_id, name, image_url) VALUES (?, ?, ?)').bind(
+          row.album,
+          row.album === 'std' ? 'gkmc' : 'gkmc (Deluxe)',
+          COVER(row.album),
+        ),
+        env.DB.prepare('INSERT INTO tracks (track_id, name, album_id, isrc, first_seen_ms) VALUES (?, ?, ?, ?, 0)').bind(
+          row.track,
+          'Money Trees',
+          row.album,
+          row.isrc,
+        ),
+        env.DB.prepare("INSERT INTO track_artists (track_id, artist_id, position) VALUES (?, 'kdot', 0)").bind(row.track),
+      );
+      for (let n = 0; n < row.plays; n++) {
+        statements.push(env.DB.prepare('INSERT INTO plays (played_at_ms, track_id) VALUES (?, ?)').bind(at++, row.track));
+      }
+    }
+    await env.DB.batch(statements);
+  }
+
+  async function topTrack(item: object) {
+    stubSpotify((url) => jsonResponse({ items: url.pathname.includes('tracks') ? [item] : [] }));
+    const body = (await (await SELF.fetch(`${BASE}/api/top`, { headers: READ })).json()) as {
+      tracks: { items: Array<{ album: { id: string; name: string; images: Array<{ url: string; width: number }> } }> };
+    };
+    return body.tracks.items[0]!;
+  }
+
+  const deluxeEntry = {
+    name: 'Money Trees',
+    external_ids: { isrc: 'USUM71210785' },
+    artists: [{ id: 'kdot' }],
+    album: { id: 'dlx', name: 'gkmc (Deluxe)', images: [{ url: COVER('dlx'), width: 640 }] },
+  };
+
+  it('labels a track with the edition it was played from most', async () => {
+    await seedAuthorized();
+    await seedPlays([
+      { track: 't-std', album: 'std', isrc: 'USUM71210785', plays: 5 },
+      { track: 't-dlx', album: 'dlx', isrc: 'USUM71210785', plays: 1 },
+    ]);
+
+    const track = await topTrack(deluxeEntry);
+    expect(track.album.id).toBe('std');
+    expect(track.album.name).toBe('gkmc');
+    expect(track.album.images.map((i) => i.width)).toEqual([640, 300, 64]);
+    expect(track.album.images[2]!.url).toBe('https://i.scdn.co/image/ab67616d00004851std');
+  });
+
+  it('matches by name and lead artist when the stored track has no ISRC', async () => {
+    await seedAuthorized();
+    await seedPlays([{ track: 't-std', album: 'std', isrc: null, plays: 3 }]);
+
+    expect((await topTrack(deluxeEntry)).album.id).toBe('std');
+  });
+
+  it('does not count a same-named copy of a different recording', async () => {
+    await seedAuthorized();
+    await seedPlays([{ track: 't-std', album: 'std', isrc: 'USUM71299999', plays: 3 }]);
+
+    expect((await topTrack(deluxeEntry)).album.id).toBe('dlx');
+  });
+
+  it("keeps Spotify's label when that edition is played as much", async () => {
+    await seedAuthorized();
+    await seedPlays([
+      { track: 't-std', album: 'std', isrc: 'USUM71210785', plays: 2 },
+      { track: 't-dlx', album: 'dlx', isrc: 'USUM71210785', plays: 2 },
+    ]);
+
+    expect((await topTrack(deluxeEntry)).album.id).toBe('dlx');
+  });
+});
+
 describe('authorization scopes', () => {
   it('requests the scopes the live routes depend on', async () => {
     const response = await SELF.fetch(`${BASE}/login`, { headers: ADMIN, redirect: 'manual' });
