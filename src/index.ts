@@ -10,6 +10,7 @@ import { NeedsReauthError, getAccessToken, persistTokenResponse } from './tokens
 import { readState } from './db';
 import { SnapshotPending } from './snapshots';
 import { isStatName, statRoute } from './stats';
+import { wrappedRoute } from './wrapped';
 import type { Env } from './types';
 
 /** The cron expression reserved for the alert sweep; everything else polls. */
@@ -155,6 +156,7 @@ const worker = {
               '/api/now-playing',
               '/api/top',
               '/api/stats/{on-repeat,rhythm,top-over-time,eras,albums}',
+              '/api/wrapped',
               '/admin/poll',
               '/admin/alert-check',
               '/admin/import',
@@ -177,6 +179,8 @@ const worker = {
           return await nowPlaying(env);
         case 'GET /api/top':
           return await topMusic(env, url);
+        case 'GET /api/wrapped':
+          return await wrappedRoute(env, ctx, url, access);
         case 'POST /admin/poll':
           return json(await poll(env));
         case 'POST /admin/alert-check':

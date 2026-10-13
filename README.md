@@ -24,6 +24,7 @@ therefore costs nothing: the next run asks for exactly the same window again.
 | `GET /api/top-artists?from=&to=&tz=&limit=` | Artist play counts over a local-calendar range. |
 | `GET /api/daily?from=&to=&tz=` | Plays per local calendar day. |
 | `GET /api/stats/{on-repeat,rhythm,top-over-time,eras,albums}` | Aggregate listening stats, built to be republished. See [Listening stats](#listening-stats). |
+| `GET /api/wrapped?from=&to=` | A year-in-review for any closed range of local days. Only `ADMIN_TOKEN` computes a new range. See [Wrapped](#wrapped). |
 | `POST /admin/poll` | Runs the same code path as the cron trigger. |
 | `POST /admin/import` | Accepts one chunk of Extended Streaming History records. |
 | `POST /admin/backfill-albums?source=&range=&offset=&pages=` | Fills album art from Top Tracks, Liked Songs or Saved Albums. `source` is `top`, `saved` or `albums`. |
@@ -126,6 +127,30 @@ particular nights rather than a routine.
 
 There is no genre data: Spotify's artist catalogue endpoint is closed to this
 app, so `eras` compares artists, not genres.
+
+### Wrapped
+
+`/api/wrapped?from=YYYY-MM-DD&to=YYYY-MM-DD` summarizes a range the way
+Spotify Wrapped does: estimated minutes, top artists, songs and albums,
+biggest day, longest streak, listening by hour and weekday, the top artist and
+song of each month, discoveries (artists and songs first played inside the
+range), and a listening age. It feeds
+[music-warehouse-wrapped](https://github.com/rcnsh/music-warehouse-wrapped),
+which turns it into a story and an MP4.
+
+It is private, not a public stat: it names days. It also takes parameters, so
+anyone holding a token could mint new keys and force scans. Only
+`ADMIN_TOKEN` computes a range; `READ_TOKEN` reads ranges already computed
+and gets `403` otherwise. `to` must be before today, and a range is stored in
+`stats_snapshots` under `wrapped:v1:{from}:{to}`. Once it ended more than two
+days ago it is never recomputed.
+
+Days and hours are in each era's local time. Minutes are estimated: a play
+ran for at most the gap since the play before it and at most the track's
+length, and plays under 30 seconds are skips that count for nothing.
+Listening age is the age of someone whose late teens fall in the middle of
+the five-year span of release years you played most, and is `null` when
+fewer than half of the minutes have a release date.
 
 ---
 

@@ -130,6 +130,15 @@ async function fromSnapshotTable(
   return { body: row.body, computedMs: row.computed_ms, source: 'stale' };
 }
 
+/** A stored body, if one has been computed, without ever computing one. */
+export async function peekSnapshot(db: D1Database, key: string): Promise<{ body: string; computedMs: number } | null> {
+  const row = await db
+    .prepare('SELECT body, computed_ms FROM stats_snapshots WHERE key = ? AND body IS NOT NULL')
+    .bind(key)
+    .first<{ body: string; computed_ms: number }>();
+  return row ? { body: row.body, computedMs: row.computed_ms } : null;
+}
+
 export async function snapshot(
   db: D1Database,
   ctx: ExecutionContext,
