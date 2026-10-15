@@ -4,9 +4,9 @@ A Cloudflare Worker that keeps your Spotify play history in a D1 database you
 own, so it outlives Spotify's 50-play `recently-played` window. Every 30
 minutes it polls Spotify and stores new plays; a bearer-authenticated JSON API
 serves them back, along with stats, a year-in-review and per-artist history.
-There is no UI. [music-warehouse-wrapped](https://github.com/rcnsh/music-warehouse-wrapped)
-is one client.
+There is no UI; the [clients](#clients) are separate repos.
 
+- [Clients](#clients)
 - [Requirements](#requirements)
 - [Setting it up from scratch](#setting-it-up-from-scratch)
 - [Authorizing](#authorizing)
@@ -17,6 +17,23 @@ is one client.
 - [Operations](#operations)
 - [Development](#development)
 - [Design notes and limitations](docs/design.md)
+
+## Clients
+
+Each reads the [API](#api-reference) with a read token, which it gets by
+[signing in with Spotify](#signing-in-with-spotify) or from a pasted
+[device token](#device-tokens). None of them stores or polls anything itself.
+
+| Repo | What it is | Routes it reads |
+|---|---|---|
+| [music-warehouse-gui](https://github.com/rcnsh/music-warehouse-gui) | Native macOS app (Rust, GPUI): history, search, stats, artist and song pages | Nearly all of `/api/*` |
+| [music-warehouse-mcp](https://github.com/rcnsh/music-warehouse-mcp) | MCP server, so an AI agent can query your history | Nearly all of `/api/*` |
+| [music-warehouse-spicetify](https://github.com/rcnsh/music-warehouse-spicetify) | Spicetify custom app: stats inside the Spotify client | `/api/plays`, `/api/home`, `/api/stats/*`, `/api/top-*`, `/api/wrapped`, `/api/concerts`, `/api/track`, `/api/artist`, `/api/on-this-day` |
+| [music-warehouse-wrapped](https://github.com/rcnsh/music-warehouse-wrapped) | Wrapped-style stories in the browser, exportable as video | `/api/wrapped`, `/api/wrapped/ranges`, `/api/top` |
+
+Browser clients (Spicetify, Wrapped) need their origin in
+[`CORS_ORIGINS`](#configuration). Changing a response shape here can break
+them, so check this table first.
 
 ## Requirements
 
