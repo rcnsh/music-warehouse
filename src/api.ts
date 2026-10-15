@@ -6,7 +6,7 @@ export class BadRequest extends Error {}
 /** Longest range the day/artist endpoints will scan, to keep D1 row reads bounded. */
 const MAX_RANGE_DAYS = 3660;
 
-function intParam(url: URL, name: string, fallback: number, min: number, max: number): number {
+export function intParam(url: URL, name: string, fallback: number, min: number, max: number): number {
   const raw = url.searchParams.get(name);
   if (raw === null || raw === '') return fallback;
   const value = Number(raw);

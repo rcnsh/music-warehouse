@@ -295,6 +295,26 @@ GET /api/on-this-day?date=2026-10-13&tz=Europe/London
 An unknown artist or song is a `200` with zero plays and `null` dates, never a
 `404`. `minutes` is an estimate (see [design notes](docs/design.md#wrapped)).
 
+### Search
+
+**`GET /api/search?q=&artist=&limit=`**: stored artists and songs whose name
+contains `q`, case-insensitively, to find the `id` or `name` the history
+routes take. `artist` narrows songs to a primary artist whose name contains
+it. `limit` is 1 to 50 per list, default 10. Exact matches come first, then
+the most played.
+
+```json
+GET /api/search?q=shelter
+{ "q": "shelter",
+  "artists": [],
+  "tracks": [ { "id": "…", "name": "Shelter", "artist": "Porter Robinson", "plays": 96 } ] }
+```
+
+Results fold as the history routes do: an artist's plays from the export join
+the real id (`id` is `null` when only the export knows the artist, so pass the
+`name` to `/api/artist`), and a song's editions count once. `plays` credits
+the primary artist only. Matching is ASCII-case-insensitive, as SQLite's is.
+
 ### Stats
 
 **`GET /api/stats/{name}`**: aggregates built to be safe to publish: no play
