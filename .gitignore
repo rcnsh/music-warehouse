@@ -9,3 +9,5 @@ fixtures/recently-played.json
 .import-state.json
 .albums-state.json
 .catalog-state.json
+# Dry-run report: per-day listening counts.
+import-report.json

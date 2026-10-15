@@ -364,6 +364,10 @@ npm run import -- --dir "export/Spotify Extended Streaming History" --url "$WORK
 | `--dailyRowLimit` | `90000` | Stop after writing this many rows in a UTC day. |
 | `--state` | `.import-state.json` | Where progress is saved. |
 | `--delayMs` | `250` | Pause between chunks. |
+| `--matchWindow` | `600` | Seconds within which an export record and a polled play of the same track count as one listen. `0` turns it off. |
+| `--dryRun` | off | Write nothing; report where the export would add plays. |
+| `--tz` | this machine's zone | Zone for the dry run's months and days. |
+| `--report` | `import-report.json` | Where the dry run writes per-day counts. |
 
 On the Free plan D1 allows 100,000 row writes a day, index writes included, so
 the script stops at 90,000 and a long history takes several days. Re-run it
@@ -372,6 +376,28 @@ daily cap (50 million writes a month are included), so there pass a larger
 `--dailyRowLimit` to import in one run. Re-running is always safe: plays
 already stored are ignored, not duplicated. Podcasts and local files are
 skipped.
+
+A later export overlaps what the poller already caught, and the two never share
+a timestamp: polls keep milliseconds and the export's `ts` is whole seconds. So
+an export record is also left out when a polled play of the same track lies
+within `--matchWindow` seconds of it. Export records are never window-matched
+against each other, since the export records every listen, skips included.
+
+#### Finding gaps first
+
+A dry run walks the whole export, writes nothing (no plays, no progress, no row
+budget) and prints how many plays each month would gain, with per-day counts in
+`import-report.json`:
+
+```bash
+npm run import -- --dryRun --dir "export/Spotify Extended Streaming History" --url "$WORKER_URL"
+```
+
+It also prints how far apart matched polled and export timestamps were. The
+same listen should land at a steady offset; matches spread across the window
+mean it is wide enough to catch a repeat of the track, so narrow
+`--matchWindow` before the real run. New plays in months the poller covered
+may be skips under 30 seconds, which it rarely sees.
 
 ### Album art
 
@@ -872,7 +898,7 @@ These take no token.
 | `GET /login` | `302` to Spotify's consent page. Use `npm run authorize`. |
 | `GET /health` | Whether ingestion is working. See [Health](#health). |
 | `POST /admin/poll` | Poll now, exactly as the cron does. |
-| `POST /admin/import` | Body: an array of export records, or `{ "records": [...] }`. Returns `{ inserted, duplicates, skipped }`. Use `npm run import`. |
+| `POST /admin/import` | Body: an array of export records, or `{ "records": [...] }`. Returns `{ inserted, duplicates, matched_polled, skipped }`. `match_window_s` (default 600, 0 to 3600) sets how close a polled play of the same track must be to count as the same listen. `dry_run=1` writes nothing and returns `new_plays_ms` and `polled_offsets_ms` instead. Use `npm run import`. |
 | `POST /admin/backfill-albums?source=&range=&offset=&pages=` | One step of `npm run backfill:albums`. |
 | `POST /admin/backfill-catalog?after=&limit=&spacingMs=` | One step of `npm run backfill:catalog`. |
 | `POST /admin/alert-check?force=1` | Run the alert sweep now. `force=1` ignores the 24-hour resend window. |

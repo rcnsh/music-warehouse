@@ -470,6 +470,84 @@ describe('export import (R10)', () => {
     ]);
   });
 
+  function importRecords(records: unknown[], query = '') {
+    return get(`/admin/import${query}`, {
+      method: 'POST',
+      headers: { ...AUTH, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ records }),
+    });
+  }
+
+  const record = (ts: string, track: string) => ({
+    ts,
+    spotify_track_uri: `spotify:track:${track}`,
+    master_metadata_track_name: track,
+    master_metadata_album_artist_name: 'Someone',
+  });
+
+  it('matches a polled play whose timestamp differs from the export’s', async () => {
+    // Polls keep milliseconds; the export's ts is whole seconds.
+    await seedPlays([{ ms: Date.parse('2026-09-08T12:00:00.735Z'), trackId: 'polled' }]);
+
+    const body = (await (await importRecords([
+      record('2026-09-08T12:00:01Z', 'polled'),
+      record('2026-09-08T12:30:00Z', 'polled'),
+    ])).json()) as { inserted: number; matched_polled: number; duplicates: number };
+
+    // The first is the polled listen; the second is half an hour later, so a new one.
+    expect(body).toMatchObject({ inserted: 1, matched_polled: 1, duplicates: 0 });
+    const stored = await env.DB.prepare("SELECT played_at_ms, source FROM plays WHERE track_id = 'polled' ORDER BY 1").all();
+    expect(stored.results).toEqual([
+      { played_at_ms: Date.parse('2026-09-08T12:00:00.735Z'), source: 'api' },
+      { played_at_ms: Date.parse('2026-09-08T12:30:00Z'), source: 'export' },
+    ]);
+  });
+
+  it('never window-matches one export play against another', async () => {
+    await importRecords([record('2024-05-01T10:00:00Z', 'skipped-twice')]);
+    const body = (await (await importRecords([record('2024-05-01T10:00:04Z', 'skipped-twice')])).json()) as {
+      inserted: number;
+    };
+    expect(body.inserted).toBe(1);
+  });
+
+  it('turns window matching off with match_window_s=0', async () => {
+    await seedPlays([{ ms: Date.parse('2026-09-08T12:00:00.735Z'), trackId: 'polled' }]);
+    const body = (await (await importRecords([record('2026-09-08T12:00:01Z', 'polled')], '?match_window_s=0')).json()) as {
+      inserted: number;
+    };
+    expect(body.inserted).toBe(1);
+  });
+
+  it('reports what a dry run would add without writing it', async () => {
+    await seedPlays([{ ms: Date.parse('2026-09-08T12:00:00.735Z'), trackId: 'polled' }]);
+    const before = await env.DB.prepare('SELECT COUNT(*) n FROM plays').first<{ n: number }>();
+
+    const body = (await (await importRecords(
+      [record('2026-09-08T12:00:01Z', 'polled'), record('2024-01-01T09:00:00Z', 'older'), { ts: '2024-01-01T09:00:00Z' }],
+      '?dry_run=1',
+    )).json()) as Record<string, unknown>;
+
+    expect(body).toEqual({
+      dry_run: true,
+      received: 3,
+      duplicates: 0,
+      matched_polled: 1,
+      skipped: 1,
+      new: 1,
+      new_plays_ms: [Date.parse('2024-01-01T09:00:00Z')],
+      polled_offsets_ms: [-265],
+    });
+    const after = await env.DB.prepare('SELECT COUNT(*) n FROM plays').first<{ n: number }>();
+    expect(after!.n).toBe(before!.n);
+    expect(await env.DB.prepare("SELECT 1 FROM tracks WHERE track_id = 'older'").first()).toBeNull();
+  });
+
+  it('rejects a match window out of range', async () => {
+    const response = await importRecords([], '?match_window_s=99999');
+    expect(response.status).toBe(400);
+  });
+
   it('rejects an oversized chunk', async () => {
     const records = Array.from({ length: 2001 }, (_, i) => ({
       ts: new Date(1_700_000_000_000 + i * 1000).toISOString(),
