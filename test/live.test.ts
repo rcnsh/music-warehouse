@@ -90,6 +90,27 @@ describe('GET /api/now-playing', () => {
   });
 });
 
+describe('GET /api/recently-played', () => {
+  it('asks Spotify for the latest play only, by default', async () => {
+    await seedAuthorized();
+    const items = [{ played_at: '2026-01-01T00:00:00.000Z', track: { name: 'Kids' } }];
+    const calls = stubSpotify(() => jsonResponse({ items }));
+
+    const response = await SELF.fetch(`${BASE}/api/recently-played`, { headers: READ });
+
+    expect(calls).toEqual(['/v1/me/player/recently-played?limit=1']);
+    expect(await response.json()).toEqual({ items });
+  });
+
+  it('clamps an out-of-range limit back to the default', async () => {
+    await seedAuthorized();
+    const calls = stubSpotify(() => jsonResponse({ items: [] }));
+
+    await SELF.fetch(`${BASE}/api/recently-played?limit=500`, { headers: READ });
+    expect(calls).toEqual(['/v1/me/player/recently-played?limit=1']);
+  });
+});
+
 describe('GET /api/top', () => {
   it('fetches both lists for the requested range', async () => {
     await seedAuthorized();

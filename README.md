@@ -34,6 +34,7 @@ therefore costs nothing: the next run asks for exactly the same window again.
 | `POST /admin/backfill-albums?source=&range=&offset=&pages=` | Fills album art from Top Tracks, Liked Songs or Saved Albums. `source` is `top`, `saved` or `albums`. |
 | `POST /admin/backfill-catalog?after=&limit=&spacingMs=` | Fills album art one track at a time via Get Track, for the tail no user-scoped endpoint reaches. |
 | `GET /api/now-playing` | Live proxy to Spotify's currently-playing. `{ item: null }` when idle. |
+| `GET /api/recently-played?limit=` | Live proxy to Spotify's recently-played, newest first. `limit` is 1–50, default 1. Unlike `/api/plays`, it doesn't wait for the next ingest. |
 | `GET /api/top?range=&limit=&type=` | Live proxy to Spotify's top tracks and artists. `range` is `short_term`, `medium_term` or `long_term`; `type=artists` or `type=tracks` fetches just one list (the other comes back `null`), and `type=artists` reads nothing from D1. |
 | `POST /admin/alert-check?force=1` | Runs the daily alert sweep on demand. `force=1` ignores the resend window. |
 | `GET /admin/raw?after=` | The unmodified upstream payload, for capturing fixtures and diagnosing shape changes. Read-only; never touches the cursor. |

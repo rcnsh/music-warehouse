@@ -4,7 +4,7 @@ import { health } from './health';
 import { importChunk } from './import';
 import { poll } from './ingest';
 import { alertCheckRoute, runAlertCheck } from './alerts';
-import { nowPlaying, topMusic } from './live';
+import { nowPlaying, recentlyPlayed, topMusic } from './live';
 import { SpotifyError, authorizeUrl, exchangeCode, fetchRecentlyPlayed } from './spotify';
 import { NeedsReauthError, getAccessToken, persistTokenResponse } from './tokens';
 import { readState } from './db';
@@ -155,6 +155,7 @@ const worker = {
               '/api/top-artists',
               '/api/daily',
               '/api/now-playing',
+              '/api/recently-played',
               '/api/top',
               '/api/stats/{on-repeat,rhythm,top-over-time,eras,albums}',
               '/api/wrapped',
@@ -182,6 +183,8 @@ const worker = {
           return await dailyCounts(env, url);
         case 'GET /api/now-playing':
           return await nowPlaying(env);
+        case 'GET /api/recently-played':
+          return await recentlyPlayed(env, url);
         case 'GET /api/top':
           return await topMusic(env, url);
         case 'GET /api/wrapped':

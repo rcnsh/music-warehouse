@@ -5,9 +5,10 @@ import { getAccessToken } from './tokens';
 import type { Env } from './types';
 
 /**
- * Read-through proxies for the two things a warehouse cannot answer from
- * stored rows: what is playing right now, and Spotify's own ranked "top"
- * lists (which carry artist images that `recently-played` never returns).
+ * Read-through proxies for what a warehouse cannot answer from stored rows:
+ * what is playing right now, what played last (stored plays lag by up to a
+ * cron interval), and Spotify's own ranked "top" lists (which carry artist
+ * images that `recently-played` never returns).
  *
  * These exist so rcn.sh holds no Spotify credential of its own. The payloads
  * are passed through unmodified — the website keeps its own schemas and
@@ -30,6 +31,15 @@ export async function nowPlaying(env: Env): Promise<Response> {
   const accessToken = await accessTokenFor(env);
   // 204 (nothing playing) comes back as null rather than an error.
   return json({ item: await spotifyGet(accessToken, '/me/player/currently-playing') });
+}
+
+/** `GET /api/recently-played?limit=` → Spotify's recently-played payload, newest first. */
+export async function recentlyPlayed(env: Env, url: URL): Promise<Response> {
+  const requested = Number(url.searchParams.get('limit') ?? 1);
+  const limit = Number.isInteger(requested) && requested >= 1 && requested <= 50 ? requested : 1;
+
+  const accessToken = await accessTokenFor(env);
+  return json(await spotifyGet(accessToken, `/me/player/recently-played?limit=${limit}`));
 }
 
 /**
