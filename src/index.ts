@@ -11,6 +11,7 @@ import { readState, reconcileNameKeyedArtists } from './db';
 import { EraConfigError } from './eras';
 import { syncSearchIndex } from './search-index';
 import { syncAllSongs } from './play-numbers';
+import { ensureRollup } from './rollup';
 import { accessFor, createTokenRoute, listTokensRoute, listedOrigins, revokeTokenRoute } from './auth';
 import { SnapshotPending } from './snapshots';
 import { isStatName, statRoute } from './stats';
@@ -192,6 +193,7 @@ async function handle(request: Request, env: Env, ctx: ExecutionContext): Promis
             '/admin/backfill-albums',
             '/admin/backfill-catalog',
             '/admin/raw',
+            '/admin/rollup',
             '/admin/tokens',
           ],
         });
@@ -248,6 +250,8 @@ async function handle(request: Request, env: Env, ctx: ExecutionContext): Promis
         return await backfillFromCatalog(env, request);
       case 'GET /admin/raw':
         return await rawRecentlyPlayed(env, url);
+      case 'POST /admin/rollup':
+        return json(await ensureRollup(env, { rebuild: url.searchParams.get('rebuild') === '1' }));
       case 'POST /admin/tokens':
         return await createTokenRoute(env, request);
       case 'GET /admin/tokens':
@@ -361,6 +365,17 @@ const worker = {
             console.error('artist-reconcile, search-index or song sync failed', error);
           },
         ),
+      );
+      // Writes out the rollup zone's offsets a day further, or rebuilds the
+      // rollup when its zone has changed.
+      ctx.waitUntil(
+        ensureRollup(env)
+          .then((result) => {
+            console.log('rollup', JSON.stringify(result));
+          })
+          .catch((error) => {
+            console.error('rollup failed', error);
+          }),
       );
       ctx.waitUntil(
         warmWrappedPresets(env, ctx)

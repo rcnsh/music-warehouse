@@ -1,4 +1,5 @@
-import { BadRequest, dateRange, intParam, timeZoneParam } from './api';
+import { BadRequest, dateRange, fromRollup, intParam, timeZoneParam } from './api';
+import { withTrackCounts } from './rollup';
 import { NAME_KEY_PREFIX } from './db';
 import { PRIMARY_ARTIST_SQL } from './stats/sql';
 import { endOfLocalDayUtcMs, isRealDay, localDayKey, startOfLocalDayUtcMs } from './tz';
@@ -316,26 +317,32 @@ export async function topTracksRoute(env: Env, url: URL): Promise<Response> {
   const { fromMs, toMs, from, to } = dateRange(url, timeZone);
   const limit = intParam(url, 'limit', 50, 1, 500);
 
-  const result = await env.DB.prepare(
-    `WITH c AS (
-       SELECT track_id, COUNT(*) AS plays FROM plays
-        WHERE played_at_ms >= ? AND played_at_ms < ? GROUP BY track_id
-     )
-     SELECT c.track_id, c.plays, t.name, ${PRIMARY_ARTIST_SQL('c.track_id')} AS artist, al.image_url AS image
-       FROM c LEFT JOIN tracks t ON t.track_id = c.track_id LEFT JOIN albums al ON al.album_id = t.album_id`,
-  )
-    .bind(fromMs, toMs)
-    .all<MetaRow & { plays: number; name: string | null }>();
+  // Over whole months the counts come from the rollup (src/rollup.ts). Rows
+  // are ordered by id so songs that tie are listed the same either way.
+  const { result, all, rollup } = await withTrackCounts<MetaRow & { plays: number; name: string | null }>(
+    env,
+    { from, to, fromMs, toMs, timeZone },
+    'plays',
+    (cte) =>
+      `WITH ${cte}
+       SELECT c.track_id, c.plays, t.name, ${PRIMARY_ARTIST_SQL('c.track_id')} AS artist, al.image_url AS image
+         FROM c LEFT JOIN tracks t ON t.track_id = c.track_id LEFT JOIN albums al ON al.album_id = t.album_id
+        ORDER BY c.track_id`,
+    [],
+  );
 
   const meta = new Map(result.results.filter((row) => row.name !== null).map((row) => [row.track_id, row]));
   const songKey = (row: MetaRow) => `${row.name.toLowerCase()}|${row.artist?.toLowerCase() ?? ''}`;
-  return respond(
-    {
-      from,
-      to,
-      tz: timeZone,
-      tracks: rankTracks(result.results.map((row) => [row.track_id, row.plays]), meta, songKey).slice(0, limit),
-    },
-    [result],
+  return fromRollup(
+    respond(
+      {
+        from,
+        to,
+        tz: timeZone,
+        tracks: rankTracks(result.results.map((row) => [row.track_id, row.plays]), meta, songKey).slice(0, limit),
+      },
+      all,
+    ),
+    rollup,
   );
 }

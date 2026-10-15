@@ -37,6 +37,13 @@ beforeEach(async () => {
     env.DB.prepare('DELETE FROM track_songs'),
     env.DB.prepare('DELETE FROM play_numbers'),
     env.DB.prepare('DELETE FROM contexts'),
+    // The plays' delete trigger has emptied the rollup; put back the
+    // migration's UTC state, which a test may have rebuilt for another zone.
+    env.DB.prepare('DELETE FROM rollup_days'),
+    env.DB.prepare('DELETE FROM rollup_month_tracks'),
+    env.DB.prepare('DELETE FROM rollup_offsets'),
+    env.DB.prepare('INSERT INTO rollup_offsets (from_ms, offset_ms) VALUES (-8640000000000000, 0)'),
+    env.DB.prepare("UPDATE rollup_state SET time_zone = 'UTC', usable = 1, horizon_ms = 8640000000000000 WHERE id = 1"),
     // Search matches are cached under the newest index row id. Without this
     // row ids restart at 1 in every test, and one test's cached matches
     // would answer the next's. Its empty text never matches anything.

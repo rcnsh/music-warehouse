@@ -1,4 +1,4 @@
-import { chunkSize, readState, writeStatements } from './db';
+import { countStoredPlays, readState, writeStatements } from './db';
 import { normalize } from './normalize';
 import { nameContexts } from './contexts';
 import { SpotifyError, fetchRecentlyPlayed } from './spotify';
@@ -116,12 +116,12 @@ export async function poll(env: Env, now: number = Date.now()): Promise<PollResu
   }
 
   const inserts = writeStatements(db, rows, now);
-  // The play inserts lead the batch; count them so meta.changes can be summed
-  // over exactly those statements. `plays` has 5 columns.
-  const playStatementCount = Math.ceil(rows.plays.length / chunkSize(5));
 
   try {
     const results = await db.batch([
+      // Normalized plays are unique, so the ones not already stored are the
+      // ones this batch inserts.
+      countStoredPlays(db, rows.plays),
       ...inserts,
       // MAX() so the cursor can never move backwards, whatever clock skew or
       // out-of-order played_at values Spotify hands back.
@@ -133,10 +133,7 @@ export async function poll(env: Env, now: number = Date.now()): Promise<PollResu
         .bind(rows.maxPlayedAtMs, now),
     ]);
 
-    let inserted = 0;
-    for (let i = 0; i < playStatementCount; i++) {
-      inserted += results[i]?.meta?.changes ?? 0;
-    }
+    const inserted = rows.plays.length - ((results[0]?.results[0] as { n: number } | undefined)?.n ?? 0);
 
     return {
       ok: true,

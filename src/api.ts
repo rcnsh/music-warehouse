@@ -1,6 +1,7 @@
 import { DEFAULT_TIMEZONE, endOfLocalDayUtcMs, isValidTimeZone, localDayKey, startOfLocalDayUtcMs } from './tz';
 import { ARTIST_TRACKS_CTE, SONG_TRACKS_CTE, textParam } from './history';
 import { trigramPhrase } from './search-index';
+import { ROLLUP_STATE_SQL, type RollupState, beginsDay, endsDay, rollupServes, withTrackCounts } from './rollup';
 import type { Env } from './types';
 
 export class BadRequest extends Error {}
@@ -290,32 +291,38 @@ export async function topArtists(env: Env, url: URL): Promise<Response> {
 
   // Plays are counted per track before artists are credited, so each track's
   // credits are looked up once rather than once per play: half the rows read
-  // (49k instead of 100k for a year).
-  const query = await env.DB.prepare(
-    `WITH c AS (
-       SELECT track_id, COUNT(*) AS n
-         FROM plays
-        WHERE played_at_ms >= ? AND played_at_ms < ?
-        GROUP BY track_id
-     )
-     SELECT a.artist_id, a.name, SUM(c.n) AS plays
-       FROM c
-       JOIN track_artists ta ON ta.track_id = c.track_id
-       JOIN artists a        ON a.artist_id = ta.artist_id
-      GROUP BY a.artist_id, a.name
-      ORDER BY plays DESC, a.name ASC
-      LIMIT ?`,
-  )
-    .bind(fromMs, toMs, limit)
-    .all();
+  // (49k instead of 100k for a year). Over whole months the counts come from
+  // the rollup (src/rollup.ts). artist_id breaks full ties, so both ways of
+  // counting list them in the same order.
+  const { result: query, all, rollup } = await withTrackCounts(
+    env,
+    { from, to, fromMs, toMs, timeZone },
+    'n',
+    (cte) =>
+      `WITH ${cte}
+       SELECT a.artist_id, a.name, SUM(c.n) AS plays
+         FROM c
+         JOIN track_artists ta ON ta.track_id = c.track_id
+         JOIN artists a        ON a.artist_id = ta.artist_id
+        GROUP BY a.artist_id, a.name
+        ORDER BY plays DESC, a.name ASC, a.artist_id ASC
+        LIMIT ?`,
+    [limit],
+  );
 
-  return json({
-    from,
-    to,
-    tz: timeZone,
-    artists: query.results,
-    _meta: { rows_read: query.meta?.rows_read ?? null, duration_ms: query.meta?.duration ?? null },
-  });
+  return fromRollup(
+    json({
+      from,
+      to,
+      tz: timeZone,
+      artists: query.results,
+      _meta: {
+        rows_read: all.reduce((sum, r) => sum + (r.meta?.rows_read ?? 0), 0),
+        duration_ms: query.meta?.duration ?? null,
+      },
+    }),
+    rollup,
+  );
 }
 
 /**
@@ -332,6 +339,42 @@ export async function dailyCounts(env: Env, url: URL): Promise<Response> {
   const filter = playFilterParams(url, { q: false });
   const match = await filterTrackIds(env, filter);
 
+  const counts = new Map<string, number>();
+  // Pre-seed every day in the range so quiet days appear as zero rather than a gap.
+  for (let cursor = fromMs; cursor < toMs; ) {
+    const key = localDayKey(cursor, timeZone);
+    counts.set(key, 0);
+    cursor = endOfLocalDayUtcMs(key, timeZone);
+  }
+  const days = () => [...counts.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([day, plays]) => ({ day, plays }));
+
+  // Unfiltered, the rollup holds each day's count: one row a day instead of
+  // one a play. It answers only when the range runs exactly from local
+  // midnight to local midnight in its zone, so its days are the range's.
+  if (match.ids === null && beginsDay(fromMs, from, timeZone) && endsDay(toMs, to, timeZone)) {
+    const [state, rollup] = await env.DB.batch([
+      env.DB.prepare(ROLLUP_STATE_SQL),
+      env.DB.prepare('SELECT day, plays FROM rollup_days WHERE day >= ? AND day <= ? AND plays > 0').bind(from, to),
+    ]);
+    if (rollupServes(state!.results[0] as RollupState | undefined, timeZone, Date.now())) {
+      for (const row of rollup!.results as Array<{ day: string; plays: number }>) counts.set(row.day, row.plays);
+      return fromRollup(
+        json({
+          from,
+          to,
+          tz: timeZone,
+          ...filter,
+          days: days(),
+          _meta: {
+            rows_read: (state!.meta?.rows_read ?? 0) + (rollup!.meta?.rows_read ?? 0),
+            duration_ms: rollup!.meta?.duration ?? null,
+          },
+        }),
+        true,
+      );
+    }
+  }
+
   // Filtered, idx_plays_track seeks each track's plays in the range, so the
   // rows read follow the song's or artist's plays rather than everyone's.
   const query = await (match.ids === null
@@ -344,13 +387,6 @@ export async function dailyCounts(env: Env, url: URL): Promise<Response> {
       ).bind(JSON.stringify(match.ids), fromMs, toMs)
   ).all<{ played_at_ms: number }>();
 
-  const counts = new Map<string, number>();
-  // Pre-seed every day in the range so quiet days appear as zero rather than a gap.
-  for (let cursor = fromMs; cursor < toMs; ) {
-    const key = localDayKey(cursor, timeZone);
-    counts.set(key, 0);
-    cursor = endOfLocalDayUtcMs(key, timeZone);
-  }
   for (const row of query.results ?? []) {
     const key = localDayKey(row.played_at_ms, timeZone);
     counts.set(key, (counts.get(key) ?? 0) + 1);
@@ -361,9 +397,15 @@ export async function dailyCounts(env: Env, url: URL): Promise<Response> {
     to,
     tz: timeZone,
     ...filter,
-    days: [...counts.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([day, plays]) => ({ day, plays })),
+    days: days(),
     _meta: { rows_read: match.rowsRead + (query.meta?.rows_read ?? 0), duration_ms: query.meta?.duration ?? null },
   });
+}
+
+/** Marks a response the rollup answered, for checking the rollup is in use. */
+export function fromRollup(response: Response, rollup: boolean): Response {
+  if (rollup) response.headers.set('X-Rollup', '1');
+  return response;
 }
 
 export function json(body: unknown, status = 200): Response {

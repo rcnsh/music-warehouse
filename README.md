@@ -299,7 +299,7 @@ locally. `npx wrangler secret list` shows what is set.
 | `ALERT_MENTION` | no | Prefix for every alert, e.g. a Discord `<@id>`. |
 | `SIGN_IN_SCHEMES` | no | Comma-separated custom URL schemes a mobile app may [sign in](#signing-in-with-spotify) to, e.g. `app.remastered`. |
 | `TICKETMASTER_API_KEY` | no | A Ticketmaster Discovery API consumer key, from <https://developer.ticketmaster.com>, for [concerts](#concerts). The consumer secret isn't needed. Unset turns the concert check off. |
-| `TIMEZONE` | no | IANA timezone the stats read local time in, when `ERAS` is unset. Default `UTC`. |
+| `TIMEZONE` | no | IANA timezone the stats read local time in, when `ERAS` is unset. Default `UTC`. Also the zone of the [play-count rollup](#the-play-count-rollup); with only `ERAS` set, the rollup uses the latest era's zone. |
 | `ERAS` | no | JSON list of periods, each read in its own timezone. See [step 2](#2-configure-the-deployment) and [`src/eras.ts`](src/eras.ts). |
 | `CONCERT_REGIONS` | no | JSON list of places to look for [concerts](#concerts). Unset means none. |
 | `SPOTIFY_REDIRECT_URI` | yes | A var in `wrangler.jsonc`, not a secret. |
@@ -318,6 +318,21 @@ read or 100,000 written. The Worker still runs on Free: stats are cached so
 their cost doesn't grow with traffic, and the concert check fits Free's 50
 subrequests. `_meta.rows_read` and the `X-Rows-Read` header report what each
 request read.
+
+### The play-count rollup
+
+`/api/daily`, `/api/top-tracks` and `/api/top-artists` over long ranges read
+counts per local day, and per local month and track, from tables that
+triggers on `plays` keep up to date (migration 0014), instead of every play.
+A year of `/api/daily` reads about 370 rows instead of 15k; a year of top
+tracks about 19k instead of 42k. The answers are identical either way.
+
+The rollup is built in one zone: `TIMEZONE`, else the latest era's zone, else
+UTC. A request whose `tz` is that zone uses it; any other `tz` counts plays as
+before. The migration builds it in UTC. For any other zone it is rebuilt by
+the daily cron, or at once with `POST /admin/rollup` (about 600k rows read and
+18k written for 76k plays, once). Changing `TIMEZONE` or `ERAS` later rebuilds
+it the same way.
 
 ## API reference
 
@@ -612,6 +627,7 @@ grant has lapsed.
 | `GET /admin/concert-artists?unmatched=1` | What each top artist matched on Ticketmaster; `unmatched=1` lists only the misses. |
 | `PUT /admin/concert-artists` | Body `{ "name": "Kanye West", "attraction_id": "K8vZ9175Oy7" }` pins a name to an attraction (find ids at <https://developer.ticketmaster.com/api-explorer/>); `"attraction_id": null` blocks a wrong match. Pins are never re-matched. `DELETE` with `{ "name" }` unpins. |
 | `GET /admin/raw?after=` | Spotify's unmodified recently-played payload. Read-only. |
+| `POST /admin/rollup?rebuild=1` | Bring the [play-count rollup](#the-play-count-rollup) up to date with the configured zone now, as the daily cron does; `rebuild=1` rebuilds it even if nothing changed. Returns `{ time_zone, rebuilt, usable, horizon_ms }`. |
 | `POST /admin/tokens` | Body `{ name, access?, expires_in_days? }`. Mints a [device token](#device-tokens), returned once. |
 | `GET /admin/tokens` | Every device token: `id`, `name`, `access`, `created_ms`, `expires_ms`, `last_used_ms`, `revoked_ms`, `active`. |
 | `DELETE /admin/tokens?id=` | Revokes a device token. |
