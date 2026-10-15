@@ -7,7 +7,7 @@ import { alertCheckRoute, runAlertCheck } from './alerts';
 import { nowPlaying, recentlyPlayed, topMusic } from './live';
 import { SpotifyError, type TokenResponse, authorizeUrl, exchangeCode, fetchRecentlyPlayed } from './spotify';
 import { NeedsReauthError, getAccessToken, persistTokenResponse } from './tokens';
-import { readState } from './db';
+import { readState, reconcileNameKeyedArtists } from './db';
 import { accessFor, createTokenRoute, listTokensRoute, listedOrigins, revokeTokenRoute } from './auth';
 import { SnapshotPending } from './snapshots';
 import { isStatName, statRoute } from './stats';
@@ -331,6 +331,12 @@ const worker = {
           .catch((error) => {
             console.error('alert-check failed', error);
           }),
+      );
+      // Polls only reconcile what they touched; this catches the rest.
+      ctx.waitUntil(
+        env.DB.batch(reconcileNameKeyedArtists(env.DB)).catch((error) => {
+          console.error('artist-reconcile failed', error);
+        }),
       );
       ctx.waitUntil(
         warmWrappedPresets(env, ctx)

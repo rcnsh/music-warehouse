@@ -56,6 +56,8 @@ export function buildInserts<T extends Record<string, unknown>>(
  * characters of base62 and can never contain a colon.
  */
 export const NAME_KEY_PREFIX = 'name:';
+/** The first string after every `name:` key, so `>= prefix AND < end` is an index range. */
+export const NAME_KEY_END = 'name;';
 
 /**
  * Fold name-keyed artists into their real id-keyed equivalents, by exact name.
@@ -71,10 +73,14 @@ export const NAME_KEY_PREFIX = 'name:';
  *   2. Drop name-keyed links on tracks that now carry a real link.
  *   3. Delete name-keyed artist rows nothing points at any more.
  *
- * Runs on every write, so the name match must be indexable: it compares the
- * bare `artists.name` column (covered by idx_artists_name) against the key's
- * suffix, never `'name:' || name`, which no index can serve. Written the wrong
- * way round this reads 10.6 million rows per call instead of a few thousand.
+ * The name match must be indexable: it compares the bare `artists.name` column
+ * (covered by idx_artists_name) against the key's suffix, never
+ * `'name:' || name`, which no index can serve. Written the wrong way round
+ * this reads 10.6 million rows per call instead of a few thousand.
+ *
+ * This sweeps every name-keyed row (about 46k rows read with 4,574 such links
+ * left), so it runs after an import and once a day. Polls use
+ * reconcileArtistsInPoll, which only looks at what the poll touched.
  */
 export function reconcileNameKeyedArtists(db: D1Database): D1PreparedStatement[] {
   // The name carried by a key, as a value the index on artists(name) can seek to.
@@ -102,6 +108,57 @@ export function reconcileNameKeyedArtists(db: D1Database): D1PreparedStatement[]
         WHERE artist_id LIKE '${NAME_KEY_PREFIX}%'
           AND NOT EXISTS (SELECT 1 FROM track_artists ta WHERE ta.artist_id = artists.artist_id)`,
     ),
+  ];
+}
+
+/**
+ * reconcileNameKeyedArtists, limited to one poll's rows: about 200 rows read
+ * instead of 46k. A name-keyed row only becomes mergeable when a real artist
+ * with its name arrives, or a track it credits gains a real link, and both
+ * happen in the poll that brings them, so the poll's names and tracks are the
+ * only places to look. The daily full sweep catches anything this misses,
+ * such as a name-keyed artist orphaned through a track whose live credit is
+ * spelled differently.
+ *
+ * Names and track ids travel as JSON, since D1 allows 100 bound parameters.
+ */
+export function reconcileArtistsInPoll(db: D1Database, rows: NormalizedRows): D1PreparedStatement[] {
+  const names = JSON.stringify([
+    ...new Set(rows.artists.filter((a) => !a.artist_id.startsWith(NAME_KEY_PREFIX)).map((a) => a.name)),
+  ]);
+  const tracks = JSON.stringify([...new Set(rows.trackArtists.map((link) => link.track_id))]);
+  const keys = `(SELECT '${NAME_KEY_PREFIX}' || value FROM json_each(?1))`;
+  const nameOfKey = `substr(track_artists.artist_id, ${NAME_KEY_PREFIX.length + 1})`;
+  return [
+    db
+      .prepare(
+        `UPDATE OR IGNORE track_artists
+            SET artist_id = (SELECT real.artist_id FROM artists real
+                              WHERE real.name = ${nameOfKey}
+                                AND real.artist_id NOT LIKE '${NAME_KEY_PREFIX}%')
+          WHERE artist_id IN ${keys}
+            AND EXISTS (SELECT 1 FROM artists real
+                         WHERE real.name = ${nameOfKey}
+                           AND real.artist_id NOT LIKE '${NAME_KEY_PREFIX}%')`,
+      )
+      .bind(names),
+    db
+      .prepare(
+        `DELETE FROM track_artists
+          WHERE (track_id IN (SELECT value FROM json_each(?2)) OR artist_id IN ${keys})
+            AND artist_id >= '${NAME_KEY_PREFIX}' AND artist_id < '${NAME_KEY_END}'
+            AND EXISTS (SELECT 1 FROM track_artists real
+                         WHERE real.track_id = track_artists.track_id
+                           AND real.artist_id NOT LIKE '${NAME_KEY_PREFIX}%')`,
+      )
+      .bind(names, tracks),
+    db
+      .prepare(
+        `DELETE FROM artists
+          WHERE artist_id IN ${keys}
+            AND NOT EXISTS (SELECT 1 FROM track_artists ta WHERE ta.artist_id = artists.artist_id)`,
+      )
+      .bind(names),
   ];
 }
 
@@ -167,6 +224,6 @@ export function writeStatements(db: D1Database, rows: NormalizedRows): D1Prepare
 
     // Runs last, after the real artists and links are in place: a poll that
     // teaches us an artist's real id retires every name-keyed row for it.
-    ...reconcileNameKeyedArtists(db),
+    ...reconcileArtistsInPoll(db, rows),
   ];
 }
