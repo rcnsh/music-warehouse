@@ -1,6 +1,7 @@
 import { BadRequest, dateRange, fromRollup, intParam, timeZoneParam } from './api';
 import { withTrackCounts } from './rollup';
 import { NAME_KEY_PREFIX } from './db';
+import { songTitle } from './song-title';
 import { PRIMARY_ARTIST_SQL } from './stats/sql';
 import { endOfLocalDayUtcMs, isRealDay, localDayKey, startOfLocalDayUtcMs } from './tz';
 import type { Env } from './types';
@@ -13,7 +14,8 @@ import { FALLBACK_DURATION_MS, MIN_PLAY_MS } from './wrapped';
  * Artists are matched the way the stats group them: by id, and by lowercased
  * name, so the export's `name:` placeholders fold into the real id. Credit is
  * the primary artist's only, as everywhere else. A track folds the other
- * editions of the same song (same title and primary artist), as Wrapped does.
+ * editions of the same song (same title, less any edition tag such as
+ * "- 2011 Remaster", and primary artist), as Wrapped does.
  *
  * `plays` counts every stored play, as /api/top-artists does. `minutes` uses
  * Wrapped's estimate: a play ran for at most the gap since the play before it
@@ -29,7 +31,14 @@ const TOP_DAY_TRACKS = 5;
 const FIRST_YEAR = 2008;
 
 type PlayRow = { played_at_ms: number; track_id: string; ms: number };
-type MetaRow = { track_id: string; name: string; artist: string | null; image: string | null };
+type MetaRow = {
+  track_id: string;
+  name: string;
+  artist: string | null;
+  image: string | null;
+  /** The `track_songs` key, where a query selects it. */
+  song?: string;
+};
 
 interface Month {
   month: string;
@@ -78,16 +87,14 @@ export const ARTIST_TRACKS_CTE = `n AS (SELECT COALESCE((SELECT name FROM artist
     ts AS (SELECT DISTINCT track_id FROM track_artists WHERE position = 0 AND artist_id IN (SELECT artist_id FROM a))`;
 
 /**
- * Every edition of track ?1's song, as /api/track folds them: the same title,
- * case-insensitively, under the same primary artist (itself folded by name).
- * Defines `ts`; an unknown track is only itself.
+ * Every edition of track ?1's song, as play numbers count them: the tracks
+ * sharing its `track_songs` key, its title less any edition tag
+ * (src/song-title.ts) under the same primary artist name. Defines `ts`; an
+ * unknown track is only itself.
  */
-export const SONG_TRACKS_CTE = `song AS (SELECT t.name, ${PRIMARY_ARTIST_SQL('t.track_id')} AS artist FROM tracks t WHERE t.track_id = ?1),
-    a AS (SELECT artist_id FROM artists WHERE name = (SELECT artist FROM song) COLLATE NOCASE),
-    ts AS (
+export const SONG_TRACKS_CTE = `ts AS (
       SELECT ?1 AS track_id
-      UNION SELECT ta.track_id FROM track_artists ta JOIN tracks t ON t.track_id = ta.track_id
-       WHERE ta.position = 0 AND ta.artist_id IN (SELECT artist_id FROM a) AND t.name = (SELECT name FROM song) COLLATE NOCASE
+      UNION SELECT track_id FROM track_songs WHERE song = (SELECT song FROM track_songs WHERE track_id = ?1)
     )`;
 
 function metaSql(tracksCte: string): string {
@@ -214,7 +221,7 @@ export async function artistRoute(env: Env, url: URL): Promise<Response> {
     {
       artist: { id: id ?? real?.artist_id ?? null, name: known?.name ?? real?.name ?? artists[0]?.name ?? name ?? '' },
       ...historyOf(plays, timeZone),
-      top_tracks: rankTracks(countBy(plays), meta, (row) => row.name.toLowerCase())
+      top_tracks: rankTracks(countBy(plays), meta, (row) => songTitle(row.name.toLowerCase()))
         .slice(0, TOP_ARTIST_TRACKS)
         .map(({ id, name, plays, image }) => ({ id, name, plays, image })),
     },
@@ -295,7 +302,7 @@ export async function onThisDayRoute(env: Env, url: URL): Promise<Response> {
         .sort((a, b) => b[0] - a[0])
         .map(([year, rows]) => {
           const meta = new Map(rows.filter((row) => row.name !== null).map((row) => [row.track_id, row]));
-          const songKey = (row: MetaRow) => `${row.name.toLowerCase()}|${row.artist?.toLowerCase() ?? ''}`;
+          const songKey = (row: MetaRow) => `${songTitle(row.name.toLowerCase())}|${row.artist?.toLowerCase() ?? ''}`;
           return {
             year,
             plays: rows.reduce((sum, row) => sum + row.plays, 0),
@@ -313,36 +320,43 @@ export async function onThisDayRoute(env: Env, url: URL): Promise<Response> {
  * GET /api/top-tracks?from=&to=&tz=&limit=
  *
  * The /api/top-artists of songs: plays per song between two local dates, with
- * editions folded as /api/on-this-day does (same title, same primary artist).
+ * editions folded by their `track_songs` key (same title less any edition
+ * tag, same primary artist), as play numbers and /api/track fold them.
  */
 export async function topTracksRoute(env: Env, url: URL): Promise<Response> {
   const timeZone = timeZoneParam(url, env);
   const { fromMs, toMs, from, to } = dateRange(url, timeZone);
   const limit = intParam(url, 'limit', 50, 1, 500);
 
-  // Over whole months the counts come from the rollup (src/rollup.ts). Rows
-  // are ordered by id so songs that tie are listed the same either way.
-  const { result, all, rollup } = await withTrackCounts<MetaRow & { plays: number; name: string | null }>(
+  // Songs are ranked and cut to `limit` in SQL, so names, artists and art are
+  // looked up for the editions of those songs only, not for every track
+  // played in the range. Over whole months the counts come from the rollup
+  // (src/rollup.ts). A tie at the cut goes to the lower key, either way.
+  const { result, all, rollup } = await withTrackCounts<MetaRow & { plays: number }>(
     env,
     { from, to, fromMs, toMs, timeZone },
     'plays',
     (cte) =>
-      `WITH ${cte}
-       SELECT c.track_id, c.plays, t.name, ${PRIMARY_ARTIST_SQL('c.track_id')} AS artist, al.image_url AS image
-         FROM c LEFT JOIN tracks t ON t.track_id = c.track_id LEFT JOIN albums al ON al.album_id = t.album_id
-        ORDER BY c.track_id`,
-    [],
+      `WITH ${cte},
+       -- A track the song sweep hasn't keyed yet stands alone, as songKey() keys a track with no artist.
+       e AS (SELECT COALESCE(ts.song, char(30) || c.track_id) AS song, c.track_id, c.plays
+               FROM c LEFT JOIN track_songs ts ON ts.track_id = c.track_id),
+       top AS (SELECT song FROM e GROUP BY song ORDER BY SUM(plays) DESC, song LIMIT ?)
+       SELECT e.song, e.track_id, e.plays, t.name, ${PRIMARY_ARTIST_SQL('e.track_id')} AS artist, al.image_url AS image
+         FROM top JOIN e ON e.song = top.song
+         JOIN tracks t ON t.track_id = e.track_id LEFT JOIN albums al ON al.album_id = t.album_id
+        ORDER BY e.track_id`,
+    [limit],
   );
 
-  const meta = new Map(result.results.filter((row) => row.name !== null).map((row) => [row.track_id, row]));
-  const songKey = (row: MetaRow) => `${row.name.toLowerCase()}|${row.artist?.toLowerCase() ?? ''}`;
+  const meta = new Map(result.results.map((row) => [row.track_id, row]));
   return fromRollup(
     respond(
       {
         from,
         to,
         tz: timeZone,
-        tracks: rankTracks(result.results.map((row) => [row.track_id, row.plays]), meta, songKey).slice(0, limit),
+        tracks: rankTracks(result.results.map((row) => [row.track_id, row.plays]), meta, (row) => row.song!),
       },
       all,
     ),

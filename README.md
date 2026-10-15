@@ -591,7 +591,7 @@ These read only D1, so they keep working when the Spotify grant has lapsed.
 | `before` | none | The previous page's `next_before`, to page; or an epoch-ms, for plays strictly before that millisecond. |
 | `after` | none | Only plays after this epoch-ms. |
 | `q` | none | Only plays whose track, album or any artist name contains this, ignoring case and accents (at most 200 characters). Pages with `before` like the unfiltered list, and the response echoes `q`. |
-| `track_id` | none | Only plays of this song: every edition, folded as `/api/track` folds them (same title and primary artist). Any edition's id works. |
+| `track_id` | none | Only plays of this song: every edition, folded as `/api/track` folds them (same title less any remaster, "single version" or "radio edit" tag, and same primary artist). Any edition's id works. |
 | `artist_id` | none | Only plays credited to this artist as `/api/artist` credits them: primary artist only, export `name:` placeholders with the same name included. |
 | `artist_name` | none | The artist by name, as `/api/artist`'s `name`: a fallback for an artist the warehouse has no id for (`/api/search` gives `id: null`). |
 
@@ -693,8 +693,11 @@ lists every credited artist. A bad parameter is a `400` before anything
 streams. It reads about seven rows per play (the joins to names), so a whole
 history of 76k plays is about 680k rows.
 
-**`GET /api/top-artists`**: play counts per artist. Params: `from` (default 29
-days ago), `to` (default today), `tz`, `limit` (1 to 500, default 50).
+**`GET /api/top-artists`**: play counts per artist, every credited artist on
+a track getting the play. Artists are grouped by name, ignoring case, so an
+export placeholder (`name:` id) counts with the real artist; `artist_id` is
+the real id where one is known. Params: `from` (default 29 days ago), `to`
+(default today), `tz`, `limit` (1 to 500, default 50).
 
 ```json
 GET /api/top-artists?from=2026-10-01&to=2026-10-14&tz=Europe/London&limit=1
@@ -703,8 +706,9 @@ GET /api/top-artists?from=2026-10-01&to=2026-10-14&tz=Europe/London&limit=1
   "_meta": { "rows_read": 1212, "duration_ms": 3.4 } }
 ```
 
-**`GET /api/top-tracks`**: play counts per song, editions folded (same title
-and primary artist). Same params as `/api/top-artists`. Returns
+**`GET /api/top-tracks`**: play counts per song, editions folded (same title,
+less a remaster, "single version" or "radio edit" tag, and same primary
+artist). Same params as `/api/top-artists`. Returns
 `{ from, to, tz, tracks: [{ id, name, artist, plays, image }] }`; `id` is the
 most-played edition's. It has no `_meta`: the rows it read are in the
 `X-Rows-Read` header.
@@ -911,8 +915,14 @@ now. Each artist is matched to a Ticketmaster attraction by exact name
 first few days fill in gradually. An act whose name Ticketmaster spells
 differently is missed rather than guessed at; [pin it](#admin) instead. Events
 Ticketmaster stops listing (past, cancelled) drop out, as do rows for a region
-taken out of `CONCERT_REGIONS`. Needs `TICKETMASTER_API_KEY` and at least one
-region; there are no push alerts.
+taken out of `CONCERT_REGIONS`. A region with more than 600 events is read up
+to the date its third page reaches, and later events keep their rows (and
+`first_seen`) until a run reaches them. A 429 is retried after its
+`Retry-After` when that is short (30 s a run in all); the last run, and the
+last failure, are kept in `concert_check_state` (migration 0017), shown under
+`concerts` in `/health`, and two failed runs in a row raise the
+`concert_check_failing` [alert](#alerting). Needs `TICKETMASTER_API_KEY` and at
+least one region; new events themselves are not pushed.
 
 ### Live from Spotify
 
@@ -980,7 +990,10 @@ same line as the `ingestion_stalled` alert); `stalled` says when it hasn't.
 `action_required` names what to do whenever `ok` is false, and warns 14 days
 before the grant expires. It also reports `total_plays`, `plays_last_24h`,
 `days_until_token_expiry`, `cursor_iso`, `last_error` and
-`consecutive_failures`.
+`consecutive_failures`, and under `concerts` how the daily concert check has
+gone (`last_run_ms`, `last_success_ms`, `last_error`, `consecutive_failures`,
+and `failing` from two failures in a row). A failing concert check sets
+`action_required` but not `ok`, which is about recording plays.
 
 `total_plays` is summed from the [play-count rollup](#the-play-count-rollup),
 one row per day, rather than counted play by play, so a call reads a few
@@ -1002,8 +1015,10 @@ conditions are logged but never pushed.
 | `needs_reauth` | critical | The grant was rejected; ingestion has stopped. |
 | `token_expiring` | warning | The grant expires in 14 days or less. |
 | `ingestion_stalled` | critical | No successful poll for 3 hours. |
+| `concert_check_failing` | warning | The daily concert check failed twice in a row (with `TICKETMASTER_API_KEY` set). |
 
-The first two suppress the others. A firing condition is re-sent at most once a
+The first two suppress the other Spotify conditions; the concert alert is
+independent of them. A firing condition is re-sent at most once a
 day, and alerts again immediately if it clears and comes back. Test it with
 `POST /admin/alert-check?force=1`.
 

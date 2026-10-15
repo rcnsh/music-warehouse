@@ -1,5 +1,6 @@
 import { SELF, env } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
+import { syncAllSongs } from '../src/play-numbers';
 
 const BASE = 'https://warehouse.test';
 const ADMIN = { Authorization: 'Bearer test-admin-token' };
@@ -47,7 +48,8 @@ async function seed(plays: Play[]) {
       );
     }
   }
-  await env.DB.batch(statements);
+  // Songs keyed as every write keys them.
+  await env.DB.batch([...statements, ...syncAllSongs(env.DB)]);
 }
 
 /** `count` plays of one track, five minutes apart so each counts its full 200 s. */
@@ -206,6 +208,17 @@ describe('/api/track', () => {
     expect(body.months).toEqual([{ month: '2024-01', plays: 5 }]);
   });
 
+  it('folds a remastered or single edition, but not a live one', async () => {
+    await seed([
+      ...session(JAN_10, 2, { trackId: 'orig', name: 'Heroes', artistId: 'bowie', artistName: 'David Bowie' }),
+      ...session(JAN_10 + DAY, 3, { trackId: 'remaster', name: 'Heroes - 2017 Remaster', artistId: 'bowie', artistName: 'David Bowie' }),
+      ...session(JAN_10 + 2 * DAY, 1, { trackId: 'single', name: 'Heroes (Single Version)', artistId: 'bowie', artistName: 'David Bowie' }),
+      ...session(JAN_10 + 3 * DAY, 4, { trackId: 'live', name: 'Heroes - Live', artistId: 'bowie', artistName: 'David Bowie' }),
+    ]);
+    expect((await get<TrackBody>('/api/track?id=remaster')).plays).toBe(6);
+    expect((await get<TrackBody>('/api/track?id=live')).plays).toBe(4);
+  });
+
   it('answers an unknown track with nulls and zeros, not 404', async () => {
     expect(await get<TrackBody>('/api/track?id=nothing')).toEqual({
       track: { id: 'nothing', name: null, artist: null, image: null },
@@ -286,6 +299,31 @@ describe('/api/top-tracks', () => {
     ]);
     const limited = await get<{ tracks: unknown[] }>('/api/top-tracks?from=2024-01-01&to=2024-01-31&tz=UTC&limit=1');
     expect(limited.tracks).toHaveLength(1);
+  });
+
+  it('folds remasters, takes the art from an edition that has it, and cuts to the limit in SQL', async () => {
+    await seed([
+      ...session(JAN_10, 2, { trackId: 'orig', name: 'Heroes', artistId: 'bowie', artistName: 'David Bowie', album: null }),
+      ...session(JAN_10 + DAY, 3, { trackId: 'remaster', name: 'Heroes - 2017 Remaster', artistId: 'bowie', artistName: 'David Bowie', album: null }),
+      ...session(JAN_10 + 2 * DAY, 1, { trackId: 'radio', name: 'Heroes (Radio Edit)', artistId: 'name:david bowie', artistName: 'david bowie' }),
+      ...session(JAN_10 + 3 * DAY, 4, { trackId: 'live', name: 'Heroes - Live', artistId: 'bowie', artistName: 'David Bowie' }),
+      ...session(JAN_10 + 4 * DAY, 1, { trackId: 'quiet', name: 'Quiet', artistId: 'q' }),
+    ]);
+    type Body = { tracks: Array<{ id: string; name: string; artist: string; plays: number; image: string | null }> };
+    // A whole month (from the rollup) and a part of one (from the plays) agree.
+    for (const range of ['from=2024-01-01&to=2024-01-31', 'from=2024-01-02&to=2024-01-30']) {
+      const body = await get<Body>(`/api/top-tracks?${range}&tz=UTC&limit=2`);
+      expect(body.tracks).toEqual([
+        { id: 'remaster', name: 'Heroes - 2017 Remaster', artist: 'David Bowie', plays: 6, image: 'https://i.scdn.co/image/album-radio' },
+        { id: 'live', name: 'Heroes - Live', artist: 'David Bowie', plays: 4, image: 'https://i.scdn.co/image/album-live' },
+      ]);
+    }
+    // Names and art are looked up for the songs listed only.
+    const response = await SELF.fetch(`${BASE}/api/top-tracks?from=2024-01-02&to=2024-01-30&tz=UTC&limit=1`, { headers: READ });
+    const rowsOne = Number(response.headers.get('X-Rows-Read'));
+    const all = await SELF.fetch(`${BASE}/api/top-tracks?from=2024-01-02&to=2024-01-30&tz=UTC&limit=10`, { headers: READ });
+    expect(((await all.json()) as Body).tracks).toHaveLength(3);
+    expect(rowsOne).toBeLessThan(Number(all.headers.get('X-Rows-Read')));
   });
 
   it('needs a token and validates the range', async () => {

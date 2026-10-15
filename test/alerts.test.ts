@@ -5,6 +5,7 @@ import {
   RESEND_AFTER_MS,
   STALL_AFTER_MS,
   evaluate,
+  evaluateConcerts,
   pingHeartbeat,
   runAlertCheck,
   runPollCron,
@@ -232,6 +233,46 @@ describe('runAlertCheck', () => {
     const result = await runAlertCheck(testEnv({ ALERT_WEBHOOK_URL: undefined }));
     expect(result.webhook_configured).toBe(false);
     expect(result.failed[0]!.error).toContain('ALERT_WEBHOOK_URL');
+  });
+});
+
+describe('concert check alerts', () => {
+  const status = (consecutive_failures: number) => ({
+    last_run_ms: NOW,
+    last_success_ms: NOW - 3 * DAY,
+    last_error: 'singapore: Ticketmaster returned 401',
+    last_error_ms: NOW,
+    consecutive_failures,
+  });
+
+  it('fires from the second failure in a row, and only with a key configured', () => {
+    expect(evaluateConcerts(status(1), true)).toEqual([]);
+    const [alert] = evaluateConcerts(status(2), true);
+    expect(alert).toMatchObject({ key: 'concert_check_failing', severity: 'warning' });
+    expect(alert!.message).toContain('401');
+    expect(evaluateConcerts(status(5), false)).toEqual([]);
+    expect(evaluateConcerts(null, true)).toEqual([]);
+  });
+
+  it('is sent alongside a healthy collector, once per resend window, and clears on success', async () => {
+    await seedHealthy();
+    const bodies = stubWebhook();
+    const alertEnv = testEnv({ ALERT_WEBHOOK_URL: 'https://hook.test/x', TICKETMASTER_API_KEY: 'key' });
+    await env.DB.prepare("UPDATE concert_check_state SET consecutive_failures = 2, last_error = 'quota' WHERE id = 1").run();
+
+    // Keep the collector healthy at each instant the check runs at.
+    const checkAt = async (at: number) => {
+      await env.DB.prepare('UPDATE sync_state SET last_success_ms = ? WHERE id = 1').bind(at).run();
+      return runAlertCheck(alertEnv, at);
+    };
+    const start = Date.now();
+    expect((await checkAt(start)).sent).toEqual(['concert_check_failing']);
+    expect(bodies[0]).toMatchObject({ key: 'concert_check_failing' });
+    expect((await checkAt(start + 60_000)).suppressed).toEqual(['concert_check_failing']);
+    expect((await checkAt(start + RESEND_AFTER_MS + 1000)).sent).toEqual(['concert_check_failing']);
+
+    await env.DB.prepare('UPDATE concert_check_state SET consecutive_failures = 0 WHERE id = 1').run();
+    expect((await checkAt(start + RESEND_AFTER_MS + 2000)).cleared).toEqual(['concert_check_failing']);
   });
 });
 

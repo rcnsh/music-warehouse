@@ -252,7 +252,10 @@ paths:
       tags: [Stored plays]
       operationId: getTopArtists
       summary: Play counts per artist
-      description: Every credited artist on a track gets the play, not only the primary one.
+      description: >-
+        Every credited artist on a track gets the play, not only the primary one. Artists are
+        grouped by name, ignoring case, so an export-only placeholder (`name:` id) counts with
+        the real artist; `artist_id` is the real id where one is known.
       parameters:
         - $ref: '#/components/parameters/From'
         - $ref: '#/components/parameters/To'
@@ -291,7 +294,7 @@ paths:
       tags: [Stored plays]
       operationId: getTopTracks
       summary: Play counts per song
-      description: Editions are folded (same title and primary artist); `id` is the most-played edition's.
+      description: Editions are folded (same title less any remaster, single version or radio edit tag, and same primary artist); `id` is the most-played edition's.
       parameters:
         - $ref: '#/components/parameters/From'
         - $ref: '#/components/parameters/To'

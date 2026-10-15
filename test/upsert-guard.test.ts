@@ -111,3 +111,38 @@ describe('search index upkeep on a poll', () => {
     expect(await applyAndCountWrites(payload({ duration_ms: 1, album_id: null, isrc: 'I' }))).toBe(0);
   });
 });
+
+describe('artist and album upsert', () => {
+  const withMeta = (
+    artist: { name: string },
+    album: { name: string; release_date: string | null; image_url: string | null },
+  ): NormalizedRows => ({
+    ...payload({ album_id: 'alb1', duration_ms: 1, isrc: 'I' }),
+    artists: [{ artist_id: 'a1', ...artist }],
+    trackArtists: [{ track_id: 't1', artist_id: 'a1', position: 0 }],
+    albums: [{ album_id: 'alb1', ...album }],
+  });
+  const stored = async () => ({
+    artist: await env.DB.prepare("SELECT name FROM artists WHERE artist_id = 'a1'").first(),
+    album: await env.DB.prepare("SELECT name, release_date, image_url FROM albums WHERE album_id = 'alb1'").first(),
+    text: (await env.DB.prepare("SELECT text FROM track_search_text WHERE track_id = 't1'").first<{ text: string }>())?.text,
+  });
+
+  it('takes a rename and a new cover, and the poll’s track follows', async () => {
+    await applyAndCountWrites(withMeta({ name: 'Kanye West' }, { name: 'Donda', release_date: '2021-08-29', image_url: 'https://i/old' }));
+    await applyAndCountWrites(withMeta({ name: 'Ye' }, { name: 'Donda (Deluxe)', release_date: '2021-11-14', image_url: 'https://i/new' }));
+    expect(await stored()).toEqual({
+      artist: { name: 'Ye' },
+      album: { name: 'Donda (Deluxe)', release_date: '2021-11-14', image_url: 'https://i/new' },
+      text: 'Sad Machine | Donda (Deluxe) | Ye',
+    });
+  });
+
+  it('never blanks a stored value with a missing one, and writes nothing when unchanged', async () => {
+    const full = withMeta({ name: 'Ye' }, { name: 'Donda', release_date: '2021-08-29', image_url: 'https://i/a' });
+    await applyAndCountWrites(full);
+    await applyAndCountWrites(withMeta({ name: '' }, { name: '', release_date: null, image_url: null }));
+    expect(await stored()).toMatchObject({ artist: { name: 'Ye' }, album: { name: 'Donda', release_date: '2021-08-29', image_url: 'https://i/a' } });
+    expect(await applyAndCountWrites(full)).toBe(0);
+  });
+});

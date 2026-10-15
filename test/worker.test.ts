@@ -175,6 +175,21 @@ describe('/health (R6)', () => {
     expect(body.total_plays).toBe(counted!.n);
   });
 
+  it('reports the concert check, without affecting ok', async () => {
+    const now = Date.now();
+    await seedAuthorized({ authorizedAtMs: now - 10 * 86_400_000 });
+    await env.DB.prepare('UPDATE sync_state SET last_success_ms = ? WHERE id = 1').bind(now - 60_000).run();
+
+    let body = (await (await get('/health')).json()) as Record<string, any>;
+    expect(body.concerts).toMatchObject({ consecutive_failures: 0, failing: false });
+
+    await env.DB.prepare("UPDATE concert_check_state SET consecutive_failures = 2, last_error = 'quota' WHERE id = 1").run();
+    body = (await (await get('/health')).json()) as Record<string, any>;
+    expect(body.concerts).toMatchObject({ consecutive_failures: 2, last_error: 'quota', failing: true });
+    expect(body.ok).toBe(true);
+    expect(String(body.action_required)).toContain('concert check');
+  });
+
   it('reports zero plays on an empty warehouse, not null', async () => {
     const body = (await (await get('/health')).json()) as Record<string, unknown>;
     expect(body.total_plays).toBe(0);
@@ -290,6 +305,32 @@ describe('read endpoints (R9)', () => {
       { artist_id: 'a1', name: 'Alpha', plays: 2 },
       { artist_id: 'a2', name: 'Beta', plays: 1 },
     ]);
+  });
+
+  it('counts an export placeholder with the real artist, under the real id and spelling', async () => {
+    const day = Date.parse('2026-09-08T12:00:00Z');
+    await seedPlays([
+      { ms: day, trackId: 't1', artistId: 'real-porter', artistName: 'Porter Robinson' },
+      { ms: day + 1000, trackId: 'old', artistId: 'name:porter robinson', artistName: 'porter robinson' },
+      { ms: day + 2000, trackId: 'old', artistId: 'name:porter robinson', artistName: 'porter robinson' },
+      { ms: day + 3000, trackId: 'ph', artistId: 'name:only placeholder', artistName: 'Only Placeholder' },
+      { ms: day + 4000, trackId: 't2', artistId: 'b', artistName: 'Beta' },
+      { ms: day + 5000, trackId: 't3', artistId: 'b', artistName: 'Beta' },
+    ]);
+    // A track crediting the same artist twice (both ids) counts once.
+    await env.DB.prepare("INSERT INTO track_artists (track_id, artist_id, position) VALUES ('t1', 'name:porter robinson', 1)").run();
+
+    type Body = { artists: Array<{ artist_id: string; name: string; plays: number }> };
+    const expected = [
+      { artist_id: 'real-porter', name: 'Porter Robinson', plays: 3 },
+      { artist_id: 'b', name: 'Beta', plays: 2 },
+      { artist_id: 'name:only placeholder', name: 'Only Placeholder', plays: 1 },
+    ];
+    // Whole month (rollup) and part of one (plays) agree.
+    expect(((await (await get('/api/top-artists?from=2026-09-01&to=2026-09-30&tz=UTC')).json()) as Body).artists).toEqual(expected);
+    expect(((await (await get('/api/top-artists?from=2026-09-02&to=2026-09-29&tz=UTC')).json()) as Body).artists).toEqual(expected);
+    const limited = (await (await get('/api/top-artists?from=2026-09-02&to=2026-09-29&tz=UTC&limit=1')).json()) as Body;
+    expect(limited.artists).toEqual(expected.slice(0, 1));
   });
 
   it('reports rows_read so query cost can be checked against D1 usage', async () => {

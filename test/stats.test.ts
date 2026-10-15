@@ -1,5 +1,6 @@
 import { SELF, env } from 'cloudflare:test';
 import { beforeEach, describe, expect, it } from 'vitest';
+import { syncAllSongs } from '../src/play-numbers';
 import { type Era, buildEras, localTimeSql, parseEras, startOfLocalToday, startOfLocalWeek } from '../src/eras';
 import { freshForSeconds, statKey } from '../src/stats';
 import { streaksFrom } from '../src/stats/rhythm';
@@ -52,7 +53,8 @@ async function seed(plays: Play[]) {
       ),
     );
   }
-  await env.DB.batch(statements);
+  // Songs keyed as every write keys them.
+  await env.DB.batch([...statements, ...syncAllSongs(env.DB)]);
 }
 
 /** `count` plays of one track, a few minutes apart so none read as skips. */
@@ -200,7 +202,11 @@ describe('top over time', () => {
       ...session('single', start, 3, { artist: 'Porter Robinson' }),
       ...session('album', start + 60 * 60_000, 5, { artist: 'Porter Robinson' }),
     ]);
-    await env.DB.prepare("UPDATE tracks SET name = 'Divinity' WHERE track_id IN ('single', 'album')").run();
+    // A rename rekeys the songs, as the daily sweep does.
+    await env.DB.batch([
+      env.DB.prepare("UPDATE tracks SET name = 'Divinity' WHERE track_id IN ('single', 'album')"),
+      ...syncAllSongs(env.DB),
+    ]);
 
     const body = (await (await stat('top-over-time')).json()) as {
       quarters: Array<{ tracks: Array<{ track_id: string; name: string; plays: number }> }>;
@@ -240,6 +246,25 @@ describe('on repeat', () => {
     expect(body.tracks[0]).toMatchObject({ plays: 6, days: 3 });
     expect(body.tracks[0]!.daily).toHaveLength(14);
     expect(body.tracks[0]!.daily.reduce((a, b) => a + b, 0)).toBe(6);
+  });
+
+  it('folds an export copy and a remaster in with the live track', async () => {
+    // Each copy alone is too few plays; together they are on repeat.
+    await seed([
+      ...session('live', localNoon(1), 2, { artist: 'Porter Robinson' }),
+      ...session('export', localNoon(4), 2, { artist: 'Porter Robinson' }),
+      ...session('remaster', localNoon(8), 2, { artist: 'Porter Robinson' }),
+    ]);
+    await env.DB.batch([
+      env.DB.prepare("UPDATE tracks SET name = 'Shelter' WHERE track_id IN ('live', 'export')"),
+      env.DB.prepare("UPDATE tracks SET name = 'Shelter - 2021 Remaster' WHERE track_id = 'remaster'"),
+      env.DB.prepare("INSERT INTO artists (artist_id, name) VALUES ('name:porter robinson', 'porter robinson')"),
+      env.DB.prepare("UPDATE track_artists SET artist_id = 'name:porter robinson' WHERE track_id = 'export'"),
+      ...syncAllSongs(env.DB),
+    ]);
+
+    const body = (await (await stat('on-repeat')).json()) as { tracks: Array<{ track_id: string; plays: number; days: number }> };
+    expect(body.tracks).toEqual([expect.objectContaining({ track_id: 'live', plays: 6, days: 3 })]);
   });
 
   it('ignores plays too short to be listens', async () => {

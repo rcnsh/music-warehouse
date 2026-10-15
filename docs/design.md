@@ -15,19 +15,29 @@ up and calling it; this is for changing it.
 **One store.** Play data and OAuth tokens both live in D1: one binding, one
 consistency model.
 
-**The cursor is the whole safety story.** `sync_state.cursor_ms` holds the
-newest `played_at` stored. Each poll asks for everything after it and advances
-it only inside the same transaction as the writes. `MAX(cursor_ms, ?)` means it
-can never move backwards, whatever ordering Spotify returns. A failed run
-therefore costs nothing: the next run asks for exactly the same window again.
+**The cursor is the whole safety story.** `sync_state.cursor_ms` holds how far
+the stored plays are known to be complete. It advances only inside the same
+transaction as the writes, and `MAX(cursor_ms, ?)` means it can never move
+backwards, whatever ordering Spotify returns. A failed run therefore costs
+nothing: the next run asks for the same window again.
+
+**The newest 50, every poll.** A play made offline is listed when the device
+syncs, under the time it was played, which can be before the newest play
+already stored, so asking only for plays after the cursor would never see it.
+Each poll reads the newest 50 without `after` instead and stores them all;
+plays are keyed by `(played_at_ms, track_id)` and inserted OR IGNORE, so the
+ones already stored are skipped. When even the oldest of the 50 is newer than
+the cursor, more plays may have happened since the last poll than the window
+holds, so a second request asks for the plays `after` the cursor, and the
+cursor advances only as far as that answer reaches. A late play older than
+the 50 newest is still out of reach: the endpoint goes back no further.
 
 **`after` only, never `before`.** Paging backwards cannot reach past the
-endpoint's hard 50-item ceiling, so `before` has no use here. On the first ever
-run the `after` parameter is omitted entirely rather than sent as `after=0`.
+endpoint's hard 50-item ceiling, so `before` has no use here.
 
-**One API call per poll.** The recently-played response embeds the full track
-object including album and artists, so no `/tracks` or `/artists` lookups are
-needed.
+**One or two API calls per poll.** The recently-played response embeds the
+full track object including album and artists, so no `/tracks` or `/artists`
+lookups are needed.
 
 **Writes are chunked, then batched.** D1 allows at most 100 bound parameters
 per statement, and that limit applies to each statement inside a batch. A
@@ -159,7 +169,8 @@ name days, and take the caller's `tz` rather than the eras'.
 An artist is matched by id and by lowercased name, as the stats group them, so
 export-era `name:` placeholders count; `name` is the fallback for an id the
 warehouse has never seen. Credit is the primary artist's only. A track folds
-every edition with the same title and primary artist, and its `id` is the one
+every edition with the same title (less a remaster, "single version" or "radio
+edit" tag; src/song-title.ts) and primary artist, and its `id` is the one
 asked for.
 
 `plays` counts every stored play, as `/api/top-artists` does. `minutes` is

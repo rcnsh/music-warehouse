@@ -1,6 +1,7 @@
 import { BadRequest, json, timeZoneParam } from './api';
-import { startOfLocalDayUtcMs } from './tz';
+import { localDayKey, startOfLocalDayUtcMs } from './tz';
 import { NAME_KEY_PREFIX } from './db';
+import { rollupZone, withTrackCounts } from './rollup';
 import type { Env } from './types';
 import { log } from './log';
 
@@ -13,7 +14,9 @@ import { log } from './log';
  * so the check works on either plan. Names are matched to Ticketmaster
  * attractions once and the answer kept (no match too), so a run looks up at
  * most MAX_LOOKUPS names; then one events query per region covers every
- * matched artist at once, as `attractionId` takes a list.
+ * matched artist at once, as `attractionId` takes a list. Ticketmaster calls
+ * share what D1 leaves of the 50: the lookups stop short of the events
+ * queries' share, and a retry after a 429 spends from the same count.
  */
 
 const API = 'https://app.ticketmaster.com/discovery/v2';
@@ -30,6 +33,14 @@ const PAGE_SIZE = 200;
 const MAX_PAGES = 3;
 /** Ticketmaster allows five calls a second. */
 const DEFAULT_SPACING_MS = 250;
+/** Subrequests a run may make: the Free plan's ceiling. */
+const SUBREQUESTS = 50;
+/** D1 calls a run makes besides one per region: see runConcertCheck. */
+const D1_CALLS = 6;
+/** The longest a run waits on Retry-After, in all. A cron run has minutes; this keeps it brief. */
+const MAX_RETRY_WAIT_MS = 30_000;
+/** A 429 without a Retry-After waits this long, Ticketmaster's per-second window. */
+const DEFAULT_RETRY_MS = 1_000;
 
 /** Most regions a run checks, so a run stays inside the Free plan's 50 subrequests. */
 const MAX_REGIONS = 5;
@@ -130,24 +141,59 @@ export function normalizeName(name: string): string {
     .trim();
 }
 
+/** Seconds or an HTTP date, as Retry-After allows, in ms from `now`; null when absent or unreadable. */
+export function retryAfterMs(header: string | null, now: number): number | null {
+  if (header === null || header.trim() === '') return null;
+  const seconds = Number(header);
+  if (Number.isFinite(seconds)) return Math.max(0, seconds * 1000);
+  const at = Date.parse(header);
+  return Number.isFinite(at) ? Math.max(0, at - now) : null;
+}
+
 class Ticketmaster {
   private last = 0;
+  private waitedMs = 0;
+  /** Calls left in this run's share of the subrequests. */
+  remaining: number;
 
   constructor(
     private readonly key: string,
     private readonly spacingMs: number,
-  ) {}
+    calls: number,
+    private readonly maxWaitMs: number,
+  ) {
+    this.remaining = calls;
+  }
+
+  private async pause(ms: number) {
+    if (ms > 0) await new Promise((resolve) => setTimeout(resolve, ms));
+  }
 
   async get<T>(path: string, params: Record<string, string>): Promise<T> {
-    const wait = this.last + this.spacingMs - Date.now();
-    if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
-    this.last = Date.now();
     const url = new URL(`${API}${path}`);
     for (const [key, value] of Object.entries({ ...params, apikey: this.key })) url.searchParams.set(key, value);
-    const response = await fetch(url);
-    // The key is in the URL, so errors name the path only.
-    if (!response.ok) throw new Error(`Ticketmaster ${path}: ${response.status}`);
-    return (await response.json()) as T;
+    for (;;) {
+      // The key is in the URL, so errors name the path only.
+      if (this.remaining <= 0) throw new Error(`Ticketmaster ${path}: out of subrequests for this run`);
+      await this.pause(this.last + this.spacingMs - Date.now());
+      this.last = Date.now();
+      this.remaining--;
+      const response = await fetch(url);
+      if (response.status === 429) {
+        // Over the per-second rate a short wait clears it; over the daily
+        // quota Retry-After is hours, past what a run will wait.
+        const header = response.headers.get('Retry-After');
+        const wait = retryAfterMs(header, Date.now()) ?? DEFAULT_RETRY_MS;
+        if (this.waitedMs + wait <= this.maxWaitMs && this.remaining > 0) {
+          this.waitedMs += wait;
+          await this.pause(wait);
+          continue;
+        }
+        throw new Error(`Ticketmaster ${path}: 429${header ? ` (Retry-After: ${header.slice(0, 40)})` : ''}`);
+      }
+      if (!response.ok) throw new Error(`Ticketmaster ${path}: ${response.status}`);
+      return (await response.json()) as T;
+    }
   }
 }
 
@@ -167,28 +213,47 @@ interface TopArtist {
   name: string;
   /** A real Spotify id when the name has one, else its `name:` placeholder, as /api/artist accepts either. */
   id: string;
+  plays: number;
 }
 
-async function topArtists(env: Env, now: number): Promise<TopArtist[]> {
-  const { results } = await env.DB.prepare(
-    `SELECT lower(a.name) AS key, max(a.name) AS name,
-            coalesce(min(CASE WHEN instr(a.artist_id, '${NAME_KEY_PREFIX}') = 1 THEN NULL ELSE a.artist_id END), min(a.artist_id)) AS id,
-            COUNT(*) AS plays
-       FROM plays p
-       JOIN track_artists ta ON ta.track_id = p.track_id AND ta.position = 0
-       JOIN artists a ON a.artist_id = ta.artist_id
-      WHERE p.played_at_ms >= ?
-      GROUP BY lower(a.name)
-      ORDER BY plays DESC, key
-      LIMIT ?`,
-  )
-    .bind(now - LOOKBACK_MS, TOP_ARTISTS)
-    .all<TopArtist>();
-  return results;
+/**
+ * The most played primary artists over the year of whole local days before
+ * today, folding `name:` placeholders by name. Counts come per track, from
+ * the rollup's months where it can answer (src/rollup.ts) and the plays at
+ * either end, so a run reads a few thousand rows rather than a year of
+ * plays. Without a usable rollup it counts the plays, with the same result.
+ */
+export async function topArtists(env: Env, now: number): Promise<TopArtist[]> {
+  const timeZone = rollupZone(env) ?? 'UTC';
+  const today = localDayKey(now, timeZone);
+  const from = localDayKey(now - LOOKBACK_MS, timeZone);
+  const toMs = startOfLocalDayUtcMs(today, timeZone);
+  const { result } = await withTrackCounts<TopArtist>(
+    env,
+    { from, to: localDayKey(toMs - 1, timeZone), fromMs: startOfLocalDayUtcMs(from, timeZone), toMs, timeZone },
+    'n',
+    (cte) =>
+      `WITH ${cte}
+       SELECT lower(a.name) AS key, max(a.name) AS name,
+              coalesce(min(CASE WHEN instr(a.artist_id, '${NAME_KEY_PREFIX}') = 1 THEN NULL ELSE a.artist_id END), min(a.artist_id)) AS id,
+              SUM(c.n) AS plays
+         FROM c
+         JOIN track_artists ta ON ta.track_id = c.track_id AND ta.position = 0
+         JOIN artists a ON a.artist_id = ta.artist_id
+        GROUP BY lower(a.name)
+        ORDER BY plays DESC, key
+        LIMIT ?`,
+    [TOP_ARTISTS],
+  );
+  return result.results;
 }
 
-/** Match names not yet matched, or matched too long ago; returns attraction id to artist. */
-async function resolveArtists(env: Env, tm: Ticketmaster, artists: TopArtist[], now: number) {
+/**
+ * Match names not yet matched, or matched too long ago, with at most
+ * `lookups` calls; returns attraction id to artist, and the error that
+ * stopped the lookups, if one did.
+ */
+async function resolveArtists(env: Env, tm: Ticketmaster, artists: TopArtist[], now: number, lookups: number) {
   const { results: known } = await env.DB.prepare(
     'SELECT name_key, attraction_id, checked_ms, pinned FROM concert_artists WHERE name_key IN (SELECT value FROM json_each(?))',
   )
@@ -205,13 +270,15 @@ async function resolveArtists(env: Env, tm: Ticketmaster, artists: TopArtist[], 
 
   const writes: D1PreparedStatement[] = [];
   let lookedUp = 0;
-  for (const artist of due.slice(0, MAX_LOOKUPS)) {
+  let failure: string | null = null;
+  for (const artist of due.slice(0, Math.max(0, lookups))) {
     let match: Attraction | null;
     try {
       match = await matchAttraction(tm, artist.name);
     } catch (error) {
       // Most likely the rate limit: keep what was learnt and stop for today.
-      log('concert-lookup-failed', { artist: artist.name, message: (error as Error).message }, 'error');
+      failure = (error as Error).message;
+      log('concert-lookup-failed', { artist: artist.name, message: failure }, 'error');
       break;
     }
     lookedUp++;
@@ -231,10 +298,14 @@ async function resolveArtists(env: Env, tm: Ticketmaster, artists: TopArtist[], 
     const id = byKey.get(artist.key)?.attraction_id;
     if (id) attractions.set(id, { id: artist.id, name: artist.name });
   }
-  return { attractions, lookedUp };
+  return { attractions, lookedUp, failure };
 }
 
-async function fetchRegion(tm: Ticketmaster, region: Region, ids: string[]): Promise<TmEvent[]> {
+/**
+ * A region's events, soonest first, and whether they are all of them: false
+ * when more pages were left than a run fetches.
+ */
+async function fetchRegion(tm: Ticketmaster, region: Region, ids: string[]): Promise<{ events: TmEvent[]; complete: boolean }> {
   const events: TmEvent[] = [];
   for (let page = 0; page < MAX_PAGES; page++) {
     const body = await tm.get<TmPage<{ events?: TmEvent[] }>>('/events.json', {
@@ -246,13 +317,37 @@ async function fetchRegion(tm: Ticketmaster, region: Region, ids: string[]): Pro
       page: String(page),
     });
     events.push(...(body._embedded?.events ?? []));
-    if (page + 1 >= (body.page?.totalPages ?? 0)) break;
+    if (page + 1 >= (body.page?.totalPages ?? 0)) return { events, complete: true };
   }
-  return events;
+  return { events, complete: false };
 }
 
-/** Store a region's events, then drop the ones Ticketmaster no longer lists (past, cancelled, removed). */
-async function storeRegion(env: Env, region: string, events: TmEvent[], attractions: Map<string, BilledArtist>, now: number) {
+/**
+ * The stored events a fetch shows are no longer listed (past, cancelled,
+ * removed): every one not seen this run when the fetch was complete. When it
+ * stopped short, events come soonest first, so only those dated before the
+ * last day it reached can be judged; later ones keep their rows, and their
+ * first_seen, until a run reaches them.
+ */
+function staleRows(env: Env, region: string, events: TmEvent[], complete: boolean, now: number): D1PreparedStatement {
+  if (complete) return env.DB.prepare('DELETE FROM concerts WHERE region = ? AND last_seen_ms < ?').bind(region, now);
+  const reached = events.reduce<string | null>((last, event) => {
+    const date = event.dates?.start?.localDate;
+    return date && (last === null || date > last) ? date : last;
+  }, null);
+  return env.DB.prepare(
+    'DELETE FROM concerts WHERE region = ? AND last_seen_ms < ? AND local_date IS NOT NULL AND local_date < ?',
+  ).bind(region, now, reached ?? '');
+}
+
+/** Store a region's events, then drop the ones Ticketmaster no longer lists. */
+async function storeRegion(
+  env: Env,
+  region: string,
+  { events, complete }: { events: TmEvent[]; complete: boolean },
+  attractions: Map<string, BilledArtist>,
+  now: number,
+) {
   const statements = events.map((event) => {
     const billed = event._embedded?.attractions ?? [];
     const ours = billed.filter((a) => attractions.has(a.id)).map((a) => attractions.get(a.id)!);
@@ -284,7 +379,7 @@ async function storeRegion(env: Env, region: string, events: TmEvent[], attracti
   });
   await env.DB.batch([
     ...statements,
-    env.DB.prepare('DELETE FROM concerts WHERE region = ? AND last_seen_ms < ?').bind(region, now),
+    staleRows(env, region, events, complete, now),
     env.DB.prepare(
       'INSERT INTO concert_runs (region, checked_ms) VALUES (?, ?) ON CONFLICT (region) DO UPDATE SET checked_ms = excluded.checked_ms',
     ).bind(region, now),
@@ -293,7 +388,7 @@ async function storeRegion(env: Env, region: string, events: TmEvent[], attracti
 
 export async function runConcertCheck(
   env: Env,
-  options: { now?: number; spacingMs?: number } = {},
+  options: { now?: number; spacingMs?: number; maxRetryWaitMs?: number } = {},
 ): Promise<ConcertCheckResult> {
   const now = options.now ?? Date.now();
   const result: ConcertCheckResult = { artists: 0, looked_up: 0, matched: 0, regions: {} };
@@ -306,23 +401,77 @@ export async function runConcertCheck(
   ]);
   if (regions.length === 0) return { ...result, skipped: 'CONCERT_REGIONS is not set' };
 
-  const tm = new Ticketmaster(env.TICKETMASTER_API_KEY, options.spacingMs ?? DEFAULT_SPACING_MS);
+  // D1 calls: the cleanup above, the top artists (two when the rollup can't
+  // answer), the match read and write, one store per region, and the status.
+  const tm = new Ticketmaster(
+    env.TICKETMASTER_API_KEY,
+    options.spacingMs ?? DEFAULT_SPACING_MS,
+    SUBREQUESTS - D1_CALLS - regions.length,
+    options.maxRetryWaitMs ?? MAX_RETRY_WAIT_MS,
+  );
   const artists = await topArtists(env, now);
-  const { attractions, lookedUp } = await resolveArtists(env, tm, artists, now);
+  const { attractions, lookedUp, failure } = await resolveArtists(
+    env,
+    tm,
+    artists,
+    now,
+    Math.min(MAX_LOOKUPS, tm.remaining - regions.length * MAX_PAGES),
+  );
   Object.assign(result, { artists: artists.length, looked_up: lookedUp, matched: attractions.size });
+  const errors = failure ? [`lookup: ${failure}`] : [];
 
   for (const region of regions) {
     try {
       // With nobody matched there is nothing to list, and an empty attractionId would list everything.
-      const events = attractions.size > 0 ? await fetchRegion(tm, region, [...attractions.keys()]) : [];
-      await storeRegion(env, region.key, events, attractions, now);
-      result.regions[region.key] = { events: events.length };
+      const fetched = attractions.size > 0 ? await fetchRegion(tm, region, [...attractions.keys()]) : { events: [], complete: true };
+      await storeRegion(env, region.key, fetched, attractions, now);
+      result.regions[region.key] = { events: fetched.events.length };
     } catch (error) {
       // A failed region keeps yesterday's rows rather than being emptied.
       result.regions[region.key] = { error: (error as Error).message };
+      errors.push(`${region.key}: ${(error as Error).message}`);
     }
   }
+  await recordCheck(env.DB, errors.length ? errors.join('; ') : null, now);
   return result;
+}
+
+/** Record how a run went, for concertCheckStatus. */
+async function recordCheck(db: D1Database, error: string | null, now: number): Promise<void> {
+  const statement =
+    error === null
+      ? db.prepare('UPDATE concert_check_state SET last_run_ms = ?1, last_success_ms = ?1, consecutive_failures = 0 WHERE id = 1').bind(now)
+      : db
+          .prepare(
+            `UPDATE concert_check_state SET last_run_ms = ?1, last_error = ?2, last_error_ms = ?1,
+               consecutive_failures = consecutive_failures + 1 WHERE id = 1`,
+          )
+          .bind(now, error.slice(0, 1000));
+  await statement.run();
+}
+
+export interface ConcertCheckStatus {
+  last_run_ms: number | null;
+  last_success_ms: number | null;
+  /** The last failed run's errors, kept after later successes; `consecutive_failures` says whether it is current. */
+  last_error: string | null;
+  last_error_ms: number | null;
+  consecutive_failures: number;
+}
+
+/**
+ * How the daily concert check has been going, for /health and the alert
+ * sweep: a check failing day after day (a revoked key, a spent quota) shows
+ * as a growing `consecutive_failures`. Null before migration 0017.
+ */
+export async function concertCheckStatus(db: D1Database): Promise<ConcertCheckStatus | null> {
+  try {
+    return await db
+      .prepare('SELECT last_run_ms, last_success_ms, last_error, last_error_ms, consecutive_failures FROM concert_check_state WHERE id = 1')
+      .first<ConcertCheckStatus>();
+  } catch {
+    return null;
+  }
 }
 
 /** POST /admin/concert-check?spacingMs= */

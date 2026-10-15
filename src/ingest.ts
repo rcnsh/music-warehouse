@@ -53,30 +53,63 @@ async function nameContextsSafely(db: D1Database, accessToken: string, now: numb
 }
 
 /**
- * One poll cycle: read state, get a live access token, fetch everything after
- * the cursor, and write it in a single batch.
+ * Spotify's newest window of plays, and the plays after the cursor when that
+ * window doesn't reach back to it.
+ *
+ * Asking only for plays after the cursor would miss a play Spotify lists
+ * late: one played offline and synced afterwards keeps the time it was
+ * played, which can be before the newest play already stored. So each poll
+ * reads the newest 50 instead, which includes any such play that is still
+ * among them, and stores them all; plays are keyed by (played_at_ms,
+ * track_id) and inserted OR IGNORE, so the ones already stored cost nothing.
+ *
+ * When even the oldest of those 50 is newer than the cursor, more than 50
+ * plays may have happened since the last poll, so a second request asks for
+ * the plays after the cursor as before, and the cursor moves only as far as
+ * that answer reaches. The next poll then picks up from there. The cursor
+ * is 0 before the first poll, when there is nothing to catch up from.
+ */
+async function fetchSince(accessToken: string, cursorMs: number): Promise<{ payload: RecentlyPlayedResponse; reachMs: number | null }> {
+  const latest = await fetchRecentlyPlayed(accessToken, 0);
+  const times = (latest.items ?? []).map((item) => Date.parse(item.played_at ?? '')).filter(Number.isFinite);
+  if (cursorMs === 0 || times.length === 0 || Math.min(...times) <= cursorMs) return { payload: latest, reachMs: null };
+
+  const after = await fetchRecentlyPlayed(accessToken, cursorMs);
+  const reach = (after.items ?? []).map((item) => Date.parse(item.played_at ?? '')).filter(Number.isFinite);
+  return {
+    payload: { ...latest, items: [...(after.items ?? []), ...(latest.items ?? [])] },
+    reachMs: reach.length ? Math.max(...reach) : cursorMs,
+  };
+}
+
+/**
+ * One poll cycle: read state, get a live access token, fetch the newest
+ * plays (and those after the cursor, when there may be a gap), and write
+ * them in a single batch.
  *
  * Subrequest budget (R12, ceiling 50): 1 read + at most 4 for token work +
- * at most 2 recently-played fetches + 1 write batch = 8, then context naming:
- * 1 read + LOOKUPS_PER_POLL (3) Spotify calls + 1 write = 13 in the worst case.
+ * at most 4 recently-played fetches (two, retried once after a 401) + 1 write
+ * batch = 10, then context naming: 1 read + LOOKUPS_PER_POLL (3) Spotify
+ * calls + 1 write = 15 in the worst case.
  */
 export async function poll(env: Env, now: number = Date.now()): Promise<PollResult> {
   const db = env.DB;
   const { sync, token } = await readState(db);
 
   let payload: RecentlyPlayedResponse;
+  let reachMs: number | null;
   let accessToken: string;
   try {
     accessToken = await getAccessToken(db, env, token, now);
 
     try {
-      payload = await fetchRecentlyPlayed(accessToken, sync.cursor_ms);
+      ({ payload, reachMs } = await fetchSince(accessToken, sync.cursor_ms));
     } catch (error) {
       if (!(error instanceof SpotifyError) || error.kind !== 'unauthorized') throw error;
       // A 401 on the data call despite a token we believed was live. Force one
       // refresh and retry exactly once; a second 401 aborts the run.
       accessToken = await getAccessToken(db, env, { ...token, access_token: null, access_expires_ms: null }, now);
-      payload = await fetchRecentlyPlayed(accessToken, sync.cursor_ms);
+      ({ payload, reachMs } = await fetchSince(accessToken, sync.cursor_ms));
     }
   } catch (error) {
     const message = describe(error);
@@ -117,6 +150,8 @@ export async function poll(env: Env, now: number = Date.now()): Promise<PollResu
   }
 
   const inserts = writeStatements(db, rows, now);
+  // As far as the plays fetched are known to be complete.
+  const cursorMs = reachMs ?? rows.maxPlayedAtMs;
 
   try {
     const results = await db.batch([
@@ -131,7 +166,7 @@ export async function poll(env: Env, now: number = Date.now()): Promise<PollResu
           'UPDATE sync_state SET cursor_ms = MAX(cursor_ms, ?), last_success_ms = ?, last_error = NULL, ' +
             'consecutive_failures = 0 WHERE id = 1',
         )
-        .bind(rows.maxPlayedAtMs, now),
+        .bind(cursorMs, now),
     ]);
 
     const inserted = rows.plays.length - ((results[0]?.results[0] as { n: number } | undefined)?.n ?? 0);
@@ -141,7 +176,7 @@ export async function poll(env: Env, now: number = Date.now()): Promise<PollResu
       received,
       inserted,
       skipped: rows.skipped,
-      cursor_ms: Math.max(sync.cursor_ms, rows.maxPlayedAtMs),
+      cursor_ms: Math.max(sync.cursor_ms, cursorMs),
       needs_reauth: false,
       contexts_named: await nameContextsSafely(db, accessToken, now),
     };

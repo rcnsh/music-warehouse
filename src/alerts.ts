@@ -1,4 +1,5 @@
 import { json } from './api';
+import { type ConcertCheckStatus, concertCheckStatus } from './concerts';
 import { readState } from './db';
 import { type PollResult, poll } from './ingest';
 import { daysUntilTokenExpiry } from './tokens';
@@ -31,6 +32,13 @@ export const EXPIRY_WARNING_DAYS = 14;
  * comfortably past a transient Spotify or D1 outage.
  */
 export const STALL_AFTER_MS = 3 * 60 * 60 * 1000;
+
+/**
+ * Consecutive failed concert checks before alerting. The check runs once a
+ * day, so one failure is often a passing 429 or 5xx; two in a row is a key or
+ * quota that needs a human.
+ */
+export const CONCERT_FAILURES_TO_ALERT = 2;
 
 /** A firing condition is re-sent at most this often while it persists. */
 export const RESEND_AFTER_MS = 24 * 60 * 60 * 1000;
@@ -114,6 +122,27 @@ export function evaluate(
 }
 
 /**
+ * Pure: whether the daily concert check needs a human. Independent of the
+ * Spotify conditions above, which say nothing about Ticketmaster. Only while
+ * a key is configured: without one the check does not run, and failures left
+ * from before the key was removed are not news.
+ */
+export function evaluateConcerts(status: ConcertCheckStatus | null, keyConfigured: boolean): Alert[] {
+  if (!keyConfigured || !status || status.consecutive_failures < CONCERT_FAILURES_TO_ALERT) return [];
+  return [
+    {
+      key: 'concert_check_failing',
+      severity: 'warning',
+      title: 'music-warehouse concert check is failing',
+      message:
+        `The daily Ticketmaster check has failed ${status.consecutive_failures} times in a row, ` +
+        'so new concerts are not being found. Check TICKETMASTER_API_KEY and its quota. ' +
+        `Last error: ${status.last_error ?? 'none recorded'}`,
+    },
+  ];
+}
+
+/**
  * POST one alert to the configured webhook.
  *
  * The body carries the same text under several keys so one URL works with
@@ -166,8 +195,8 @@ export async function runAlertCheck(
   now: number = Date.now(),
   options: { force?: boolean } = {},
 ): Promise<AlertRunResult> {
-  const { token, sync } = await readState(env.DB);
-  const firing = evaluate(token, sync, now);
+  const [{ token, sync }, concerts] = await Promise.all([readState(env.DB), concertCheckStatus(env.DB)]);
+  const firing = [...evaluate(token, sync, now), ...evaluateConcerts(concerts, Boolean(env.TICKETMASTER_API_KEY))];
   const firingKeys = new Set(firing.map((alert) => alert.key));
 
   const previous = await env.DB.prepare('SELECT key, last_sent_ms FROM alerts').all<{

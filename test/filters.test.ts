@@ -1,5 +1,6 @@
 import { SELF, env } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
+import { syncAllSongs } from '../src/play-numbers';
 import { syncSearchIndex } from '../src/search-index';
 
 const BASE = 'https://warehouse.test';
@@ -52,7 +53,8 @@ async function seed(order: string[]) {
       env.DB.prepare('INSERT INTO plays (played_at_ms, track_id, source) VALUES (?, ?, ?)').bind(START + i * HOUR, trackId, 'api'),
     );
   });
-  await env.DB.batch([...statements, syncSearchIndex(env.DB)]);
+  // Songs keyed as every write keys them.
+  await env.DB.batch([...statements, syncSearchIndex(env.DB), ...syncAllSongs(env.DB)]);
 }
 
 async function get<T>(path: string): Promise<T> {

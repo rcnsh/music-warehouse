@@ -1,12 +1,15 @@
+import { songTitleSql } from './song-title';
 import { PRIMARY_ARTIST_SQL } from './stats/sql';
 
 /**
  * Upkeep for play numbers (migration 0012): which play of its song each play
  * was, counting every edition of the song, as /api/track folds them.
  *
- * A song's key is its title and primary artist, lowercased (ASCII only, as
- * /api/track's NOCASE match is). Tracks with two primary credits take the
- * first by id, as PRIMARY_ARTIST_SQL does everywhere.
+ * A song's key is its title, lowercased (ASCII only, as SQLite's lower() is)
+ * with any edition tag taken off (src/song-title.ts), and its primary
+ * artist's name, lowercased. Tracks with two primary credits take the first
+ * by id, as PRIMARY_ARTIST_SQL does everywhere. /api/track, /api/top-tracks
+ * and on-repeat fold editions by this key.
  *
  * Every write that stores plays runs songStatements, after its tracks and
  * artists are in place: rekey the tracks it wrote, renumber whole any song a
@@ -16,12 +19,14 @@ import { PRIMARY_ARTIST_SQL } from './stats/sql';
  * the rest of each song it lands in. Keys change when a track's title or
  * primary artist does, which the daily artist reconcile can do to tracks a
  * write never names, so the daily cron rekeys every track (about 25k rows,
- * writing only what changed).
+ * writing only what changed). The same sweep moves tracks onto a new key
+ * when the key itself changes, as it did when edition tags began to be
+ * taken off (migration 0012 keyed on the bare title).
  */
 
-/** The song key of track `t`. Must match migration 0012. */
+/** The song key of track `t`. */
 export const songKey = (t: string) =>
-  `COALESCE(lower(${t}.name) || char(31) || lower(${PRIMARY_ARTIST_SQL(`${t}.track_id`)}), char(30) || ${t}.track_id)`;
+  `COALESCE(${songTitleSql(`lower(${t}.name)`)} || char(31) || lower(${PRIMARY_ARTIST_SQL(`${t}.track_id`)}), char(30) || ${t}.track_id)`;
 
 const UPSERT = `ON CONFLICT(played_at_ms, track_id) DO UPDATE SET song = excluded.song, n = excluded.n
      WHERE play_numbers.song IS NOT excluded.song OR play_numbers.n IS NOT excluded.n`;

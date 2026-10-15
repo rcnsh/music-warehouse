@@ -1,4 +1,5 @@
 import { type Era, historyStartMs, startOfLocalWeek } from '../eras';
+import { songTitleSql } from '../song-title';
 import { PRIMARY_ARTIST_SQL } from './sql';
 
 /**
@@ -88,7 +89,7 @@ export async function computeTopOverTime(db: D1Database, now: number, eras: read
            FROM plays WHERE played_at_ms >= ?1 AND played_at_ms < ?5 GROUP BY q, track_id
        ),
        pt AS MATERIALIZED (
-         SELECT pq.q, substr(pq.q, 1, 4) AS y, pq.n, pq.track_id, t.name AS tn, t.album_id,
+         SELECT pq.q, substr(pq.q, 1, 4) AS y, pq.n, pq.track_id, t.name AS tn, ${songTitleSql('lower(t.name)')} AS st, t.album_id,
                 ${PRIMARY_ARTIST_SQL('pq.track_id')} AS an
            FROM pq JOIN tracks t ON t.track_id = pq.track_id
        ),
@@ -110,12 +111,12 @@ export async function computeTopOverTime(db: D1Database, now: number, eras: read
        -- With MAX() the bare columns come from the row that holds the maximum,
        -- so title, art and track_id are all the most-played edition's.
        songs AS (
-         SELECT 'q' AS grain, q AS period, lower(tn) || '|' || lower(an) AS k, tn AS name, an AS artist, album_id, track_id,
+         SELECT 'q' AS grain, q AS period, st || '|' || lower(an) AS k, tn AS name, an AS artist, album_id, track_id,
                 MAX(n) AS best, SUM(n) AS plays
            FROM pt WHERE an IS NOT NULL GROUP BY q, k
          UNION ALL
-         SELECT 'y', y, lower(tn) || '|' || lower(an), tn, an, album_id, track_id, MAX(n), SUM(n)
-           FROM pt WHERE an IS NOT NULL GROUP BY y, lower(tn) || '|' || lower(an)
+         SELECT 'y', y, st || '|' || lower(an), tn, an, album_id, track_id, MAX(n), SUM(n)
+           FROM pt WHERE an IS NOT NULL GROUP BY y, st || '|' || lower(an)
        ),
        songs_ranked AS (
          SELECT *, ROW_NUMBER() OVER (PARTITION BY grain, period ORDER BY plays DESC, k) AS rk FROM songs
