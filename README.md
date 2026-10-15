@@ -485,11 +485,16 @@ Responses are JSON. Errors are `{ "error": "..." }` with:
 | Status | Meaning |
 |---|---|
 | `400` | A bad parameter; the message says which. |
-| `401` | Missing or wrong token. |
+| `401` | Missing or wrong token, or a read token on a route outside `/api/*`. |
 | `403` | A read token asked Wrapped for a range it may not compute. |
-| `429` | Spotify rate limit or quota (live routes). |
+| `404` | `Not found`: no such route. |
+| `429` | Spotify rate limit or quota (live routes), or `Too many sign-ins in progress` from `/auth/login`. |
+| `500` | `Worker misconfigured: …` when a setting such as `ERAS` or `CONCERT_REGIONS` is malformed (the message names the setting, never its value); otherwise `Internal error`. |
 | `502` | Any other Spotify failure (live routes). |
-| `503` | A stat is being computed (retry after `Retry-After`), or `needs_reauth: true`. |
+| `503` | A stat or Wrapped range is being computed (retry after `Retry-After`), or `needs_reauth: true`. |
+
+Spotify failures (`429`, `502`) also carry `retry_after_seconds` when Spotify
+gave one.
 
 Dates are `YYYY-MM-DD` local calendar days and `tz` is an IANA zone (default
 `UTC`). Ranges are inclusive and at most 3,660 days. Timestamps in responses
@@ -588,9 +593,9 @@ context.
 `play_number` says which play of its song this was, counting every edition
 the way `/api/track` folds them (same title and primary artist, ignoring
 ASCII case), and `first_play` is `true` for a song's first ever play. Both are
-`null` only for a play with no stored track. They come from a table kept up
-to date by every poll and import (migration 0012), so they cost one row read
-per play; an import of older plays renumbers the later plays of each song it
+`null` for a play that has no row in that table, such as one with no stored
+track. They come from a table kept up to date by every poll and import
+(migration 0012), so they cost one row read per play; an import of older plays renumbers the later plays of each song it
 touches. A track whose title or primary artist changes (the daily artist
 reconcile can do this) moves to its new song by the next daily sweep.
 
@@ -625,12 +630,13 @@ history of 76k plays is about 680k rows.
 
 **`GET /api/top-artists`**: play counts per artist. Params: `from` (default 29
 days ago), `to` (default today), `tz`, `limit` (1 to 500, default 50).
-Returns `{ from, to, tz, artists: [{ artist_id, name, plays }] }`.
+Returns `{ from, to, tz, artists: [{ artist_id, name, plays }], _meta }`.
 
 **`GET /api/top-tracks`**: play counts per song, editions folded (same title
 and primary artist). Same params as `/api/top-artists`. Returns
 `{ from, to, tz, tracks: [{ id, name, artist, plays, image }] }`; `id` is the
-most-played edition's.
+most-played edition's. It has no `_meta`: the rows it read are in the
+`X-Rows-Read` header.
 
 **`GET /api/daily`**: plays per local day, quiet days as `0`. Params: `from`,
 `to`, `tz`, as above, and `track_id`, `artist_id` and `artist_name` as on
@@ -726,7 +732,8 @@ such as "U2" are still found.
 ### Stats
 
 **`GET /api/stats/{name}`**: aggregates built to be safe to publish: no play
-rows and no date finer than a month. No parameters.
+rows, and no date finer than a month except on-repeat's whole local days.
+Each body's `as_of` is the cut-off its data runs up to. No parameters.
 
 | `name` | Holds |
 |---|---|
@@ -736,7 +743,16 @@ rows and no date finer than a month. No parameters.
 | `eras` | How your artists changed between the two eras. |
 | `albums` | Most-played albums, all time and per year. |
 
-Each is cached and recomputed in the background every 3 to 24 hours. The first
+Each covers data up to a cut-off and is recomputed in the background about six
+hours after the next one passes, so late plays still count:
+
+| Stat | Cut-off |
+|---|---|
+| `on-repeat` | Local midnight (daily) |
+| `rhythm`, `top-over-time`, `albums` | Start of the local week (weekly) |
+| `eras` | Start of the UTC month (monthly) |
+
+Imported history shows up at each stat's next cut-off. The first
 request for a stat can get `503` with `Retry-After` while it computes.
 `X-Stats-Source` and `X-Stats-Computed-At` say where the body came from.
 
@@ -784,8 +800,9 @@ and this year up to the last full week.
 **`GET /api/concerts?region=&since=&tz=`**: upcoming Ticketmaster music
 events in the regions you configure, for the 80 artists you played most over
 the last year. Soonest first. `region` is one of the configured keys; `since`
-(a local date) keeps only events first seen on or after it, which is how to
-ask what's new. `regions` lists the configured keys with their labels.
+(a local date, in `tz`) keeps only events first seen on or after it, which is
+how to ask what's new. `tz` is read only alongside `since`. `regions` lists
+the configured keys with their labels.
 
 Regions come from `CONCERT_REGIONS`, a JSON list of up to five. Each has a
 `key`, a `label`, and either a Ticketmaster `countryCode` or a `geoPoint`
@@ -831,8 +848,8 @@ grant has lapsed.
 | Route | |
 |---|---|
 | `GET /api/now-playing` | `{ item }`, Spotify's currently-playing; `item` is `null` when idle. |
-| `GET /api/recently-played?limit=` | Spotify's recently-played, newest first. `limit` 1 to 50, default 1. Includes plays not yet ingested. |
-| `GET /api/top?range=&limit=&type=` | `{ tracks, artists }` from Spotify's top lists. `range` is `short_term`, `medium_term` or `long_term`; `limit` 1 to 50, default 12; `type=tracks` or `type=artists` fetches only one (the other is `null`). |
+| `GET /api/recently-played?limit=` | Spotify's recently-played, newest first. `limit` 1 to 50, default 1; any other value falls back to the default rather than a `400`. Includes plays not yet ingested. |
+| `GET /api/top?range=&limit=&type=` | `{ tracks, artists }` from Spotify's top lists. `range` is `short_term`, `medium_term` or `long_term` (default); `limit` 1 to 50, default 12; a bad `range` or `limit` falls back to its default rather than a `400`; `type=tracks` or `type=artists` fetches only one (the other is `null`). |
 
 ### Sign-in and authorization
 
