@@ -29,6 +29,13 @@ export interface Env {
    * publish only the month. Unset means a single Newcastle era.
    */
   MOVED_AT?: string;
+  /**
+   * Comma-separated browser origins allowed to call /api/* cross-origin, e.g.
+   * a Wrapped app the reader points at this warehouse. Optional: unset means
+   * no CORS headers at all, so only same-origin and non-browser callers work.
+   * The bearer token is still required; this only lets a browser carry it.
+   */
+  CORS_ORIGINS?: string;
 }
 
 /**

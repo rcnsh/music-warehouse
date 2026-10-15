@@ -128,118 +128,159 @@ async function rawRecentlyPlayed(env: Env, url: URL): Promise<Response> {
   return json(payload);
 }
 
+/** Response headers a cross-origin reader of /api/* may see. */
+const EXPOSED_HEADERS = 'Retry-After, X-Stats-Source, X-Stats-Computed-At, WWW-Authenticate';
+
+/** The request's Origin, if CORS_ORIGINS lists it (or is `*`). */
+function allowedOrigin(request: Request, env: Env): string | null {
+  const origin = request.headers.get('Origin');
+  if (!origin || !env.CORS_ORIGINS) return null;
+  const allowed = env.CORS_ORIGINS.split(',').map((o) => o.trim().replace(/\/+$/, ''));
+  return allowed.includes('*') || allowed.includes(origin) ? origin : null;
+}
+
+async function handle(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  const url = new URL(request.url);
+  const path = url.pathname.replace(/\/+$/, '') || '/';
+
+  if (path === '/callback') return await callback(env, url);
+
+  const access = await accessFor(request, env);
+  if (access === null) return unauthorized();
+
+  const route = `${request.method} ${path}`;
+  // A read-only token reaches the data routes and nothing else.
+  if (access === 'read' && !path.startsWith('/api/')) return unauthorized();
+
+  try {
+    switch (route) {
+      case 'GET /':
+        return json({
+          service: 'music-warehouse',
+          routes: [
+            '/login',
+            '/callback',
+            '/health',
+            '/api/plays',
+            '/api/top-artists',
+            '/api/daily',
+            '/api/now-playing',
+            '/api/recently-played',
+            '/api/top',
+            '/api/stats/{on-repeat,rhythm,top-over-time,eras,albums}',
+            '/api/wrapped',
+            '/api/wrapped/ranges',
+            '/api/artist',
+            '/api/track',
+            '/api/on-this-day',
+            '/admin/poll',
+            '/admin/alert-check',
+            '/admin/import',
+            '/admin/backfill-albums',
+            '/admin/backfill-catalog',
+            '/admin/raw',
+          ],
+        });
+      case 'GET /login':
+        return await login(env);
+      case 'GET /health':
+        return await health(env);
+      case 'GET /api/plays':
+        return await recentPlays(env, url);
+      case 'GET /api/top-artists':
+        return await topArtists(env, url);
+      case 'GET /api/daily':
+        return await dailyCounts(env, url);
+      case 'GET /api/now-playing':
+        return await nowPlaying(env);
+      case 'GET /api/recently-played':
+        return await recentlyPlayed(env, url);
+      case 'GET /api/top':
+        return await topMusic(env, url);
+      case 'GET /api/wrapped':
+        return await wrappedRoute(env, ctx, url, access);
+      case 'GET /api/wrapped/ranges':
+        return await wrappedRangesRoute(env);
+      case 'GET /api/artist':
+        return await artistRoute(env, url);
+      case 'GET /api/track':
+        return await trackRoute(env, url);
+      case 'GET /api/on-this-day':
+        return await onThisDayRoute(env, url);
+      case 'POST /admin/poll':
+        return json(await poll(env));
+      case 'POST /admin/alert-check':
+        return await alertCheckRoute(env, url);
+      case 'POST /admin/import':
+        return await importChunk(env, request);
+      case 'POST /admin/backfill-albums':
+        return await backfillAlbums(env, request);
+      case 'POST /admin/backfill-catalog':
+        return await backfillFromCatalog(env, request);
+      case 'GET /admin/raw':
+        return await rawRecentlyPlayed(env, url);
+      default: {
+        const stat = /^GET \/api\/stats\/([a-z-]+)$/.exec(route)?.[1];
+        if (stat && isStatName(stat)) return await statRoute(env, ctx, stat);
+        return json({ error: 'Not found' }, 404);
+      }
+    }
+  } catch (error) {
+    if (error instanceof BadRequest) return json({ error: error.message }, 400);
+    if (error instanceof SnapshotPending) {
+      const response = json({ error: error.message }, 503);
+      response.headers.set('Retry-After', String(error.retryAfterSeconds));
+      return response;
+    }
+    // The live proxy routes depend on a working Spotify grant, unlike the
+    // stored-data routes. Say which of the two failed rather than a blank 500.
+    if (error instanceof NeedsReauthError) {
+      return json({ error: 'Spotify connection needs re-authorization.', needs_reauth: true }, 503);
+    }
+    if (error instanceof SpotifyError) {
+      // The client only ever sees the error *kind*, so without this an
+      // upstream failure is undiagnosable after the fact.
+      console.error('spotify', error.kind, error.status, error.message);
+      const status = error.kind === 'rate_limited' || error.kind === 'quota_exceeded' ? 429 : 502;
+      return json(
+        { error: `Spotify upstream: ${error.kind}`, retry_after_seconds: error.retryAfterSeconds },
+        status,
+      );
+    }
+    console.error('Unhandled error', error);
+    return json({ error: 'Internal error' }, 500);
+  }
+}
+
 const worker = {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-    const url = new URL(request.url);
-    const path = url.pathname.replace(/\/+$/, '') || '/';
+    // CORS covers the /api/* routes only, so a browser app on another origin
+    // can read them with the reader's own token. Admin routes never get it.
+    const path = new URL(request.url).pathname;
+    const origin = path.startsWith('/api/') ? allowedOrigin(request, env) : null;
+    if (!origin) return await handle(request, env, ctx);
 
-    if (path === '/callback') return await callback(env, url);
-
-    const access = await accessFor(request, env);
-    if (access === null) return unauthorized();
-
-    const route = `${request.method} ${path}`;
-    // A read-only token reaches the data routes and nothing else.
-    if (access === 'read' && !path.startsWith('/api/')) return unauthorized();
-
-    try {
-      switch (route) {
-        case 'GET /':
-          return json({
-            service: 'music-warehouse',
-            routes: [
-              '/login',
-              '/callback',
-              '/health',
-              '/api/plays',
-              '/api/top-artists',
-              '/api/daily',
-              '/api/now-playing',
-              '/api/recently-played',
-              '/api/top',
-              '/api/stats/{on-repeat,rhythm,top-over-time,eras,albums}',
-              '/api/wrapped',
-              '/api/wrapped/ranges',
-              '/api/artist',
-              '/api/track',
-              '/api/on-this-day',
-              '/admin/poll',
-              '/admin/alert-check',
-              '/admin/import',
-              '/admin/backfill-albums',
-              '/admin/backfill-catalog',
-              '/admin/raw',
-            ],
-          });
-        case 'GET /login':
-          return await login(env);
-        case 'GET /health':
-          return await health(env);
-        case 'GET /api/plays':
-          return await recentPlays(env, url);
-        case 'GET /api/top-artists':
-          return await topArtists(env, url);
-        case 'GET /api/daily':
-          return await dailyCounts(env, url);
-        case 'GET /api/now-playing':
-          return await nowPlaying(env);
-        case 'GET /api/recently-played':
-          return await recentlyPlayed(env, url);
-        case 'GET /api/top':
-          return await topMusic(env, url);
-        case 'GET /api/wrapped':
-          return await wrappedRoute(env, ctx, url, access);
-        case 'GET /api/wrapped/ranges':
-          return await wrappedRangesRoute(env);
-        case 'GET /api/artist':
-          return await artistRoute(env, url);
-        case 'GET /api/track':
-          return await trackRoute(env, url);
-        case 'GET /api/on-this-day':
-          return await onThisDayRoute(env, url);
-        case 'POST /admin/poll':
-          return json(await poll(env));
-        case 'POST /admin/alert-check':
-          return await alertCheckRoute(env, url);
-        case 'POST /admin/import':
-          return await importChunk(env, request);
-        case 'POST /admin/backfill-albums':
-          return await backfillAlbums(env, request);
-        case 'POST /admin/backfill-catalog':
-          return await backfillFromCatalog(env, request);
-        case 'GET /admin/raw':
-          return await rawRecentlyPlayed(env, url);
-        default: {
-          const stat = /^GET \/api\/stats\/([a-z-]+)$/.exec(route)?.[1];
-          if (stat && isStatName(stat)) return await statRoute(env, ctx, stat);
-          return json({ error: 'Not found' }, 404);
-        }
-      }
-    } catch (error) {
-      if (error instanceof BadRequest) return json({ error: error.message }, 400);
-      if (error instanceof SnapshotPending) {
-        const response = json({ error: error.message }, 503);
-        response.headers.set('Retry-After', String(error.retryAfterSeconds));
-        return response;
-      }
-      // The live proxy routes depend on a working Spotify grant, unlike the
-      // stored-data routes. Say which of the two failed rather than a blank 500.
-      if (error instanceof NeedsReauthError) {
-        return json({ error: 'Spotify connection needs re-authorization.', needs_reauth: true }, 503);
-      }
-      if (error instanceof SpotifyError) {
-        // The client only ever sees the error *kind*, so without this an
-        // upstream failure is undiagnosable after the fact.
-        console.error('spotify', error.kind, error.status, error.message);
-        const status = error.kind === 'rate_limited' || error.kind === 'quota_exceeded' ? 429 : 502;
-        return json(
-          { error: `Spotify upstream: ${error.kind}`, retry_after_seconds: error.retryAfterSeconds },
-          status,
-        );
-      }
-      console.error('Unhandled error', error);
-      return json({ error: 'Internal error' }, 500);
+    // A preflight carries no Authorization header, by design, so it is
+    // answered before the token check. It grants nothing on its own.
+    if (request.method === 'OPTIONS') {
+      return new Response(null, {
+        status: 204,
+        headers: {
+          'Access-Control-Allow-Origin': origin,
+          'Access-Control-Allow-Methods': 'GET',
+          'Access-Control-Allow-Headers': 'Authorization',
+          'Access-Control-Max-Age': '86400',
+          Vary: 'Origin',
+        },
+      });
     }
+    // Copied, because a Response built elsewhere may have immutable headers.
+    const handled = await handle(request, env, ctx);
+    const response = new Response(handled.body, handled);
+    response.headers.set('Access-Control-Allow-Origin', origin);
+    response.headers.set('Access-Control-Expose-Headers', EXPOSED_HEADERS);
+    response.headers.append('Vary', 'Origin');
+    return response;
   },
 
   async scheduled(event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
