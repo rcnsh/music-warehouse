@@ -61,7 +61,7 @@ const WALK_ABOVE_TRACKS = 500;
 const PLAY_JOINS = `LEFT JOIN play_numbers pn ON pn.played_at_ms = p.played_at_ms AND pn.track_id = p.track_id
        LEFT JOIN contexts cx ON cx.uri = p.context_uri`;
 
-const PLAY_COLUMNS = `p.played_at_ms, p.track_id, p.context_uri, p.context_type, cx.name AS context_name, p.source,
+export const PLAY_COLUMNS = `p.played_at_ms, p.track_id, p.context_uri, p.context_type, cx.name AS context_name, p.source,
             pn.n AS play_number,
             t.name AS track_name, t.duration_ms, t.isrc,
             al.name AS album_name, al.image_url,
@@ -139,7 +139,7 @@ async function cachedMatchingTrackIds(env: Env, q: string): Promise<{ ids: strin
  * `first_play` beside `play_number`, as a boolean. Null when a play has no
  * number yet: one stored by a write that predates migration 0012's upkeep.
  */
-function withFirstPlay(rows: Record<string, unknown>[]): Record<string, unknown>[] {
+export function withFirstPlay(rows: Record<string, unknown>[]): Record<string, unknown>[] {
   return rows.map((row) => ({ ...row, first_play: row.play_number == null ? null : row.play_number === 1 }));
 }
 
@@ -198,6 +198,62 @@ export async function filterTrackIds(env: Env, filter: PlayFilter): Promise<{ id
 }
 
 /**
+ * One page of plays, newest first, strictly older than `upper` in the
+ * primary key's (played_at_ms, track_id) order and newer than `after`, from
+ * `ids`' tracks or, for null, everyone's. Tied timestamps are common in
+ * imported history (1.7k on the real warehouse), so a caller that pages
+ * every row passes the last row's full key; `[before, '']` means "before
+ * that millisecond", as nothing sorts below ''.
+ */
+export function selectPlays(
+  env: Env,
+  ids: string[] | null,
+  upper: [number, string],
+  after: number,
+  limit: number,
+): Promise<D1Result<Record<string, unknown>>> {
+  if (ids === null) {
+    // The (played_at_ms, track_id) primary key drives both the range and the
+    // ordering, so this reads only the rows it returns.
+    return env.DB.prepare(
+      `SELECT ${PLAY_COLUMNS}
+         FROM plays p
+         LEFT JOIN tracks t  ON t.track_id = p.track_id
+         LEFT JOIN albums al ON al.album_id = t.album_id
+         ${PLAY_JOINS}
+        WHERE (p.played_at_ms, p.track_id) < (?, ?) AND p.played_at_ms > ?
+        ORDER BY p.played_at_ms DESC, p.track_id DESC
+        LIMIT ?`,
+    )
+      .bind(...upper, after, limit)
+      .all();
+  }
+  // The ids travel as one JSON parameter, since D1 allows only 100 bound
+  // parameters. `+p.track_id` stops SQLite using idx_plays_track, which
+  // leaves the primary key to walk plays newest first.
+  //
+  // The page's keys are chosen first and joined to names after: seeking a
+  // popular artist's tracks finds thousands of plays, and joining names
+  // before the sort read every one of them (25k rows for "porter", now 4k).
+  const trackTerm = ids.length > WALK_ABOVE_TRACKS ? '+p.track_id' : 'p.track_id';
+  return env.DB.prepare(
+    `SELECT ${PLAY_COLUMNS}
+       FROM (SELECT p.played_at_ms, p.track_id FROM plays p
+              WHERE ${trackTerm} IN (SELECT value FROM json_each(?))
+                AND (p.played_at_ms, p.track_id) < (?, ?) AND p.played_at_ms > ?
+              ORDER BY p.played_at_ms DESC, p.track_id DESC
+              LIMIT ?) page
+       JOIN plays p ON p.played_at_ms = page.played_at_ms AND p.track_id = page.track_id
+       LEFT JOIN tracks t  ON t.track_id = p.track_id
+       LEFT JOIN albums al ON al.album_id = t.album_id
+       ${PLAY_JOINS}
+      ORDER BY p.played_at_ms DESC, p.track_id DESC`,
+  )
+    .bind(JSON.stringify(ids), ...upper, after, limit)
+    .all();
+}
+
+/**
  * Most recent plays, newest first, joined to track, album and artist names.
  * `q` keeps only plays whose track, album or artist name contains it, and
  * `track_id`, `artist_id` and `artist_name` one song's or one artist's, with
@@ -210,57 +266,12 @@ export async function recentPlays(env: Env, url: URL): Promise<Response> {
   const filter = playFilterParams(url, { q: true });
 
   const match = await filterTrackIds(env, filter);
-  if (match.ids === null) {
-    // The (played_at_ms, track_id) primary key drives both the range and the
-    // ordering, so this reads only the rows it returns.
-    const query = await env.DB.prepare(
-      `SELECT ${PLAY_COLUMNS}
-         FROM plays p
-         LEFT JOIN tracks t  ON t.track_id = p.track_id
-         LEFT JOIN albums al ON al.album_id = t.album_id
-         ${PLAY_JOINS}
-        WHERE p.played_at_ms < ? AND p.played_at_ms > ?
-        ORDER BY p.played_at_ms DESC
-        LIMIT ?`,
-    )
-      .bind(before, after, limit)
-      .all();
-    return json({
-      plays: withFirstPlay(query.results),
-      _meta: { rows_read: query.meta?.rows_read ?? null, duration_ms: query.meta?.duration ?? null },
-    });
-  }
-
   // The filters are echoed, so a client can tell a filtered page from an
   // older Worker that ignored the parameter.
-  if (match.ids.length === 0) {
+  if (match.ids?.length === 0) {
     return json({ ...filter, plays: [], _meta: { rows_read: match.rowsRead, duration_ms: null } });
   }
-  // The ids travel as one JSON parameter, since D1 allows only 100 bound
-  // parameters. `+p.track_id` stops SQLite using idx_plays_track, which
-  // leaves the primary key to walk plays newest first.
-  //
-  // The page's keys are chosen first and joined to names after: seeking a
-  // popular artist's tracks finds thousands of plays, and joining names
-  // before the sort read every one of them (25k rows for "porter", now 4k).
-  // Ties on played_at_ms break by track_id, the primary key's own order.
-  const trackTerm = match.ids.length > WALK_ABOVE_TRACKS ? '+p.track_id' : 'p.track_id';
-  const query = await env.DB.prepare(
-    `SELECT ${PLAY_COLUMNS}
-       FROM (SELECT p.played_at_ms, p.track_id FROM plays p
-              WHERE ${trackTerm} IN (SELECT value FROM json_each(?))
-                AND p.played_at_ms < ? AND p.played_at_ms > ?
-              ORDER BY p.played_at_ms DESC, p.track_id DESC
-              LIMIT ?) page
-       JOIN plays p ON p.played_at_ms = page.played_at_ms AND p.track_id = page.track_id
-       LEFT JOIN tracks t  ON t.track_id = p.track_id
-       LEFT JOIN albums al ON al.album_id = t.album_id
-       ${PLAY_JOINS}
-      ORDER BY p.played_at_ms DESC, p.track_id DESC`,
-  )
-    .bind(JSON.stringify(match.ids), before, after, limit)
-    .all();
-
+  const query = await selectPlays(env, match.ids, [before, ''], after, limit);
   return json({
     ...filter,
     plays: withFirstPlay(query.results),
