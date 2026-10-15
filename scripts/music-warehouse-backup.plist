@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Runs scripts/backup.sh weekly on a Mac. See README, "Backups and recovery".
+
+  Replace every /Users/YOU with your home directory (and the checkout path if
+  it is not ~/dev/music-warehouse), and make sure PATH below reaches the node
+  and npx you run wrangler with: `dirname "$(command -v npx)"`. Then:
+
+    cp scripts/music-warehouse-backup.plist ~/Library/LaunchAgents/
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/music-warehouse-backup.plist
+    launchctl kickstart gui/$(id -u)/music-warehouse-backup    # run once now
+
+  A Mac asleep at the scheduled time runs the job when it wakes. Wrangler
+  uses the login from `npx wrangler login`, which it refreshes itself.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>music-warehouse-backup</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/Users/YOU/dev/music-warehouse/scripts/backup.sh</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/YOU/dev/music-warehouse</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <!-- Optional: <key>BACKUP_DIR</key><string>/Users/YOU/Backups/music-warehouse</string> -->
+    <!-- Optional: <key>BACKUP_KEEP</key><string>12</string> -->
+  </dict>
+
+  <!-- Sundays at 10:00 local time. -->
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Weekday</key>
+    <integer>0</integer>
+    <key>Hour</key>
+    <integer>10</integer>
+    <key>Minute</key>
+    <integer>0</integer>
+  </dict>
+
+  <key>StandardOutPath</key>
+  <string>/Users/YOU/Library/Logs/music-warehouse-backup.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/YOU/Library/Logs/music-warehouse-backup.log</string>
+</dict>
+</plist>
