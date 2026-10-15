@@ -227,7 +227,7 @@ describe('read endpoints (R9)', () => {
     ]);
   });
 
-  it('reports rows_read so query cost can be checked against D1 free-tier limits', async () => {
+  it('reports rows_read so query cost can be checked against D1 usage', async () => {
     await seedPlays([{ ms: Date.parse('2026-09-08T12:00:00Z'), trackId: 't1' }]);
     const body = (await (await get('/api/plays')).json()) as { _meta: { rows_read: number | null } };
     expect(body._meta.rows_read).not.toBeNull();

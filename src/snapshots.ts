@@ -1,9 +1,11 @@
 /**
  * Caching for the aggregate /api/stats/* routes.
  *
- * Two layers, because D1 bills (and on the free plan, caps) by rows read and
- * each stat scans most of `plays`. Going over the cap fails D1 for the whole
- * Worker, ingestion included, so compute count must not scale with traffic.
+ * Two layers, because D1 bills by rows read and each stat scans most of
+ * `plays`, so compute count must not scale with traffic. This deployment is
+ * on Workers Paid, where reads are metered, not capped. On the Free plan,
+ * going over 5M reads a day fails D1 for the whole Worker, ingestion
+ * included, until 00:00 UTC.
  *
  * 1. `stats_snapshots` in D1 holds the last computed body. Only the request
  *    that wins a claim computes: inline for a key never computed, in the

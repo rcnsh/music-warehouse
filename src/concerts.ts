@@ -7,10 +7,11 @@ import type { Env } from './types';
  * London, for the artists played most over the last year. Pull only: a daily
  * cron fills the `concerts` table and GET /api/concerts reads it.
  *
- * Each run fits the free plan's 50 subrequests. Names are matched to
- * Ticketmaster attractions once and the answer kept (no match too), so a run
- * looks up at most MAX_LOOKUPS names; then one events query per region covers
- * every matched artist at once, as `attractionId` takes a list.
+ * Each run fits the Free plan's 50 subrequests (Workers Paid allows 10,000),
+ * so the check works on either plan. Names are matched to Ticketmaster
+ * attractions once and the answer kept (no match too), so a run looks up at
+ * most MAX_LOOKUPS names; then one events query per region covers every
+ * matched artist at once, as `attractionId` takes a list.
  */
 
 const API = 'https://app.ticketmaster.com/discovery/v2';

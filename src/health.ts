@@ -7,8 +7,9 @@ import type { Env } from './types';
  * Liveness and token expiry (R6).
  *
  * Note on cost: total_plays is a COUNT(*) over the whole table, so its row
- * reads grow with the warehouse. That is fine at a handful of calls a day
- * against D1's 5M/day free-tier read allowance; do not poll /health in a loop.
+ * reads grow with the warehouse. That is fine at a handful of calls a day, but
+ * D1 meters every row (and the Free plan caps reads at 5M a day), so do not
+ * poll /health in a loop.
  */
 export async function health(env: Env, now: number = Date.now()): Promise<Response> {
   const { sync, token } = await readState(env.DB);

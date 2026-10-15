@@ -147,7 +147,7 @@ export async function importChunk(env: Env, request: Request): Promise<Response>
     artists: rows.artists.length,
     track_artists: rows.trackArtists.length,
     // Real D1 row-write cost including index writes, so the client script can
-    // pace itself against the 100,000/day free-plan ceiling.
+    // pace itself against a daily ceiling (the Free plan's is 100,000).
     rows_written: rowsWritten,
   });
 }

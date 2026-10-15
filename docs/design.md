@@ -82,7 +82,9 @@ stale body) after that. A request that finds a claim held and nothing to serve
 gets `503` with `Retry-After`. A failed compute holds its claim for an hour, so
 an erroring query does not retry on every request. Recompute cost is set by
 the freshness window, not by traffic: all five together read about 2M rows a
-day at worst, against the free plan's 5M. The routes take no parameters and
+day at worst. This deployment is on Workers Paid, where D1 reads are metered
+against 25 billion a month rather than capped; the design also keeps a fork on
+the Free plan under its 5M a day. The routes take no parameters and
 the query string is never part of a cache key, so callers cannot force a
 recompute.
 
@@ -121,8 +123,8 @@ calendar year that has plays, and this year so far. "So far" ends with the
 last complete local week, so it moves once a week rather than daily, for the
 same reason the public stats stop at a week boundary. Listing them costs one
 primary-key probe per candidate year. The daily cron (`0 9 * * *`) computes one
-preset not yet computed, newest first; one compute a day keeps it well inside
-the row budget.
+preset not yet computed, newest first; one compute a day keeps its reads
+small and predictable.
 
 Days and hours are in each era's local time. Minutes are estimated: a play ran
 for at most the gap since the play before it and at most the track's length,

@@ -617,8 +617,8 @@ export async function wrappedRangesRoute(env: Env): Promise<Response> {
 /**
  * Compute presets nobody has asked for yet, newest first, so a reader rarely
  * waits on a cold compute. Run from the daily cron, `limit` at a time: each
- * compute reads a year of plays several times over, and the D1 row budget is
- * shared with ingestion. Returns the keys computed.
+ * compute reads a year of plays several times over, and D1 meters every row
+ * read. Returns the keys computed.
  */
 export async function warmWrappedPresets(env: Env, ctx: ExecutionContext, now = Date.now(), limit = 1): Promise<string[]> {
   const eras = erasFor(env.MOVED_AT);

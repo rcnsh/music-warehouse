@@ -309,7 +309,7 @@ const worker = {
   async scheduled(event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
     // The daily alert sweep shares the scheduled handler, dispatched on which
     // cron expression fired. So does warming one Wrapped preset a day: one
-    // compute, so its row reads stay well inside the daily budget.
+    // compute, so its row reads stay small and predictable.
     if (event.cron === CONCERT_CRON) {
       ctx.waitUntil(
         runConcertCheck(env)

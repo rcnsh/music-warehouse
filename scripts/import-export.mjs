@@ -4,9 +4,10 @@
  *
  * The export is the only way to recover listening from before the Worker
  * existed. It is also large: ten years of listening is plausibly 100,000+
- * records, and D1's free plan allows 100,000 row writes per calendar day
+ * records, and on the Free plan D1 allows 100,000 row writes per calendar day
  * counting index writes. So this script paces itself against a row-write
- * ceiling, records where it stopped, and resumes the next day.
+ * ceiling, records where it stopped, and resumes the next day. Workers Paid
+ * has no daily cap; raise --dailyRowLimit there to import in one run.
  *
  *   ADMIN_TOKEN=... node scripts/import-export.mjs \
  *     --dir ./export-data --url https://music-warehouse.<subdomain>.workers.dev

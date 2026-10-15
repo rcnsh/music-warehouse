@@ -89,8 +89,8 @@ mode 600.
 ### 5. Block unauthenticated traffic (recommended)
 
 Every route but `/callback` needs a token, but unauthenticated requests still
-count against the free plan's 100,000 requests a day, which the ingestion cron
-shares. A WAF custom rule (Security → WAF → Custom rules, action **Block**)
+reach the Worker. On the Free plan they count against its 100,000 requests a
+day, which the ingestion cron shares; on Workers Paid they are only noise. A WAF custom rule (Security → WAF → Custom rules, action **Block**)
 stops them at the edge:
 
 ```txt
@@ -232,9 +232,11 @@ npm run import -- --dir "export/Spotify Extended Streaming History" --url "$WORK
 | `--state` | `.import-state.json` | Where progress is saved. |
 | `--delayMs` | `250` | Pause between chunks. |
 
-D1's free plan allows 100,000 row writes a day, index writes included, so the
-script stops at 90,000 and a long history takes several days. Re-run it after
-00:00 UTC and it continues from `.import-state.json`. Re-running is always safe:
+On the Free plan D1 allows 100,000 row writes a day, index writes included, so
+the script stops at 90,000 and a long history takes several days. Re-run it
+after 00:00 UTC and it continues from `.import-state.json`. Workers Paid has no
+daily cap (50 million writes a month are included), so there pass a larger
+`--dailyRowLimit` to import in one run. Re-running is always safe:
 plays already stored are ignored, not duplicated. Podcasts and local files are
 skipped.
 
@@ -290,6 +292,17 @@ locally. `npx wrangler secret list` shows what is set.
 The crons in `wrangler.jsonc` are `*/30 * * * *` (poll) and `0 9 * * *`
 (alerts, plus computing one Wrapped preset). Polling every 30 minutes is 48
 requests a day; tighten it to `*/15` if plays ever go missing.
+
+### Plan and limits
+
+This deployment runs on Workers Paid. There D1 meters reads and writes against
+a monthly allowance (25 billion rows read and 50 million written, then billed
+per million) and never stops answering. On the Free plan D1 stops answering
+for the rest of the UTC day, ingestion included, once 5 million rows have been
+read or 100,000 written. The Worker still runs on Free: stats are cached so
+their cost doesn't grow with traffic, and the concert check fits Free's 50
+subrequests. `_meta.rows_read` and the `X-Rows-Read` header report what each
+request read.
 
 ## API reference
 
