@@ -1,6 +1,8 @@
 node_modules/
 .wrangler/
 .dev.vars
+# This deployment's own Wrangler config: database id, hostname. See wrangler.jsonc.
+wrangler.local.jsonc
 dist/
 *.log
 # Spotify export data — personal, and far too large for git.

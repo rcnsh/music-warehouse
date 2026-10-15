@@ -10,7 +10,8 @@ SPOTIFY_CLIENT_SECRET=
 ADMIN_TOKEN=
 
 # Deprecated: read-only credential for the /api/* routes. Prefer a read device
-# token from POST /admin/tokens (README, "Device tokens"). Optional.
+# token from POST /admin/tokens (README, "Device tokens"). Optional; every use
+# logs a deprecation warning.
 # openssl rand -hex 32
 READ_TOKEN=
 
@@ -53,7 +54,7 @@ TIMEZONE=
 # Needs TICKETMASTER_API_KEY. See README, "Concerts".
 # CONCERT_REGIONS=[{"key":"uk","label":"United Kingdom","countryCode":"GB"}]
 
-# Overrides the production value in wrangler.jsonc for local dev. Spotify
+# Overrides the value in wrangler.local.jsonc (or the template) for local dev. Spotify
 # permits plain HTTP only on the loopback address, and this must match a
 # redirect URI registered in the Spotify dashboard character for character.
 SPOTIFY_REDIRECT_URI=http://127.0.0.1:8787/callback

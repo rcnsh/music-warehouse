@@ -872,14 +872,18 @@ paths:
       operationId: signInStart
       summary: Start a sign-in with Spotify
       description: |
-        Open in a browser. Redirects to Spotify's consent page (no scopes);
-        Spotify then redirects to `/auth/callback`, which checks the Spotify
-        account is the warehouse's owner.
+        Open in a browser. Shows a confirmation page naming the device and
+        `return_to`, and sets a cookie tying the sign-in to that browser. Its
+        Allow button posts to `POST /auth/login`, which redirects (`303`) to
+        Spotify's consent page (no scopes, `show_dialog=true`); Spotify then
+        redirects to `/auth/callback`, which checks the same browser confirmed
+        it and that the Spotify account is the warehouse's owner.
 
         **With `return_to`** (an app, PKCE S256 required): `/auth/callback`
         redirects (`302`) to `return_to` with `?code=<one-time code>` on
-        success, or `?error=` with `access_denied` (or Spotify's own error),
-        `unavailable` or `not_owner`. The code is valid for 60 seconds; exchange
+        success, or `?error=` with `access_denied` (Cancel, a refusal at
+        Spotify or Spotify's own error code, or a sign-in finished in another
+        browser), `unavailable` or `not_owner`. The code is valid for 60 seconds; exchange
         it at `POST /auth/token`. `return_to` must be on an origin in
         `CORS_ORIGINS` (a `*` entry does not count), `http://127.0.0.1` or
         `http://[::1]` on any port, or a custom scheme in `SIGN_IN_SCHEMES`.
@@ -909,18 +913,65 @@ paths:
           in: query
           schema: { type: string, enum: [S256], default: S256 }
       responses:
-        '302':
-          description: Redirect to Spotify's consent page.
-          headers:
-            Location:
-              schema: { type: string, format: uri }
+        '200':
+          description: The confirmation page, with a `Set-Cookie` for this sign-in.
+          content:
+            text/html:
+              schema: { type: string }
         '400': { $ref: '#/components/responses/BadRequest' }
         '429':
-          description: Too many sign-ins in progress (50).
+          description: |
+            Too many sign-ins in progress (10 per client address, 200 in all),
+            or too many `/auth/*` requests from this address in the last
+            minute when the deployment binds `AUTH_RATE_LIMITER`.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
         '500': { $ref: '#/components/responses/ServerError' }
+    post:
+      tags: [Sign-in]
+      operationId: signInConfirm
+      summary: Answer the sign-in confirmation page
+      description: |
+        Posted by the confirmation page's own form, never by an app. Needs the
+        cookie the page set, and is refused (`403`) from another site
+        (`Origin` or `Sec-Fetch-Site`). Allow redirects to Spotify; Cancel
+        redirects to `return_to` with `?error=access_denied`, or shows a page
+        when there is none.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [state, decision]
+              properties:
+                state: { type: string }
+                decision: { type: string, enum: [allow, cancel] }
+      responses:
+        '200':
+          description: Cancelled, with no `return_to` to go back to.
+          content:
+            text/html:
+              schema: { type: string }
+        '302':
+          description: Cancelled; back to `return_to` with `?error=access_denied`.
+        '303':
+          description: Allowed; on to Spotify's consent page.
+          headers:
+            Location:
+              schema: { type: string, format: uri }
+        '400':
+          description: Not a form, an unknown decision, or a sign-in that expired, was answered already, or belongs to another browser. An HTML page.
+          content:
+            text/html:
+              schema: { type: string }
+        '403':
+          description: Posted from another site. An HTML page.
+          content:
+            text/html:
+              schema: { type: string }
 
   /auth/token:
     post:

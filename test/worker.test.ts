@@ -1,5 +1,5 @@
 import { SELF, env } from 'cloudflare:test';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { normalizeExport } from '../src/import';
 import { ensureRollup } from '../src/rollup';
 import { syncSearchIndex } from '../src/search-index';
@@ -667,5 +667,38 @@ describe('/login', () => {
     const response = await SELF.fetch(`${BASE}/callback?code=abc&state=wrong-state`);
     expect(response.status).toBe(400);
     expect(await response.text()).toContain('State mismatch');
+  });
+
+  it('repeats only an error code from Spotify, as text that is never sniffed', async () => {
+    const coded = await SELF.fetch(`${BASE}/callback?error=access_denied`);
+    expect(coded.status).toBe(400);
+    expect(coded.headers.get('X-Content-Type-Options')).toBe('nosniff');
+    expect(await coded.text()).toBe('Spotify refused authorization: access_denied');
+
+    const injected = await SELF.fetch(`${BASE}/callback?error=${encodeURIComponent('<html><script>x()</script>')}`);
+    expect(injected.headers.get('X-Content-Type-Options')).toBe('nosniff');
+    expect(await injected.text()).toBe('Spotify refused authorization: unknown');
+  });
+
+  it('logs a failed token exchange instead of showing Spotify\'s response', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('{"error":"server_error","detail":"upstream secret detail"}', { status: 500 })),
+    );
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const login = await get('/login', { redirect: 'manual' });
+      const state = new URL(login.headers.get('Location')!).searchParams.get('state')!;
+      const response = await SELF.fetch(`${BASE}/callback?code=abc&state=${state}`);
+      expect(response.status).toBe(502);
+      expect(response.headers.get('X-Content-Type-Options')).toBe('nosniff');
+      const body = await response.text();
+      expect(body).not.toContain('upstream secret detail');
+      expect(body).toContain('Worker log');
+      expect(JSON.stringify(error.mock.calls)).toContain('upstream secret detail');
+    } finally {
+      error.mockRestore();
+      vi.unstubAllGlobals();
+    }
   });
 });

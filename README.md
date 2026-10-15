@@ -103,21 +103,23 @@ The short version. Each step links to the detail.
 1. [Create a Spotify app](#1-create-the-spotify-app) with redirect URIs
    `https://<your-worker-host>/callback` and `/auth/callback`, and request your
    Extended streaming history while you're there.
-2. Clone, install and [configure](#2-configure-the-deployment) `wrangler.jsonc`:
+2. Clone, install and [configure](#2-configure-the-deployment) your own copy
+   of the `wrangler.jsonc` template:
 
    ```bash
    git clone https://github.com/rcnsh/music-warehouse && cd music-warehouse
    npm install
    npx wrangler login
+   cp wrangler.jsonc wrangler.local.jsonc     # gitignored; your values go here
    ```
 
 3. [Create the database](#3-create-the-database), then
    [deploy and set secrets](#4-deploy-and-set-secrets):
 
    ```bash
-   npx wrangler d1 create music_warehouse     # copy the id into wrangler.jsonc
+   npx wrangler d1 create music_warehouse     # copy the id into wrangler.local.jsonc
    npm run migrate:remote
-   npx wrangler deploy
+   npm run deploy
    npx wrangler secret put SPOTIFY_CLIENT_ID
    npx wrangler secret put SPOTIFY_CLIENT_SECRET
    npx wrangler secret put ADMIN_TOKEN        # openssl rand -hex 32
@@ -160,16 +162,32 @@ The short version. Each step links to the detail.
 git clone https://github.com/rcnsh/music-warehouse && cd music-warehouse
 npm install
 npx wrangler login
+cp wrangler.jsonc wrangler.local.jsonc
 ```
 
-Three values in [`wrangler.jsonc`](wrangler.jsonc) belong to the original
-deployment. They are marked `[1]` to `[3]` in the file:
+[`wrangler.jsonc`](wrangler.jsonc) is a template: its database id and redirect
+URI are placeholders, so the repository holds nobody's deployment. Your own
+values go in `wrangler.local.jsonc`, which is gitignored. `npm run dev`,
+`npm run deploy`, `npm run migrate:*` and `npm run wrangler -- <command>` pass
+it to Wrangler with `-c` whenever it exists
+([`scripts/wrangler.mjs`](scripts/wrangler.mjs)); deploying without it is
+refused. Run Wrangler through those scripts rather than bare `npx wrangler`
+for anything that touches the database. When the template changes (a new
+cron, a new binding), carry the change into your copy.
+
+In `wrangler.local.jsonc`, set:
 
 | | Key | Set it to |
 |---|---|---|
-| `[1]` | `routes` | Your custom domain, or delete the block to deploy to `music-warehouse.<subdomain>.workers.dev`. |
-| `[2]` | `database_id` | The id from the [next step](#3-create-the-database). |
-| `[3]` | `vars.SPOTIFY_REDIRECT_URI` | The `/callback` redirect URI from step 1, exactly. |
+| `[1]` | `database_id` | The id from the [next step](#3-create-the-database). |
+| `[2]` | `vars.SPOTIFY_REDIRECT_URI` | The `/callback` redirect URI from step 1, exactly. |
+| | `routes` | Optional: `[{ "pattern": "music.example.com", "custom_domain": true }]` for a custom domain. Without it the Worker is on `music-warehouse.<subdomain>.workers.dev`. |
+
+The template also binds `AUTH_RATE_LIMITER`, a
+[Workers Rate Limiting](https://developers.cloudflare.com/workers/runtime-apis/bindings/rate-limit/)
+binding: 20 requests a minute per client address on the unauthenticated
+`/auth/*` routes. Delete the `ratelimits` block to go without it; the cap on
+pending sign-ins still holds.
 
 Listening stats and Wrapped read local time in one timezone, `TIMEZONE`
 (default UTC), and start at your first stored play. If you've lived in more
@@ -192,7 +210,7 @@ the other routes don't depend on it.
 ### 3. Create the database
 
 ```bash
-npx wrangler d1 create music_warehouse     # copy the id into wrangler.jsonc
+npx wrangler d1 create music_warehouse     # copy the id into wrangler.local.jsonc
 npm run migrate:remote
 npm run migrate:local                      # for wrangler dev and tests
 ```
@@ -200,11 +218,10 @@ npm run migrate:local                      # for wrangler dev and tests
 ### 4. Deploy and set secrets
 
 ```bash
-npx wrangler deploy
+npm run deploy
 npx wrangler secret put SPOTIFY_CLIENT_ID
 npx wrangler secret put SPOTIFY_CLIENT_SECRET
 npx wrangler secret put ADMIN_TOKEN        # paste the output of: openssl rand -hex 32
-npx wrangler secret put READ_TOKEN         # optional, same again
 ```
 
 The optional ones are in [Configuration](#configuration). For local work, copy
@@ -225,8 +242,9 @@ are only noise. A WAF custom rule (Security → WAF → Custom rules, action
 
 `/callback` stays open for Spotify's redirect, which its single-use `state`
 guards. `/auth/*` stays open for [signing in](#signing-in-with-spotify), which
-is how a device without a token gets one; a rate-limiting rule on `/auth/` is a
-sensible extra. `OPTIONS` stays open for browser clients' CORS preflights,
+is how a device without a token gets one. The `AUTH_RATE_LIMITER` binding
+limits it per client inside the Worker; a WAF rate-limiting rule on `/auth/`
+stops a flood before it reaches the Worker at all, and is a sensible extra. `OPTIONS` stays open for browser clients' CORS preflights,
 which never carry the header; drop that clause if you don't set `CORS_ORIGINS`.
 
 Then [authorize](#authorizing).
@@ -296,8 +314,14 @@ only a hash is stored.
 in the list.
 
 Keep `ADMIN_TOKEN` in a password manager as the way back in if every device
-token is lost. Once nothing uses `READ_TOKEN`, delete it with
-`npx wrangler secret delete READ_TOKEN`.
+token is lost.
+
+`READ_TOKEN` is deprecated: one shared secret that never expires and cannot be
+revoked for one reader without breaking the rest. It still works, and every
+use logs a `read-token-deprecated` warning (see `npx wrangler tail`), so
+you can find what still sends it. Move each of those to a device token, and
+once the warning stops, delete it with `npx wrangler secret delete READ_TOKEN`.
+Don't set it on a new deployment.
 
 ### Signing in with Spotify
 
@@ -308,9 +332,23 @@ never touches the ingestion grant: it asks Spotify for no scopes and discards
 what Spotify returns once it has read the account id. Tokens it mints expire
 after 90 days and show `created_via: "spotify"` in the list.
 
+Every sign-in starts on a warehouse page that names the device and where its
+token will go, with **Allow** and **Cancel**. Only Allow goes on to Spotify,
+and Spotify then shows its own consent dialog every time, even for an account
+that approved the app before. Both steps happen in the browser, and Spotify
+must send it back to the same browser that pressed Allow (a cookie checks it).
+That matters because PKCE only proves the code reaches whoever *started* the
+sign-in: any program on the machine can listen on `127.0.0.1`, and any mobile
+app can register a URL scheme. So read the page, and press Allow only for a
+sign-in you started.
+
+Sign-ins in progress are capped at 10 per client address (its /64 for IPv6;
+only a keyed hash of it is stored) and 200 overall, for up to 10 minutes each.
+Past either, `/auth/login` answers `429`.
+
 **In a browser, for a shell or script:** open
-`$WORKER_URL/auth/login?name=laptop`, approve, and copy the token from the
-page. It is shown once.
+`$WORKER_URL/auth/login?name=laptop`, press Allow, approve at Spotify, and
+copy the token from the page. It is shown once.
 
 **From an app**, it works like OAuth with PKCE
 ([RFC 7636](https://www.rfc-editor.org/rfc/rfc7636)). `return_to` can be:
@@ -329,8 +367,11 @@ page. It is shown once.
    `code_challenge` is base64url(SHA-256(verifier)), without padding.
 2. Send the browser to
    `/auth/login?name=<device>&return_to=<url on your origin>&code_challenge=<challenge>`.
-3. Spotify sends it back to `return_to` with `?code=…`, or with `?error=`:
-   `access_denied`, `not_owner` or `unavailable`.
+   It shows the confirmation page; the owner presses Allow and approves at
+   Spotify.
+3. The browser comes back to `return_to` with `?code=…`, or with `?error=`:
+   `access_denied` (Cancel, a refusal at Spotify, or a sign-in finished in
+   another browser), `not_owner` or `unavailable`.
 4. Within 60 seconds, `POST /auth/token` with
    `{ "code": "…", "code_verifier": "…" }`. The response is the minted token,
    as from `POST /admin/tokens`.
@@ -530,7 +571,7 @@ Responses are JSON. Errors are `{ "error": "..." }` with:
 | `401` | Missing or wrong token, or a read token on a route outside `/api/*`. |
 | `403` | A read token asked Wrapped for a range it may not compute. |
 | `404` | `Not found`: no such route. |
-| `429` | Spotify rate limit or quota (live routes), or `Too many sign-ins in progress` from `/auth/login`. |
+| `429` | Spotify rate limit or quota (live routes), `Too many sign-ins in progress` from `/auth/login`, or `Too many sign-in requests` from any `/auth/*` route when `AUTH_RATE_LIMITER` is bound. |
 | `500` | `Worker misconfigured: …` when a setting such as `ERAS` or `CONCERT_REGIONS` is malformed (the message names the setting, never its value); otherwise `Internal error`. |
 | `502` | Any other Spotify failure (live routes). |
 | `503` | Either a stat or Wrapped range is still being computed, or (live routes only) the Spotify grant has lapsed. See below. |
@@ -946,7 +987,8 @@ These take no token.
 | Route | |
 |---|---|
 | `GET /callback` | Spotify's redirect target for [authorizing](#authorizing) ingestion. Guarded by its single-use `state`. |
-| `GET /auth/login?name=&return_to=&code_challenge=` | [Sign in with Spotify](#signing-in-with-spotify). |
+| `GET /auth/login?name=&return_to=&code_challenge=` | [Sign in with Spotify](#signing-in-with-spotify): the confirmation page. |
+| `POST /auth/login` | Form `state`, `decision` (`allow` or `cancel`), from the confirmation page's own form. |
 | `GET /auth/callback` | Spotify's redirect target for sign-in. |
 | `POST /auth/token` | Body `{ code, code_verifier }`; exchanges a sign-in code for a read token. |
 
@@ -1046,7 +1088,7 @@ there too, alongside the `needs_reauth` alert.
 
 ```bash
 npx wrangler tail                       # watch the next cron run
-npx wrangler d1 execute music_warehouse --remote --command "SELECT COUNT(*) FROM plays;"
+npm run wrangler -- d1 execute music_warehouse --remote --command "SELECT COUNT(*) FROM plays;"
 ```
 
 Play a few songs, wait for the next half hour, and look for them in
@@ -1055,7 +1097,7 @@ Play a few songs, wait for the next half hour, and look for them in
 ### Redeploying
 
 ```bash
-npm test && npm run typecheck && npx wrangler deploy
+npm test && npm run typecheck && npm run deploy
 ```
 
 Apply any new migration with `npm run migrate:remote` first: the code that
@@ -1094,9 +1136,9 @@ history needs a copy of its own. There are two layers.
 minute in the last 30 days on Workers Paid (7 on Free):
 
 ```bash
-npx wrangler d1 time-travel info music_warehouse                       # the current bookmark
-npx wrangler d1 time-travel info music_warehouse --timestamp=2026-10-01T09:00:00Z
-npx wrangler d1 time-travel restore music_warehouse --timestamp=2026-10-01T09:00:00Z
+npm run wrangler -- d1 time-travel info music_warehouse                       # the current bookmark
+npm run wrangler -- d1 time-travel info music_warehouse --timestamp=2026-10-01T09:00:00Z
+npm run wrangler -- d1 time-travel restore music_warehouse --timestamp=2026-10-01T09:00:00Z
 ```
 
 A restore overwrites the database in place and cancels queries in flight. It
@@ -1112,6 +1154,9 @@ cannot recover from a mistake noticed late, or the database being deleted.
 npx wrangler login                          # once
 scripts/backup.sh                           # BACKUP_DIR, BACKUP_KEEP and D1_DATABASE override the defaults
 ```
+
+It runs Wrangler through `scripts/wrangler.mjs`, so it backs up the database
+in `wrangler.local.jsonc`, and refuses to run against `--remote` without one.
 
 `wrangler d1 export` refuses a database holding a virtual table, and the
 search index (migration 0011) is one. So the script exports every real table
@@ -1136,7 +1181,7 @@ npx wrangler d1 execute music_warehouse_restored --remote --file ~/Backups/music
 npx wrangler d1 migrations list music_warehouse_restored --remote   # should have none to apply
 ```
 
-Then put the new `database_name` and `database_id` in `wrangler.jsonc` (and
+Then put the new `database_name` and `database_id` in `wrangler.local.jsonc` (and
 the `migrate:*` scripts in `package.json`), deploy, and check `/health`. The
 export carries `d1_migrations`, so later migrations apply on top as normal.
 Any plays newer than the export that are still in Spotify's last 50 come back
@@ -1157,8 +1202,9 @@ npm run typecheck
 
 | Script | Runs |
 |---|---|
-| `npm run dev` | `wrangler dev` |
-| `npm run deploy` | `wrangler deploy` |
+| `npm run dev` | `wrangler dev`, with `wrangler.local.jsonc` if it exists |
+| `npm run deploy` | `wrangler deploy -c wrangler.local.jsonc` (refused without it) |
+| `npm run wrangler -- <args>` | Any Wrangler command, with `wrangler.local.jsonc` if it exists |
 | `npm test` / `npm run test:watch` | Vitest, once or watching |
 | `npm run typecheck` | `tsc --noEmit` |
 | `npm run migrate:local` / `migrate:remote` | Apply D1 migrations locally or to the deployed database |

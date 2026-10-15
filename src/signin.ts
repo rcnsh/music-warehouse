@@ -1,5 +1,14 @@
 import { BadRequest, json } from './api';
-import { DEFAULT_TOKEN_TTL_DAYS, base64url, listedOrigins, mintToken, sha256Hex, randomSecret, tokenName } from './auth';
+import {
+  DEFAULT_TOKEN_TTL_DAYS,
+  base64url,
+  clientKey,
+  listedOrigins,
+  mintToken,
+  randomSecret,
+  sha256Hex,
+  tokenName,
+} from './auth';
 import { readState } from './db';
 import { SpotifyError, authorizeUrl, exchangeCode, spotifyGet } from './spotify';
 import { NeedsReauthError, getAccessToken } from './tokens';
@@ -31,12 +40,29 @@ import { log } from './log';
  * - a custom scheme in SIGN_IN_SCHEMES, for a mobile app.
  * A native app's exchange carries no Origin, so for those PKCE alone binds the
  * code to the app that started the sign-in.
+ *
+ * PKCE proves the code reaches whoever started the sign-in, not that the owner
+ * meant them to have it: any local process can listen on loopback, and any
+ * mobile app can register a scheme. So /auth/login first shows a warehouse
+ * page naming the client and its return_to, and goes on to Spotify only when
+ * the owner presses Allow, in that browser (a cookie, checked again at
+ * /auth/callback). Spotify is asked to show its own dialog every time too,
+ * rather than waving an already-approved session through unseen.
  */
 
 const STATE_TTL_MS = 10 * 60 * 1000;
 const CODE_TTL_MS = 60 * 1000;
 /** Sign-ins in flight at once. The routes are unauthenticated, so this bounds the rows a stranger can create. */
-const MAX_PENDING = 50;
+const MAX_PENDING = 200;
+/**
+ * Of those, how many one client address may hold. Without it, fifty requests
+ * from anyone locked the owner out for ten minutes; now a stranger fills only
+ * their own allowance. The optional AUTH_RATE_LIMITER binding slows them down
+ * before they reach D1 at all.
+ */
+const MAX_PENDING_PER_CLIENT = 10;
+
+const STALE = 'This sign-in expired, was already used, or was started in another browser. Start again.';
 
 /** Stored as a code's origin when its exchange is not checked against one. */
 const NATIVE = 'native';
@@ -105,7 +131,7 @@ function returnToParam(env: Env, value: string): string {
 }
 
 /** GET /auth/login?name=&return_to=&code_challenge=&code_challenge_method=S256 */
-export async function signInStart(env: Env, url: URL): Promise<Response> {
+export async function signInStart(env: Env, request: Request, url: URL): Promise<Response> {
   const name = tokenName(url.searchParams.get('name'));
   const rawReturnTo = url.searchParams.get('return_to');
   const returnTo = rawReturnTo ? returnToParam(env, rawReturnTo) : null;
@@ -122,17 +148,98 @@ export async function signInStart(env: Env, url: URL): Promise<Response> {
 
   const now = Date.now();
   const state = randomSecret();
+  const browser = randomSecret();
+  const client = await clientKey(request, env);
+  // `IS`, not `=`: off Cloudflare's edge there is no client address, and those
+  // sign-ins share one allowance rather than escaping the cap.
   const [, inserted] = await env.DB.batch([
     env.DB.prepare('DELETE FROM login_state WHERE created_ms < ?').bind(now - STATE_TTL_MS),
     env.DB.prepare(
-      'INSERT INTO login_state (state, created_ms, device_name, return_to, code_challenge) ' +
-        'SELECT ?, ?, ?, ?, ? WHERE (SELECT COUNT(*) FROM login_state) < ?',
-    ).bind(state, now, name, returnTo, challenge, MAX_PENDING),
+      'INSERT INTO login_state (state, created_ms, device_name, return_to, code_challenge, client_hash, browser_hash) ' +
+        'SELECT ?, ?, ?, ?, ?, ?, ? WHERE (SELECT COUNT(*) FROM login_state) < ? ' +
+        'AND (SELECT COUNT(*) FROM login_state WHERE client_hash IS ?) < ?',
+    ).bind(
+      state,
+      now,
+      name,
+      returnTo,
+      challenge,
+      client,
+      await sha256Hex(browser),
+      MAX_PENDING,
+      client,
+      MAX_PENDING_PER_CLIENT,
+    ),
   ]);
   if (!inserted?.meta.changes) return json({ error: 'Too many sign-ins in progress. Try again in a few minutes.' }, 429);
 
-  const location = authorizeUrl(env, state, { redirectUri: signInRedirectUri(env), scope: '' });
-  return new Response(null, { status: 302, headers: { Location: location, 'Cache-Control': 'no-store' } });
+  const response = confirmPage(name, returnTo, state);
+  response.headers.append('Set-Cookie', browserCookie(url, state, browser, STATE_TTL_MS / 1000));
+  return response;
+}
+
+/**
+ * POST /auth/login, form `state` and `decision`: the owner's answer on the
+ * confirmation page. Allow goes on to Spotify; Cancel ends the sign-in.
+ *
+ * Only the browser that was shown the page can answer it: the state is in the
+ * page alone, and the cookie set with it must come back. The same cookie is
+ * checked again when Spotify redirects back, so a sign-in started by one
+ * client and finished in someone else's browser goes nowhere.
+ */
+export async function signInConfirm(env: Env, request: Request, url: URL): Promise<Response> {
+  const fetchSite = request.headers.get('Sec-Fetch-Site');
+  const origin = request.headers.get('Origin');
+  if ((fetchSite && fetchSite !== 'same-origin') || (origin && origin !== url.origin)) {
+    return page('Sign-in failed', '<p>That answer did not come from this warehouse’s own page.</p>', 403);
+  }
+
+  let form: FormData;
+  try {
+    form = await request.formData();
+  } catch {
+    return page('Sign-in failed', '<p>Expected a form. Start again.</p>', 400);
+  }
+  const state = form.get('state');
+  const decision = form.get('decision');
+  if (typeof state !== 'string' || (decision !== 'allow' && decision !== 'cancel')) {
+    return page('Sign-in failed', '<p>Expected a state and a decision. Start again.</p>', 400);
+  }
+
+  const pending = await env.DB.prepare(
+    'SELECT created_ms, return_to, browser_hash, confirmed_ms FROM login_state WHERE state = ?',
+  )
+    .bind(state)
+    .first<{ created_ms: number; return_to: string | null; browser_hash: string | null; confirmed_ms: number | null }>();
+  if (
+    !pending ||
+    pending.confirmed_ms !== null ||
+    Date.now() - pending.created_ms > STATE_TTL_MS ||
+    !(await sameBrowser(request, url, state, pending.browser_hash))
+  ) {
+    return page('Sign-in failed', `<p>${STALE}</p>`, 400);
+  }
+
+  if (decision === 'cancel') {
+    await env.DB.prepare('DELETE FROM login_state WHERE state = ?').bind(state).run();
+    const response = pending.return_to
+      ? backTo(pending.return_to, { error: 'access_denied' })
+      : page('Sign-in cancelled', '<p>No token was made. You can close this page.</p>');
+    response.headers.append('Set-Cookie', browserCookie(url, state, '', 0));
+    return response;
+  }
+
+  const confirmed = await env.DB.prepare(
+    'UPDATE login_state SET confirmed_ms = ? WHERE state = ? AND confirmed_ms IS NULL',
+  )
+    .bind(Date.now(), state)
+    .run();
+  if (!confirmed.meta.changes) return page('Sign-in failed', `<p>${STALE}</p>`, 400);
+
+  // show_dialog: an account that already approved this app would otherwise
+  // pass straight through Spotify, and the owner would never see it.
+  const location = authorizeUrl(env, state, { redirectUri: signInRedirectUri(env), scope: '', showDialog: true });
+  return new Response(null, { status: 303, headers: { Location: location, 'Cache-Control': 'no-store' } });
 }
 
 /** `return_to` with query parameters added, for handing a code or an error back to the app. */
@@ -143,25 +250,49 @@ function backTo(returnTo: string, params: Record<string, string>): Response {
 }
 
 /** GET /auth/callback: Spotify's redirect target for sign-in. */
-export async function signInCallback(env: Env, url: URL): Promise<Response> {
+export async function signInCallback(env: Env, request: Request, url: URL): Promise<Response> {
   const state = url.searchParams.get('state');
-  if (!state) return page('Sign-in failed', 'Missing state. Start again.', 400);
+  if (!state) return page('Sign-in failed', '<p>Missing state. Start again.</p>', 400);
+  const response = await finishSignIn(env, request, url, state);
+  response.headers.append('Set-Cookie', browserCookie(url, state, '', 0));
+  return response;
+}
 
+async function finishSignIn(env: Env, request: Request, url: URL, state: string): Promise<Response> {
   // Single use: consumed before anything else, whatever happens next.
   const pending = await env.DB.prepare(
-    'DELETE FROM login_state WHERE state = ? RETURNING created_ms, device_name, return_to, code_challenge',
+    'DELETE FROM login_state WHERE state = ? ' +
+      'RETURNING created_ms, device_name, return_to, code_challenge, browser_hash, confirmed_ms',
   )
     .bind(state)
-    .first<{ created_ms: number; device_name: string; return_to: string | null; code_challenge: string | null }>();
+    .first<{
+      created_ms: number;
+      device_name: string;
+      return_to: string | null;
+      code_challenge: string | null;
+      browser_hash: string | null;
+      confirmed_ms: number | null;
+    }>();
   if (!pending || Date.now() - pending.created_ms > STATE_TTL_MS) {
-    return page('Sign-in failed', 'This sign-in expired or was already used. Start again.', 400);
+    return page('Sign-in failed', `<p>${STALE}</p>`, 400);
   }
 
   const fail = (error: string, message: string, status: number) =>
-    pending.return_to ? backTo(pending.return_to, { error }) : page('Sign-in failed', message, status);
+    pending.return_to ? backTo(pending.return_to, { error }) : page('Sign-in failed', `<p>${message}</p>`, status);
+
+  // Never confirmed on the warehouse's page, or finished in a browser other
+  // than the one that confirmed it: someone else's sign-in, so nothing to give.
+  if (pending.confirmed_ms === null || !(await sameBrowser(request, url, state, pending.browser_hash))) {
+    return fail('access_denied', STALE, 400);
+  }
 
   const code = url.searchParams.get('code');
-  if (!code) return fail(url.searchParams.get('error') ?? 'access_denied', 'Spotify did not approve the sign-in.', 400);
+  if (!code) {
+    // Spotify's own error code when it looks like one, never free text.
+    const error = url.searchParams.get('error');
+    const known = error && /^[a-z_]{1,64}$/.test(error) ? error : 'access_denied';
+    return fail(known, 'Spotify did not approve the sign-in.', 400);
+  }
 
   let signedIn: string;
   let owner: string | null;
@@ -254,23 +385,94 @@ function escapeHtml(value: string): string {
   return value.replace(/[&<>"']/g, (char) => `&#${char.charCodeAt(0)};`);
 }
 
-function page(title: string, body: string, status = 200): Response {
+/** Inline styles only: no scripts, no frames, nothing fetched. */
+const PAGE_CSP = "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
+
+/** `body` is HTML: escape anything in it that came from a request. */
+function page(title: string, body: string, status = 200, csp = PAGE_CSP, referrer = 'no-referrer'): Response {
   const html =
     `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width">` +
     `<title>${escapeHtml(title)}</title>` +
     `<style>body{font:16px/1.5 system-ui,sans-serif;max-width:36rem;margin:3rem auto;padding:0 1rem}` +
-    `code{display:block;word-break:break-all;padding:1rem;background:#8882;border-radius:.5rem}</style>` +
+    `code{display:block;word-break:break-all;padding:1rem;background:#8882;border-radius:.5rem}` +
+    `button{font:inherit;padding:.5rem 1.25rem;margin-right:.5rem;border-radius:.5rem;border:1px solid #8888;cursor:pointer}` +
+    `button[value=allow]{background:#1db954;border-color:#1db954;color:#000}</style>` +
     `<h1>${escapeHtml(title)}</h1>${body}`;
   return new Response(html, {
     status,
     headers: {
       'Content-Type': 'text/html; charset=utf-8',
       'Cache-Control': 'no-store',
-      // Inline styles only: no scripts, no frames, nothing fetched.
-      'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'",
-      'Referrer-Policy': 'no-referrer',
+      'Content-Security-Policy': csp,
+      'Referrer-Policy': referrer,
+      'X-Content-Type-Options': 'nosniff',
     },
   });
+}
+
+/**
+ * The warehouse's own question, asked before Spotify's: who is asking, and
+ * where the token will go. Spotify's page names only the warehouse, so this is
+ * the one place the owner sees `return_to` before saying yes.
+ */
+function confirmPage(name: string, returnTo: string | null, state: string): Response {
+  const where = returnTo
+    ? `<p>It will be handed to:</p><code>${escapeHtml(returnTo)}</code>` +
+      `<p>Allow only if you started signing in from that app just now.</p>`
+    : `<p>It will be shown on a page in this browser, once.</p>`;
+  const body =
+    `<p><strong>${escapeHtml(name)}</strong> is asking for a read token for this warehouse. ` +
+    `It can read your whole listening history for ${DEFAULT_TOKEN_TTL_DAYS} days.</p>` +
+    where +
+    `<p>Spotify will ask you to confirm it is you next.</p>` +
+    `<form method="post" action="/auth/login">` +
+    `<input type="hidden" name="state" value="${escapeHtml(state)}">` +
+    `<button type="submit" name="decision" value="allow">Allow</button>` +
+    `<button type="submit" name="decision" value="cancel">Cancel</button></form>`;
+  // The form posts here, and its answer redirects on to Spotify, or back to
+  // return_to on Cancel; browsers hold redirects after a form to form-action.
+  // The page's own origin is sent with the post (`same-origin`), and nothing
+  // is sent to Spotify.
+  const targets = ["'self'", 'https://accounts.spotify.com'];
+  if (returnTo) targets.push(returnToSource(new URL(returnTo)));
+  const csp = PAGE_CSP.replace("form-action 'none'", `form-action ${targets.join(' ')}`);
+  return page('Allow sign-in?', body, 200, csp, 'same-origin');
+}
+
+/** `return_to` as a CSP source: its origin, or a custom scheme on its own. */
+function returnToSource(returnTo: URL): string {
+  return returnTo.protocol === 'http:' || returnTo.protocol === 'https:' ? returnTo.origin : returnTo.protocol;
+}
+
+/**
+ * The cookie that ties a sign-in to the browser that confirmed it, one per
+ * sign-in so two at once do not clash. `__Host-` and Secure wherever the
+ * warehouse is on HTTPS; `wrangler dev` on plain HTTP gets neither. Lax, not
+ * Strict: Spotify's redirect back is a cross-site navigation, and Strict
+ * would leave the cookie behind.
+ */
+function browserCookie(url: URL, state: string, value: string, maxAgeSeconds: number): string {
+  const secure = url.protocol === 'https:';
+  return (
+    `${cookieName(url, state)}=${value}; Path=/; Max-Age=${maxAgeSeconds}; HttpOnly; SameSite=Lax` +
+    (secure ? '; Secure' : '')
+  );
+}
+
+function cookieName(url: URL, state: string): string {
+  return `${url.protocol === 'https:' ? '__Host-' : ''}mw_signin_${state.slice(0, 16)}`;
+}
+
+/** Whether the request carries the cookie this sign-in was confirmed with. */
+async function sameBrowser(request: Request, url: URL, state: string, browserHash: string | null): Promise<boolean> {
+  if (!browserHash) return false;
+  const name = cookieName(url, state);
+  const value = (request.headers.get('Cookie') ?? '')
+    .split(';')
+    .map((pair) => pair.trim())
+    .find((pair) => pair.startsWith(`${name}=`))
+    ?.slice(name.length + 1);
+  return !!value && (await sha256Hex(value)) === browserHash;
 }
 
 function tokenPage(name: string, token: string, expiresMs: number): Response {
