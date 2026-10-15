@@ -1,4 +1,5 @@
 import { DEFAULT_TIMEZONE, endOfLocalDayUtcMs, isValidTimeZone, localDayKey, startOfLocalDayUtcMs } from './tz';
+import { textParam } from './history';
 import type { Env } from './types';
 
 export class BadRequest extends Error {}
@@ -44,16 +45,18 @@ export function dateRange(url: URL, timeZone: string): { fromMs: number; toMs: n
   return { fromMs, toMs, from, to };
 }
 
-/** Most recent plays, newest first, joined to track, album and artist names. */
-export async function recentPlays(env: Env, url: URL): Promise<Response> {
-  const limit = intParam(url, 'limit', 50, 1, 500);
-  const before = intParam(url, 'before', Number.MAX_SAFE_INTEGER, 0, Number.MAX_SAFE_INTEGER);
-  const after = intParam(url, 'after', -1, -1, Number.MAX_SAFE_INTEGER);
+/** `%term%` for LIKE, with the term's own wildcards escaped. */
+export const likePattern = (term: string) => `%${term.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
 
-  // The (played_at_ms, track_id) primary key drives both the range and the
-  // ordering, so this reads only the rows it returns.
-  const query = await env.DB.prepare(
-    `SELECT p.played_at_ms, p.track_id, p.context_uri, p.context_type, p.source,
+/**
+ * Above this many matching tracks, walking plays newest first finds a page
+ * sooner than seeking every track's plays and sorting them. Measured on the
+ * real warehouse: 4 tracks read 649 rows by seek and 36k by walk; 1,612
+ * tracks read 8k by seek and 2k by walk.
+ */
+const WALK_ABOVE_TRACKS = 500;
+
+const PLAY_COLUMNS = `p.played_at_ms, p.track_id, p.context_uri, p.context_type, p.source,
             t.name AS track_name, t.duration_ms, t.isrc,
             al.name AS album_name, al.image_url,
             (SELECT group_concat(name, ', ')
@@ -61,20 +64,86 @@ export async function recentPlays(env: Env, url: URL): Promise<Response> {
                        FROM track_artists ta
                        JOIN artists a ON a.artist_id = ta.artist_id
                       WHERE ta.track_id = p.track_id
-                      ORDER BY ta.position)) AS artists
+                      ORDER BY ta.position)) AS artists`;
+
+/**
+ * Ids of tracks whose title, album or any credited artist contains `q`
+ * (case-insensitive, ASCII only, as LIKE is). Artists are read first so
+ * their tracks come from idx_track_artists_artist rather than a scan of
+ * track_artists; the three name tables are a few thousand rows each.
+ */
+async function matchingTrackIds(env: Env, q: string): Promise<{ ids: string[]; rowsRead: number }> {
+  const result = await env.DB.prepare(
+    `SELECT track_id FROM tracks
+      WHERE name LIKE ?1 ESCAPE '\\'
+         OR album_id IN (SELECT album_id FROM albums WHERE name LIKE ?1 ESCAPE '\\')
+     UNION
+     SELECT ta.track_id FROM artists a CROSS JOIN track_artists ta ON ta.artist_id = a.artist_id
+      WHERE a.name LIKE ?1 ESCAPE '\\'`,
+  )
+    .bind(likePattern(q))
+    .all<{ track_id: string }>();
+  return { ids: result.results.map((row) => row.track_id), rowsRead: result.meta?.rows_read ?? 0 };
+}
+
+/**
+ * Most recent plays, newest first, joined to track, album and artist names.
+ * `q` keeps only plays whose track, album or artist name contains it, with
+ * the same paging, so a client can search the whole history a page at a time.
+ */
+export async function recentPlays(env: Env, url: URL): Promise<Response> {
+  const limit = intParam(url, 'limit', 50, 1, 500);
+  const before = intParam(url, 'before', Number.MAX_SAFE_INTEGER, 0, Number.MAX_SAFE_INTEGER);
+  const after = intParam(url, 'after', -1, -1, Number.MAX_SAFE_INTEGER);
+  const q = textParam(url, 'q');
+
+  if (q === null) {
+    // The (played_at_ms, track_id) primary key drives both the range and the
+    // ordering, so this reads only the rows it returns.
+    const query = await env.DB.prepare(
+      `SELECT ${PLAY_COLUMNS}
+         FROM plays p
+         LEFT JOIN tracks t  ON t.track_id = p.track_id
+         LEFT JOIN albums al ON al.album_id = t.album_id
+        WHERE p.played_at_ms < ? AND p.played_at_ms > ?
+        ORDER BY p.played_at_ms DESC
+        LIMIT ?`,
+    )
+      .bind(before, after, limit)
+      .all();
+    return json({
+      plays: query.results,
+      _meta: { rows_read: query.meta?.rows_read ?? null, duration_ms: query.meta?.duration ?? null },
+    });
+  }
+
+  const match = await matchingTrackIds(env, q);
+  if (match.ids.length === 0) {
+    return json({ plays: [], _meta: { rows_read: match.rowsRead, duration_ms: null } });
+  }
+  // The ids travel as one JSON parameter, since D1 allows only 100 bound
+  // parameters. `+p.track_id` stops SQLite using idx_plays_track, which
+  // leaves the primary key to walk plays newest first.
+  const trackTerm = match.ids.length > WALK_ABOVE_TRACKS ? '+p.track_id' : 'p.track_id';
+  const query = await env.DB.prepare(
+    `SELECT ${PLAY_COLUMNS}
        FROM plays p
        LEFT JOIN tracks t  ON t.track_id = p.track_id
        LEFT JOIN albums al ON al.album_id = t.album_id
-      WHERE p.played_at_ms < ? AND p.played_at_ms > ?
+      WHERE ${trackTerm} IN (SELECT value FROM json_each(?))
+        AND p.played_at_ms < ? AND p.played_at_ms > ?
       ORDER BY p.played_at_ms DESC
       LIMIT ?`,
   )
-    .bind(before, after, limit)
+    .bind(JSON.stringify(match.ids), before, after, limit)
     .all();
 
   return json({
     plays: query.results,
-    _meta: { rows_read: query.meta?.rows_read ?? null, duration_ms: query.meta?.duration ?? null },
+    _meta: {
+      rows_read: match.rowsRead + (query.meta?.rows_read ?? 0),
+      duration_ms: query.meta?.duration ?? null,
+    },
   });
 }
 

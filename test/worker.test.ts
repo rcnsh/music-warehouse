@@ -240,6 +240,105 @@ describe('read endpoints (R9)', () => {
   });
 });
 
+describe('searching plays with q', () => {
+  const base = Date.parse('2026-05-01T12:00:00Z');
+
+  /** Tracks with real names, an album and artists, so every searchable column has a value. */
+  async function seedCatalog() {
+    await env.DB.batch([
+      env.DB.prepare('INSERT INTO albums (album_id, name) VALUES (?, ?), (?, ?)').bind('al1', 'Worlds', 'al2', '100% Pure'),
+      env.DB.prepare(
+        'INSERT INTO tracks (track_id, name, duration_ms, album_id, first_seen_ms) VALUES (?, ?, 1, ?, 0), (?, ?, 1, ?, 0), (?, ?, 1, ?, 0), (?, ?, 1, NULL, 0)',
+      ).bind('div', 'Divinity', 'al1', 'sad', 'Sad Machine', 'al1', 'pct', 'Under_score', 'al2', 'exp', 'Export Song'),
+      env.DB.prepare('INSERT INTO artists (artist_id, name) VALUES (?, ?), (?, ?), (?, ?)').bind(
+        'por',
+        'Porter Robinson',
+        'ami',
+        'Amy Millan',
+        'odd',
+        'Odd Artist',
+      ),
+      env.DB.prepare(
+        'INSERT INTO track_artists (track_id, artist_id, position) VALUES (?, ?, 0), (?, ?, 1), (?, ?, 0), (?, ?, 0), (?, ?, 0)',
+      ).bind('div', 'por', 'div', 'ami', 'sad', 'por', 'pct', 'odd', 'exp', 'odd'),
+    ]);
+    // Six days of plays: Divinity on even days, the rest in between.
+    const plays: D1PreparedStatement[] = [];
+    for (let day = 0; day < 6; day++) {
+      const ms = base + day * 86_400_000;
+      plays.push(env.DB.prepare('INSERT INTO plays (played_at_ms, track_id, source) VALUES (?, ?, ?)').bind(ms, day % 2 ? 'sad' : 'div', 'api'));
+      plays.push(env.DB.prepare('INSERT INTO plays (played_at_ms, track_id, source) VALUES (?, ?, ?)').bind(ms + 1, day % 2 ? 'pct' : 'exp', 'export'));
+    }
+    await env.DB.batch(plays);
+  }
+
+  async function search(query: string) {
+    const response = await get(`/api/plays?${query}`);
+    expect(response.status).toBe(200);
+    return ((await response.json()) as { plays: Array<{ played_at_ms: number; track_id: string; artists: string }> }).plays;
+  }
+
+  it('matches track titles case-insensitively, newest first', async () => {
+    await seedCatalog();
+    const plays = await search('q=DIVINITY');
+    expect(plays.map((p) => p.track_id)).toEqual(['div', 'div', 'div']);
+    expect(plays.map((p) => p.played_at_ms)).toEqual([base + 4 * 86_400_000, base + 2 * 86_400_000, base]);
+    // Rows keep the full shape, every credited artist included.
+    expect(plays[0]!.artists).toBe('Porter Robinson, Amy Millan');
+  });
+
+  it('matches any credited artist and the album name', async () => {
+    await seedCatalog();
+    expect(new Set((await search('q=amy')).map((p) => p.track_id))).toEqual(new Set(['div']));
+    expect(new Set((await search('q=porter')).map((p) => p.track_id))).toEqual(new Set(['div', 'sad']));
+    expect(new Set((await search('q=worlds')).map((p) => p.track_id))).toEqual(new Set(['div', 'sad']));
+  });
+
+  it('finds export rows that have no album', async () => {
+    await seedCatalog();
+    expect((await search('q=export')).map((p) => p.track_id)).toEqual(['exp', 'exp', 'exp']);
+  });
+
+  it('pages through matches with before', async () => {
+    await seedCatalog();
+    const first = await search('q=porter&limit=4');
+    expect(first).toHaveLength(4);
+    const rest = await search(`q=porter&limit=4&before=${first.at(-1)!.played_at_ms}`);
+    expect(rest).toHaveLength(2);
+    expect(rest[0]!.played_at_ms).toBeLessThan(first.at(-1)!.played_at_ms);
+  });
+
+  it('treats % and _ in the query as literal characters', async () => {
+    await seedCatalog();
+    expect(new Set((await search('q=100%25')).map((p) => p.track_id))).toEqual(new Set(['pct']));
+    expect(new Set((await search('q=r_s')).map((p) => p.track_id))).toEqual(new Set(['pct']));
+    expect(await search('q=%25%25%25x')).toEqual([]);
+  });
+
+  it('returns an empty page for no match, and ignores a blank q', async () => {
+    await seedCatalog();
+    expect(await search('q=nothing-like-this')).toEqual([]);
+    expect(await search('q=%20%20&limit=500')).toHaveLength(12);
+  });
+
+  it('walks plays newest first when many tracks match', async () => {
+    const statements: D1PreparedStatement[] = [];
+    for (let i = 0; i < 600; i++) {
+      statements.push(
+        env.DB.prepare('INSERT INTO tracks (track_id, name, duration_ms, first_seen_ms) VALUES (?, ?, 1, 0)').bind(`m${i}`, `Common ${i}`),
+        env.DB.prepare('INSERT INTO plays (played_at_ms, track_id, source) VALUES (?, ?, ?)').bind(base + i, `m${i}`, 'api'),
+      );
+    }
+    await env.DB.batch(statements);
+    const plays = await search('q=common&limit=3');
+    expect(plays.map((p) => p.track_id)).toEqual(['m599', 'm598', 'm597']);
+  });
+
+  it('rejects an overlong q', async () => {
+    expect((await get(`/api/plays?q=${'x'.repeat(201)}`)).status).toBe(400);
+  });
+});
+
 describe('export import (R10)', () => {
   it('maps export records and skips podcast/local rows without a track URI', () => {
     const rows = normalizeExport([

@@ -1,4 +1,4 @@
-import { BadRequest, intParam } from './api';
+import { BadRequest, intParam, likePattern } from './api';
 import { NAME_KEY_PREFIX } from './db';
 import { respond, textParam } from './history';
 import { PRIMARY_ARTIST_SQL } from './stats/sql';
@@ -32,9 +32,6 @@ interface TrackRow {
   artist: string | null;
   plays: number;
 }
-
-/** `%term%` for LIKE, with the term's own wildcards escaped. */
-const likePattern = (term: string) => `%${term.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
 
 /** Exact (case-insensitive) name matches first, then most played, then by name. */
 function rank<T extends { name: string; plays: number }>(items: T[], q: string): T[] {
