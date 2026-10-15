@@ -41,6 +41,11 @@ export interface Env {
    * sign-in `return_to`, e.g. `app.remastered`. Loopback HTTP needs no entry.
    */
   SIGN_IN_SCHEMES?: string;
+  /**
+   * Ticketmaster Discovery API consumer key, for concert alerts. Optional:
+   * unset means the concert cron does nothing and /api/concerts stays empty.
+   */
+  TICKETMASTER_API_KEY?: string;
 }
 
 /**

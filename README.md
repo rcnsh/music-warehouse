@@ -283,6 +283,7 @@ locally. `npx wrangler secret list` shows what is set.
 | `ALERT_WEBHOOK_URL` | no | Where alerts are POSTed. See [Alerting](#alerting). |
 | `ALERT_MENTION` | no | Prefix for every alert, e.g. a Discord `<@id>`. |
 | `SIGN_IN_SCHEMES` | no | Comma-separated custom URL schemes a mobile app may [sign in](#signing-in-with-spotify) to, e.g. `app.remastered`. |
+| `TICKETMASTER_API_KEY` | no | A Ticketmaster Discovery API consumer key, from <https://developer.ticketmaster.com>, for [concerts](#concerts). The consumer secret isn't needed. Unset turns the concert check off. |
 | `MOVED_AT` | no | ISO instant the second era starts. See [`src/eras.ts`](src/eras.ts). |
 | `SPOTIFY_REDIRECT_URI` | yes | A var in `wrangler.jsonc`, not a secret. |
 
@@ -431,6 +432,29 @@ and this year up to the last full week.
   { "from": "2025-01-01", "to": "2025-12-31", "label": "2025", "kind": "year", "computed": false } ] }
 ```
 
+### Concerts
+
+**`GET /api/concerts?region=&since=&tz=`**: upcoming Ticketmaster music
+events, in Singapore and within 50 km of central London, for the 80 artists
+you played most over the last year. Soonest first. `region` is `singapore` or
+`london`; `since` (a local date) keeps only events first seen on or after it,
+which is how to ask what's new.
+
+```json
+{ "checked": { "singapore": "2026-10-15T01:23:04.000Z", "london": "2026-10-15T01:23:05.000Z" },
+  "concerts": [ { "region": "singapore", "date": "2027-02-12", "time": "20:00", "artists": "Maroon 5",
+                  "name": "Maroon 5 Asia 2027 in Singapore", "venue": "National Stadium", "city": "Singapore",
+                  "status": "onsale", "url": "https://ticketmaster.sg/…", "first_seen": "2026-10-15T01:23:04.000Z" } ] }
+```
+
+A daily cron (01:23 UTC) refreshes it; `POST /admin/concert-check` runs it
+now. Each artist is matched to a Ticketmaster attraction by exact name
+(ignoring case, accents and `&`) at most 25 a day, and the answer kept, so the
+first few days fill in gradually. An act whose name Ticketmaster spells
+differently is missed rather than guessed at. Events Ticketmaster stops listing
+(past, cancelled) drop out. Needs `TICKETMASTER_API_KEY`; there are no push
+alerts.
+
 ### Live from Spotify
 
 These proxy Spotify with the stored grant, so a client needs no Spotify
@@ -461,6 +485,7 @@ grant has lapsed.
 | `POST /admin/backfill-albums?source=&range=&offset=&pages=` | One step of `npm run backfill:albums`. |
 | `POST /admin/backfill-catalog?after=&limit=&spacingMs=` | One step of `npm run backfill:catalog`. |
 | `POST /admin/alert-check?force=1` | Run the alert sweep now. `force=1` ignores the 24-hour resend window. |
+| `POST /admin/concert-check?spacingMs=` | Run the [concert](#concerts) check now. `spacingMs` (default 250) spaces Ticketmaster calls. |
 | `GET /admin/raw?after=` | Spotify's unmodified recently-played payload. Read-only. |
 | `POST /admin/tokens` | Body `{ name, access?, expires_in_days? }`. Mints a [device token](#device-tokens), returned once. |
 | `GET /admin/tokens` | Every device token: `id`, `name`, `access`, `created_ms`, `expires_ms`, `last_used_ms`, `revoked_ms`, `active`. |

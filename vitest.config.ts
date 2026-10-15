@@ -35,6 +35,7 @@ export default defineConfig({
           // Synthetic: the real move instant is a secret, kept out of this public repo.
           MOVED_AT: '2025-03-10T00:00:00Z',
           CORS_ORIGINS: 'https://wrapped.test, https://other.test/',
+          TICKETMASTER_API_KEY: 'test-tm-key',
           SIGN_IN_SCHEMES: 'app.test',
         },
       },

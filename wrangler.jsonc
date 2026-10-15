@@ -21,10 +21,11 @@
 
   // Poll cadence. 48 invocations/day against a 100,000/day free-plan budget.
   // Tighten to "*/15 * * * *" if gaps ever appear (see README, "Configuration").
-  // Two of the free plan's five cron slots: ingestion every 30 minutes, and a
-  // daily sweep that pushes to ALERT_WEBHOOK_URL when something needs a human.
+  // Three of the free plan's five cron slots: ingestion every 30 minutes, a
+  // daily sweep that pushes to ALERT_WEBHOOK_URL when something needs a human,
+  // and the daily concert check (needs TICKETMASTER_API_KEY).
   "triggers": {
-    "crons": ["*/30 * * * *", "0 9 * * *"]
+    "crons": ["*/30 * * * *", "0 9 * * *", "23 1 * * *"]
   },
 
   "d1_databases": [
