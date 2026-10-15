@@ -13,12 +13,15 @@ import { SnapshotPending } from './snapshots';
 import { isStatName, statRoute } from './stats';
 import { artistRoute, onThisDayRoute, topTracksRoute, trackRoute } from './history';
 import { searchRoute } from './search';
+import { concertCheckRoute, concertsRoute, runConcertCheck } from './concerts';
 import { recordOwner, signInCallback, signInExchange, signInStart } from './signin';
 import { warmWrappedPresets, wrappedRangesRoute, wrappedRoute } from './wrapped';
 import type { Env } from './types';
 
 /** The cron expression reserved for the alert sweep; everything else polls. */
 const ALERT_CRON = '0 9 * * *';
+/** Its own invocation, so its Ticketmaster calls get a full subrequest budget. 09:23 in Singapore. */
+const CONCERT_CRON = '23 1 * * *';
 
 function unauthorized(): Response {
   return new Response(JSON.stringify({ error: 'Unauthorized' }), {
@@ -168,8 +171,10 @@ async function handle(request: Request, env: Env, ctx: ExecutionContext): Promis
             '/api/track',
             '/api/on-this-day',
             '/api/search',
+            '/api/concerts',
             '/admin/poll',
             '/admin/alert-check',
+            '/admin/concert-check',
             '/admin/import',
             '/admin/backfill-albums',
             '/admin/backfill-catalog',
@@ -205,10 +210,14 @@ async function handle(request: Request, env: Env, ctx: ExecutionContext): Promis
         return await trackRoute(env, url);
       case 'GET /api/on-this-day':
         return await onThisDayRoute(env, url);
+      case 'GET /api/concerts':
+        return await concertsRoute(env, url);
       case 'GET /api/search':
         return await searchRoute(env, url);
       case 'POST /admin/poll':
         return json(await poll(env));
+      case 'POST /admin/concert-check':
+        return await concertCheckRoute(env, url);
       case 'POST /admin/alert-check':
         return await alertCheckRoute(env, url);
       case 'POST /admin/import':
@@ -295,6 +304,18 @@ const worker = {
     // The daily alert sweep shares the scheduled handler, dispatched on which
     // cron expression fired. So does warming one Wrapped preset a day: one
     // compute, so its row reads stay well inside the daily budget.
+    if (event.cron === CONCERT_CRON) {
+      ctx.waitUntil(
+        runConcertCheck(env)
+          .then((result) => {
+            console.log('concert-check', JSON.stringify(result));
+          })
+          .catch((error) => {
+            console.error('concert-check failed', error);
+          }),
+      );
+      return;
+    }
     if (event.cron === ALERT_CRON) {
       ctx.waitUntil(
         runAlertCheck(env)
