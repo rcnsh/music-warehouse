@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { cloudflareTest, readD1Migrations } from '@cloudflare/vitest-pool-workers';
-import { defineConfig } from 'vitest/config';
+import { configDefaults, defineConfig } from 'vitest/config';
 
 // Migrations and fixtures are read here, on the Node side, and handed to the
 // test Worker as bindings — tests run inside workerd and have no filesystem.
@@ -55,5 +55,8 @@ export default defineConfig({
   ],
   test: {
     setupFiles: ['./test/setup.ts'],
+    // Agent worktrees under .claude/ hold whole copies of the repo; without
+    // this their tests run too, doubling the suite.
+    exclude: [...configDefaults.exclude, '.claude/**', 'node_modules/**'],
   },
 });

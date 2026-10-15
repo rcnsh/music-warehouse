@@ -11,3 +11,5 @@ fixtures/recently-played.json
 .catalog-state.json
 # Dry-run report: per-day listening counts.
 import-report.json
+# Agent worktrees and local Claude Code state.
+.claude/
