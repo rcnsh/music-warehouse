@@ -202,6 +202,11 @@ export async function readState(db: D1Database): Promise<{ sync: SyncState; toke
 /**
  * Statements that write one normalized payload.
  *
+ * Artists and albums take the payload's name, release date and cover when
+ * they differ, so a rename or a new cover reaches the warehouse. The search
+ * text and song keys of the poll's own tracks follow at once; other tracks
+ * of a renamed artist or album catch up in the daily sweep.
+ *
  * `tracks` upserts rather than ignoring so that an API poll upgrades a stub row
  * left behind by the export importer (which knows a track's name but not its
  * duration, album or ISRC) or by the album backfill (Saved Albums return
@@ -235,9 +240,27 @@ export function writeStatements(db: D1Database, rows: NormalizedRows, now = Date
           'OR (tracks.isrc IS NULL AND excluded.isrc IS NOT NULL)',
       }),
 
-    ...buildInserts(db, 'artists', ['artist_id', 'name'], rows.artists),
+    // Artists and albums are renamed and re-covered on Spotify, so a poll
+    // brings each up to date. A value the payload lacks never blanks a
+    // stored one, and the WHERE guards keep an unchanged row at zero writes.
+    // Rows the export importer keys by name (`name:`) never come from a poll.
+    ...buildInserts(db, 'artists', ['artist_id', 'name'], rows.artists, {
+      verb: 'INSERT',
+      conflictClause:
+        "ON CONFLICT(artist_id) DO UPDATE SET name = excluded.name WHERE excluded.name <> '' AND artists.name IS NOT excluded.name",
+    }),
     ...buildInserts(db, 'track_artists', ['track_id', 'artist_id', 'position'], rows.trackArtists),
-    ...buildInserts(db, 'albums', ['album_id', 'name', 'release_date', 'image_url'], rows.albums),
+    ...buildInserts(db, 'albums', ['album_id', 'name', 'release_date', 'image_url'], rows.albums, {
+      verb: 'INSERT',
+      conflictClause:
+        'ON CONFLICT(album_id) DO UPDATE SET ' +
+        "name = CASE WHEN excluded.name <> '' THEN excluded.name ELSE albums.name END, " +
+        'release_date = COALESCE(excluded.release_date, albums.release_date), ' +
+        'image_url = COALESCE(excluded.image_url, albums.image_url) ' +
+        "WHERE (excluded.name <> '' AND albums.name IS NOT excluded.name) " +
+        'OR (excluded.release_date IS NOT NULL AND albums.release_date IS NOT excluded.release_date) ' +
+        'OR (excluded.image_url IS NOT NULL AND albums.image_url IS NOT excluded.image_url)',
+    }),
     // After the albums and artists, which name those contexts.
     ...insertContexts(db, rows.plays, now),
 
