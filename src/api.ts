@@ -1,7 +1,15 @@
-import { DEFAULT_TIMEZONE, endOfLocalDayUtcMs, isValidTimeZone, localDayKey, startOfLocalDayUtcMs } from './tz';
+import {
+  DEFAULT_TIMEZONE,
+  calendarDaysInclusive,
+  endOfLocalDayUtcMs,
+  isRealDay,
+  isValidTimeZone,
+  localDayKey,
+  startOfLocalDayUtcMs,
+} from './tz';
 import { ARTIST_TRACKS_CTE, SONG_TRACKS_CTE, textParam } from './history';
 import { trigramPhrase } from './search-index';
-import { ROLLUP_STATE_SQL, type RollupState, beginsDay, endsDay, rollupServes, withTrackCounts } from './rollup';
+import { ROLLUP_STATE_SQL, type RollupState, beginsDay, endsDay, rollupServes, rollupZone, withTrackCounts } from './rollup';
 import type { Env } from './types';
 
 export class BadRequest extends Error {}
@@ -20,8 +28,12 @@ export function intParam(url: URL, name: string, fallback: number, min: number, 
   return value;
 }
 
-export function timeZoneParam(url: URL): string {
-  const timeZone = url.searchParams.get('tz') ?? DEFAULT_TIMEZONE;
+/**
+ * The request's `tz`, or without one the warehouse's own zone: `TIMEZONE`,
+ * else the latest era's, else UTC (the zone the rollup is built in).
+ */
+export function timeZoneParam(url: URL, env: Pick<Env, 'TIMEZONE' | 'ERAS'>): string {
+  const timeZone = url.searchParams.get('tz') ?? rollupZone(env) ?? DEFAULT_TIMEZONE;
   if (!isValidTimeZone(timeZone)) throw new BadRequest(`Unknown IANA timezone: ${timeZone}`);
   return timeZone;
 }
@@ -30,6 +42,10 @@ export function timeZoneParam(url: URL): string {
 export function dateRange(url: URL, timeZone: string): { fromMs: number; toMs: number; from: string; to: string } {
   const to = url.searchParams.get('to') ?? localDayKey(Date.now(), timeZone);
   const from = url.searchParams.get('from') ?? localDayKey(Date.now() - 29 * 86_400_000, timeZone);
+  // Date.UTC rolls 2026-02-30 over to 2 March, so the dates are checked first.
+  for (const [name, day] of [['from', from], ['to', to]] as const) {
+    if (!isRealDay(day)) throw new BadRequest(`${name} must be a real YYYY-MM-DD date`);
+  }
 
   let fromMs: number;
   let toMs: number;
@@ -41,11 +57,36 @@ export function dateRange(url: URL, timeZone: string): { fromMs: number; toMs: n
   }
 
   if (toMs <= fromMs) throw new BadRequest('`to` must not be before `from`');
-  if (toMs - fromMs > MAX_RANGE_DAYS * 86_400_000) {
+  // Counted in local calendar days rather than ms: a DST change makes a day 23 or 25 hours.
+  if (calendarDaysInclusive(from, to) > MAX_RANGE_DAYS) {
     throw new BadRequest(`Range too large; at most ${MAX_RANGE_DAYS} days`);
   }
   return { fromMs, toMs, from, to };
 }
+
+/**
+ * `before` as the upper bound of a page of plays, in the primary key's
+ * (played_at_ms, track_id) order: a `next_before` cursor (`<ms>.<track_id>`)
+ * resumes after exactly the last row a page returned, and a plain epoch-ms
+ * means "before that millisecond", as `[ms, '']` (nothing sorts below '').
+ */
+export function beforeParam(url: URL): [number, string] {
+  const raw = url.searchParams.get('before');
+  const cursor = raw === null ? null : /^(\d{1,16})\.(.+)$/s.exec(raw);
+  if (cursor) {
+    const ms = Number(cursor[1]);
+    if (ms > Number.MAX_SAFE_INTEGER) throw new BadRequest('before is not a valid cursor');
+    return [ms, cursor[2]!];
+  }
+  try {
+    return [intParam(url, 'before', Number.MAX_SAFE_INTEGER, 0, Number.MAX_SAFE_INTEGER), ''];
+  } catch {
+    throw new BadRequest('before must be an epoch-ms integer or a next_before cursor');
+  }
+}
+
+/** The cursor for the page after one ending at this row. */
+export const playCursor = (row: Record<string, unknown>) => `${row.played_at_ms}.${row.track_id}`;
 
 /** `%term%` for LIKE, with the term's own wildcards escaped. */
 export const likePattern = (term: string) => `%${term.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
@@ -281,7 +322,7 @@ const withArtists = (result: D1Result<Record<string, unknown>>) => ({ ...result,
  */
 export async function recentPlays(env: Env, url: URL): Promise<Response> {
   const limit = intParam(url, 'limit', 50, 1, 500);
-  const before = intParam(url, 'before', Number.MAX_SAFE_INTEGER, 0, Number.MAX_SAFE_INTEGER);
+  const before = beforeParam(url);
   const after = intParam(url, 'after', -1, -1, Number.MAX_SAFE_INTEGER);
   const filter = playFilterParams(url, { q: true });
 
@@ -289,22 +330,30 @@ export async function recentPlays(env: Env, url: URL): Promise<Response> {
   // The filters are echoed, so a client can tell a filtered page from an
   // older Worker that ignored the parameter.
   if (match.ids?.length === 0) {
-    return json({ ...filter, plays: [], _meta: { rows_read: match.rowsRead, duration_ms: null } });
+    return withRowsRead(
+      json({ ...filter, plays: [], next_before: null, _meta: { rows_read: match.rowsRead, duration_ms: null } }),
+      match.rowsRead,
+    );
   }
-  const query = await selectPlays(env, match.ids, [before, ''], after, limit);
-  return json({
-    ...filter,
-    plays: withFirstPlay(query.results),
-    _meta: {
-      rows_read: match.rowsRead + (query.meta?.rows_read ?? 0),
-      duration_ms: query.meta?.duration ?? null,
-    },
-  });
+  // One row past the page says whether another page follows, so the last
+  // page's next_before is null rather than a cursor to an empty page.
+  const query = await selectPlays(env, match.ids, before, after, limit + 1);
+  const plays = query.results.slice(0, limit);
+  const rowsRead = match.rowsRead + (query.meta?.rows_read ?? 0);
+  return withRowsRead(
+    json({
+      ...filter,
+      plays: withFirstPlay(plays),
+      next_before: query.results.length > limit ? playCursor(plays.at(-1)!) : null,
+      _meta: { rows_read: rowsRead, duration_ms: query.meta?.duration ?? null },
+    }),
+    rowsRead,
+  );
 }
 
 /** Play counts per artist over a local-calendar date range. */
 export async function topArtists(env: Env, url: URL): Promise<Response> {
-  const timeZone = timeZoneParam(url);
+  const timeZone = timeZoneParam(url, env);
   const { fromMs, toMs, from, to } = dateRange(url, timeZone);
   const limit = intParam(url, 'limit', 50, 1, 500);
 
@@ -329,31 +378,49 @@ export async function topArtists(env: Env, url: URL): Promise<Response> {
     [limit],
   );
 
+  const rowsRead = all.reduce((sum, r) => sum + (r.meta?.rows_read ?? 0), 0);
   return fromRollup(
-    json({
-      from,
-      to,
-      tz: timeZone,
-      artists: query.results,
-      _meta: {
-        rows_read: all.reduce((sum, r) => sum + (r.meta?.rows_read ?? 0), 0),
-        duration_ms: query.meta?.duration ?? null,
-      },
-    }),
+    withRowsRead(
+      json({ from, to, tz: timeZone, artists: query.results, _meta: { rows_read: rowsRead, duration_ms: query.meta?.duration ?? null } }),
+      rowsRead,
+    ),
     rollup,
   );
 }
 
+export type DailyGroup = 'day' | 'week' | 'month';
+
 /**
- * Plays per local calendar day.
+ * Days' counts summed into the local week (from Monday, labelled with that
+ * Monday's date, which may fall before the range) or month ('YYYY-MM') each
+ * day belongs to. Days come in date order, so buckets do too.
+ */
+export function groupDays(days: Array<{ day: string; plays: number }>, by: 'week' | 'month') {
+  const buckets = new Map<string, number>();
+  for (const { day, plays } of days) {
+    let key = day.slice(0, 7);
+    if (by === 'week') {
+      const date = new Date(`${day}T00:00:00Z`);
+      date.setUTCDate(date.getUTCDate() - ((date.getUTCDay() + 6) % 7));
+      key = date.toISOString().slice(0, 10);
+    }
+    buckets.set(key, (buckets.get(key) ?? 0) + plays);
+  }
+  return [...buckets].map(([key, plays]) => ({ [by]: key, plays }));
+}
+
+/**
+ * Plays per local calendar day, or per local week or month with `group_by`.
  *
  * SQLite cannot bucket by an IANA zone, so the range is resolved to UTC bounds
  * in SQL and the timestamps are bucketed here. Only the timestamp column is
  * selected, so row reads stay proportional to plays in the window.
  */
 export async function dailyCounts(env: Env, url: URL): Promise<Response> {
-  const timeZone = timeZoneParam(url);
+  const timeZone = timeZoneParam(url, env);
   const { fromMs, toMs, from, to } = dateRange(url, timeZone);
+  const groupBy = (url.searchParams.get('group_by') || 'day') as DailyGroup;
+  if (!['day', 'week', 'month'].includes(groupBy)) throw new BadRequest('group_by must be day, week or month');
 
   const filter = playFilterParams(url, { q: false });
   const match = await filterTrackIds(env, filter);
@@ -366,6 +433,9 @@ export async function dailyCounts(env: Env, url: URL): Promise<Response> {
     cursor = endOfLocalDayUtcMs(key, timeZone);
   }
   const days = () => [...counts.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([day, plays]) => ({ day, plays }));
+  // With the default grouping the body is exactly what it was before group_by.
+  const buckets = () =>
+    groupBy === 'day' ? { days: days() } : { group_by: groupBy, [`${groupBy}s`]: groupDays(days(), groupBy) };
 
   // Unfiltered, the rollup holds each day's count: one row a day instead of
   // one a play. It answers only when the range runs exactly from local
@@ -377,18 +447,19 @@ export async function dailyCounts(env: Env, url: URL): Promise<Response> {
     ]);
     if (rollupServes(state!.results[0] as RollupState | undefined, timeZone, Date.now())) {
       for (const row of rollup!.results as Array<{ day: string; plays: number }>) counts.set(row.day, row.plays);
+      const rowsRead = (state!.meta?.rows_read ?? 0) + (rollup!.meta?.rows_read ?? 0);
       return fromRollup(
-        json({
-          from,
-          to,
-          tz: timeZone,
-          ...filter,
-          days: days(),
-          _meta: {
-            rows_read: (state!.meta?.rows_read ?? 0) + (rollup!.meta?.rows_read ?? 0),
-            duration_ms: rollup!.meta?.duration ?? null,
-          },
-        }),
+        withRowsRead(
+          json({
+            from,
+            to,
+            tz: timeZone,
+            ...filter,
+            ...buckets(),
+            _meta: { rows_read: rowsRead, duration_ms: rollup!.meta?.duration ?? null },
+          }),
+          rowsRead,
+        ),
         true,
       );
     }
@@ -411,14 +482,28 @@ export async function dailyCounts(env: Env, url: URL): Promise<Response> {
     counts.set(key, (counts.get(key) ?? 0) + 1);
   }
 
-  return json({
-    from,
-    to,
-    tz: timeZone,
-    ...filter,
-    days: days(),
-    _meta: { rows_read: match.rowsRead + (query.meta?.rows_read ?? 0), duration_ms: query.meta?.duration ?? null },
-  });
+  const rowsRead = match.rowsRead + (query.meta?.rows_read ?? 0);
+  return withRowsRead(
+    json({
+      from,
+      to,
+      tz: timeZone,
+      ...filter,
+      ...buckets(),
+      _meta: { rows_read: rowsRead, duration_ms: query.meta?.duration ?? null },
+    }),
+    rowsRead,
+  );
+}
+
+/**
+ * D1's rows read for the request, as `X-Rows-Read`. Every stored-data route
+ * sends it; /api/plays, /api/daily and /api/top-artists also keep it in their
+ * body's `_meta`, as they always have.
+ */
+export function withRowsRead(response: Response, rowsRead: number): Response {
+  response.headers.set('X-Rows-Read', String(rowsRead));
+  return response;
 }
 
 /** Marks a response the rollup answered, for checking the rollup is in use. */

@@ -3,7 +3,7 @@ import { type Era, eraAt, eraDigest, historyStartMs, loadEras, localTimeSql, sta
 import { peekSnapshot, snapshot } from './snapshots';
 import { NAME_KEY_PREFIX } from './db';
 import { PRIMARY_ARTIST_PAIR_SQL, PRIMARY_ARTIST_SQL } from './stats/sql';
-import { endOfLocalDayUtcMs, isRealDay, localDayKey, startOfLocalDayUtcMs } from './tz';
+import { calendarDaysInclusive, endOfLocalDayUtcMs, isRealDay, localDayKey, startOfLocalDayUtcMs } from './tz';
 import type { Access } from './auth';
 import type { Env } from './types';
 
@@ -571,7 +571,8 @@ function closedRange(eras: readonly Era[], from: string, to: string, now: number
     throw new BadRequest((error as Error).message);
   }
   if (toMs <= fromMs) throw new BadRequest('`to` must not be before `from`');
-  if (toMs - fromMs > MAX_RANGE_DAYS * DAY_MS) throw new BadRequest(`Range too large; at most ${MAX_RANGE_DAYS} days`);
+  // Local calendar days, not ms, so a range across a DST change is not cut short.
+  if (calendarDaysInclusive(from, to) > MAX_RANGE_DAYS) throw new BadRequest(`Range too large; at most ${MAX_RANGE_DAYS} days`);
   const today = localDayKey(now, eraAt(eras, now).timeZone);
   if (to >= today) throw new BadRequest('`to` must be before today: a range is summarized once it has ended');
   if (toMs <= historyStartMs(eras)) throw new BadRequest('Range ends before the history starts');

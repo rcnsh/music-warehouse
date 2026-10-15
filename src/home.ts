@@ -254,7 +254,7 @@ const TYPE = /^spotify:(album|playlist|artist):/;
 
 /** GET /api/home?tz= */
 export async function homeRoute(env: Env, url: URL): Promise<Response> {
-  const timeZone = timeZoneParam(url);
+  const timeZone = timeZoneParam(url, env);
   const now = Date.now();
   const latest = await env.DB.prepare('SELECT MAX(played_at_ms) AS ms FROM plays').first<{ ms: number | null }>();
   const hour = Math.floor(((now + offsetMsAt(now, timeZone)) % DAY_MS) / HOUR_MS);
