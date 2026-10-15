@@ -25,7 +25,7 @@ ALERT_MENTION=
 
 # Optional. Comma-separated browser origins allowed to read /api/* with a
 # token, e.g. a Wrapped app on another host, or http://localhost:5173 for its
-# dev server. Unset means no CORS headers. See README, "Wrapped".
+# dev server. Unset means no CORS headers. See README, "Configuration".
 CORS_ORIGINS=
 
 # Overrides the production value in wrangler.jsonc for local dev. Spotify

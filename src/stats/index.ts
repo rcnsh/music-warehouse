@@ -20,7 +20,7 @@ import { computeTopOverTime } from './top';
  * costs. The figures are D1's own rows_read, measured against the full
  * history (75k plays); they count temporary B-trees, so they run well above
  * the row count. All five together stay near 2M rows a day however much
- * traffic arrives — see README, "Listening stats".
+ * traffic arrives — see docs/design.md, "Listening stats".
  */
 const STATS = {
   'on-repeat': { freshForSeconds: 3 * 60 * 60, compute: computeOnRepeat }, // ~47k rows

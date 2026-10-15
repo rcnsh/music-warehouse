@@ -96,7 +96,7 @@ export function normalizeExport(records: ExportRecord[]): ImportRows {
  * with id-keyed artists automatically, so a track that is also polled live has
  * its name-keyed link dropped in favour of the real one. Albums are skipped
  * entirely — `albums.album_id` has no name-keyed equivalent worth inventing.
- * See README, "Known limitations".
+ * See docs/design.md, "Known limitations".
  */
 export async function importChunk(env: Env, request: Request): Promise<Response> {
   let body: unknown;
