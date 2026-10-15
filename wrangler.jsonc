@@ -6,21 +6,24 @@
   "observability": { "enabled": true },
 
   // ---------------------------------------------------------------------
-  // FORKING THIS? Three values below are specific to one deployment and
-  // must be replaced before `wrangler deploy` will work. See README,
-  // "Setting it up from scratch". Neither id is a credential — both are
-  // useless without a Cloudflare API token — but neither is yours.
-  //   1. routes            — the custom domain, or delete for workers.dev
-  //   2. database_id       — from `wrangler d1 create`
-  //   3. SPOTIFY_REDIRECT_URI — must match the Spotify dashboard exactly
+  // THIS FILE IS A TEMPLATE. Two values below are placeholders that every
+  // deployment replaces with its own, in a copy that is never committed:
+  //
+  //   cp wrangler.jsonc wrangler.local.jsonc    # gitignored
+  //
+  // `npm run dev`, `npm run deploy` and `npm run migrate:*` use
+  // wrangler.local.jsonc whenever it exists (scripts/wrangler.mjs). Keep the
+  // rest of the copy in step with this file when it changes.
+  //   1. database_id          — from `wrangler d1 create`
+  //   2. SPOTIFY_REDIRECT_URI — must match the Spotify dashboard exactly
+  // and, for a custom domain instead of workers.dev, add to the copy:
+  //   "routes": [{ "pattern": "music.example.com", "custom_domain": true }],
+  // Neither id is a credential, but neither belongs in a public repository.
+  // See README, "Setting it up from scratch".
   // ---------------------------------------------------------------------
 
-  // [1] Custom domain on the rcn.sh zone. Wrangler manages the DNS record.
-  // Delete this block entirely to deploy to <name>.<subdomain>.workers.dev.
-  "routes": [{ "pattern": "music-api.rcn.sh", "custom_domain": true }],
-
   // Poll cadence. 48 invocations/day, well inside either plan (the Free plan
-  // allows 100,000 requests a day; this deployment is on Workers Paid).
+  // allows 100,000 requests a day).
   // Tighten to "*/15 * * * *" if gaps ever appear (see README, "Configuration").
   // Three cron triggers (Free allows five, Paid 250): ingestion every 30 minutes,
   // each followed by the alert check that pushes to ALERT_WEBHOOK_URL when
@@ -34,18 +37,32 @@
     {
       "binding": "DB",
       "database_name": "music_warehouse",
-      // [2] Replace with the id `wrangler d1 create music_warehouse` prints.
-      "database_id": "cd50aaf2-62d6-47cf-a5bd-ae99a8d32556",
+      // [1] Replace with the id `wrangler d1 create music_warehouse` prints.
+      "database_id": "00000000-0000-0000-0000-000000000000",
       "migrations_dir": "migrations"
     }
   ],
 
+  // Per-minute limit on the unauthenticated sign-in routes (/auth/*), per
+  // client address. A sign-in takes four requests, so 20 a minute never gets
+  // in the owner's way. Optional: delete it and the Worker runs without, with
+  // only the cap on pending sign-ins. `namespace_id` is any positive integer
+  // unique to this limiter within the account. Counting is per Cloudflare
+  // location and eventually consistent, so treat it as a brake, not a wall.
+  "ratelimits": [
+    {
+      "name": "AUTH_RATE_LIMITER",
+      "namespace_id": "1001",
+      "simple": { "limit": 20, "period": 60 }
+    }
+  ],
+
   "vars": {
-    // [3] Must exactly match a redirect URI registered in the Spotify
+    // [2] Must exactly match a redirect URI registered in the Spotify
     // dashboard. `wrangler dev` overrides this from .dev.vars with the
     // loopback URL. Sign-in uses /auth/callback on the same host, which must
     // be registered too.
-    "SPOTIFY_REDIRECT_URI": "https://music-api.rcn.sh/callback"
+    "SPOTIFY_REDIRECT_URI": "https://music-warehouse.example.workers.dev/callback"
 
     // ALERT_MENTION is deliberately not here. It identifies a specific person
     // to a specific chat service, so it is set as a secret instead:
