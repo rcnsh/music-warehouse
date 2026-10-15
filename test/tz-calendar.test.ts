@@ -94,6 +94,19 @@ describe('localCalendar', () => {
     expect(narrow.dayOf(Date.UTC(2030, 6, 1, 23, 30))).toBe('2030-07-02');
   });
 
+  it('joins ranges that meet a part-second before a change', () => {
+    // Dublin is used by no other test, so its offsets start empty in this isolate.
+    const timeZone = 'Europe/Dublin';
+    const change = Date.UTC(2024, 2, 31, 1);
+    localCalendar(timeZone, change - 3 * 3_600_000, change - 500);
+    const calendar = localCalendar(timeZone, change - 3 * 3_600_000, change + 3 * 3_600_000);
+    for (const ms of [change - 501, change - 1, change, change + 1, change + 22 * 3_600_000 + 59 * 60_000, change + 2 * 3_600_000]) {
+      expect(calendar.offsetAt(ms), new Date(ms).toISOString()).toBe(offsetMsAt(Math.floor(ms / 1000) * 1000, timeZone));
+      expect(calendar.dayOf(ms)).toBe(localDayKey(ms, timeZone));
+    }
+    expect(calendar.days()).toEqual(['2024-03-30', '2024-03-31']);
+  });
+
   it('lists nothing for an empty range and one day for an instant', () => {
     const at = Date.UTC(2024, 0, 1, 12);
     expect(localCalendar('UTC', at, at).days()).toEqual([]);

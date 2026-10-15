@@ -151,6 +151,10 @@ function spanOf(timeZone: string, fromMs: number, toMs: number): Span {
         if (offsetAt(mid) === offset) lo = mid;
         else hi = mid;
       }
+      // A change in the last part-second after toMs belongs to the span that
+      // follows, which finds it: recording it here would leave starts unsorted
+      // once the two are joined.
+      if (hi * 1000 >= toMs) break;
       starts.push(hi * 1000);
       offsets.push(nextOffset);
       offset = nextOffset;
