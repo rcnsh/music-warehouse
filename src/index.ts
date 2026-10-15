@@ -17,6 +17,7 @@ import { SnapshotPending } from './snapshots';
 import { isStatName, statRoute } from './stats';
 import { artistRoute, onThisDayRoute, topTracksRoute, trackRoute } from './history';
 import { searchRoute } from './search';
+import { homeRoute } from './home';
 import { playsCsvRoute } from './export';
 import {
   RegionConfigError,
@@ -183,6 +184,7 @@ async function handle(request: Request, env: Env, ctx: ExecutionContext): Promis
             '/api/artist',
             '/api/track',
             '/api/on-this-day',
+            '/api/home',
             '/api/search',
             '/api/concerts',
             '/admin/poll',
@@ -227,6 +229,8 @@ async function handle(request: Request, env: Env, ctx: ExecutionContext): Promis
         return await trackRoute(env, url);
       case 'GET /api/on-this-day':
         return await onThisDayRoute(env, url);
+      case 'GET /api/home':
+        return await homeRoute(env, url);
       case 'GET /api/concerts':
         return await concertsRoute(env, url);
       case 'GET /api/search':

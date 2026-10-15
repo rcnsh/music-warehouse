@@ -205,6 +205,38 @@ rebuilds every count when the configured zone or its rules change. If the cron
 stops for two years, reads stop trusting the rollup rather than misplace a
 play.
 
+## Home
+
+`/api/home` ranks what a client's home screen shows, since Spotify's own home
+is closed to apps and its recently-played holds 50 plays, which one album can
+fill. Spotify describes its shortcuts as what you play most, changing through
+the day; this does the same from the history (src/home.ts).
+
+A play counts toward its context if that is a playlist, album or artist, toward
+its track's album if it has no context (the export never has one), and toward
+nothing otherwise (Liked Songs, which a client shows anyway). Consecutive plays
+from one context with under 40 minutes between them are one session, so an
+album played through counts once, worth 1 + ln(tracks); skips (under 30 s, as
+on-repeat measures them) count for nothing.
+
+- **Shortcuts**: each session's weight halves every 14 days, and is raised up
+  to 2.5x by how near its start was to the current local hour (Gaussian, 2 h)
+  and 1.15x on the same kind of day (weekday or weekend). Eight.
+- **Jump back in**: newest session first.
+- **Around now**: sessions within 1.5 h of this hour, on at least three days in
+  the last year, halving every 60 days.
+- **Rediscover**: contexts played on at least four days but not in the last 90,
+  by days played, halving every two years since the last.
+
+At most two albums or artist pages of one primary artist per row, except jump
+back in. Rows may overlap; a client shows each item once, in row order.
+
+The last year is read play by play (about three rows each, with the track's
+album and primary artist: some 60k rows for 19k plays) and anything older is
+counted per context and day in SQL. Bodies are held in the Cache API for an
+hour under the zone, local day, local hour and newest play, so a body is
+recomputed only after a new play or when the hour turns.
+
 ## Known limitations
 
 - **Export-era artists are keyed by name, not id.** The export carries names

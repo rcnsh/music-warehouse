@@ -506,6 +506,30 @@ GET /api/on-this-day?date=2026-10-13&tz=Europe/London
 An unknown artist or song is a `200` with zero plays and `null` dates, never a
 `404`. `minutes` is an estimate (see [design notes](docs/design.md#wrapped)).
 
+### Home
+
+**`GET /api/home?tz=`**: the rows of a client's home screen, ranked from the
+whole history: `shortcuts` (played most, lately and at this time of day),
+`jump_back_in` (newest first), `around_now` (what you play at this hour) and
+`rediscover` (played on many days, but not in the last 90). Each item is a
+playlist, album or artist; plays with no context count toward their track's
+album, and Liked Songs toward nothing. Rows can overlap: show each item once,
+in this order. How it ranks: [design notes](docs/design.md#home).
+
+```json
+GET /api/home?tz=Europe/London
+{ "tz": "Europe/London", "hour": 20,
+  "shortcuts": [ { "uri": "spotify:album:…", "type": "album", "name": "…", "image": "https://i.scdn.co/…",
+                   "artist": "…", "sessions": 14, "last_played_ms": 1760554020000 } ],
+  "jump_back_in": [], "around_now": [], "rediscover": [] }
+```
+
+`name` and `image` are `null` when the warehouse doesn't know them (playlists
+and artists have no image here, and some playlists no name), so a client looks
+those up itself. `artist` is an album's or artist page's primary artist.
+`sessions` is how many times it was played from (for `rediscover`, on how many
+days).
+
 ### Search
 
 **`GET /api/search?q=&artist=&limit=`**: stored artists and songs whose name
