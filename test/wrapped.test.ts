@@ -133,6 +133,38 @@ describe('wrapped: body', () => {
     expect(body.months).toEqual([expect.objectContaining({ month: '2024-03', top_artist: 'Big', top_song: 'Song t1' })]);
   });
 
+  it('names an id beside every song and artist, so a client can open them', async () => {
+    await seed([
+      ...session('t1', MARCH_2, 6, { artist: 'Big', album: 'lp' }),
+      ...session('t2', MARCH_2 + DAY, 4, { artist: 'Big', album: 'lp' }),
+      ...session('t3', MARCH_2 + 2 * DAY, 2, { artist: 'Big', album: 'lp' }),
+      ...session('t4', MARCH_2 + 4 * DAY, 5, { artist: 'Small' }),
+    ]);
+    const body = (await (await wrapped('2024-03-01', '2024-03-31')).json()) as Wrapped;
+
+    expect(body.top_artists.map(({ id, top_song_id }) => ({ id, top_song_id }))).toEqual([
+      { id: 'id-Big', top_song_id: 't1' },
+      { id: 'id-Small', top_song_id: 't4' },
+    ]);
+    expect(body.top_songs[0]).toMatchObject({ track_id: 't1', artist_id: 'id-Big' });
+    expect(body.top_albums[0]).toMatchObject({ artist_id: 'id-Big' });
+    expect(body.months[0]).toMatchObject({ top_artist_id: 'id-Big', top_song_id: 't1' });
+    expect(body.discoveries.top.map((a) => a.id)).toEqual(['id-Big', 'id-Small']);
+  });
+
+  it('prefers a real artist id to the export\'s placeholder for the same name', async () => {
+    await seed([
+      ...session('old', MARCH_2, 5, { artist: 'Folded', name: 'Old' }),
+      ...session('new', MARCH_2 + DAY, 1, { artist: 'Folded', name: 'New' }),
+    ]);
+    await env.DB.batch([
+      env.DB.prepare("INSERT INTO artists (artist_id, name) VALUES ('name:folded', 'Folded')"),
+      env.DB.prepare("UPDATE track_artists SET artist_id = 'name:folded' WHERE track_id = 'old'"),
+    ]);
+    const body = (await (await wrapped('2024-03-01', '2024-03-31')).json()) as Wrapped;
+    expect(body.top_artists).toEqual([expect.objectContaining({ id: 'id-Folded', name: 'Folded', plays: 6 })]);
+  });
+
   it('ranks songs by plays but artists by minutes', async () => {
     await seed([
       ...session('long', MARCH_2, 3, { artist: 'Epic', durationMs: 280_000 }),
@@ -151,7 +183,7 @@ describe('wrapped: body', () => {
     ]);
     const body = (await (await wrapped('2024-03-01', '2024-03-31')).json()) as Wrapped;
     expect(body.top_songs).toHaveLength(1);
-    expect(body.top_songs[0]).toMatchObject({ plays: 5, image: 'https://i.scdn.co/image/album-ed' });
+    expect(body.top_songs[0]).toMatchObject({ track_id: 'lp-ed', plays: 5, image: 'https://i.scdn.co/image/album-ed' });
   });
 
   it('counts only artists and songs never played before the range as discoveries', async () => {

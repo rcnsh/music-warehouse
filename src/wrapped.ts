@@ -1,7 +1,8 @@
 import { BadRequest, json } from './api';
 import { type Era, eraAt, eraDigest, historyStartMs, loadEras, localTimeSql, startOfLocalWeek } from './eras';
 import { peekSnapshot, snapshot } from './snapshots';
-import { PRIMARY_ARTIST_SQL } from './stats/sql';
+import { NAME_KEY_PREFIX } from './db';
+import { PRIMARY_ARTIST_PAIR_SQL, PRIMARY_ARTIST_SQL } from './stats/sql';
 import { endOfLocalDayUtcMs, isRealDay, localDayKey, startOfLocalDayUtcMs } from './tz';
 import type { Access } from './auth';
 import type { Env } from './types';
@@ -41,7 +42,16 @@ const FORMATIVE_AGE = 18;
 /** A closed range is recomputed if it ended this recently, in case late plays arrive. */
 const SETTLE_MS = 2 * DAY_MS;
 
+/*
+ * Ids sit beside the names so a client can open /api/artist or /api/track.
+ * An artist's id is a real Spotify id when any of its plays has one, else the
+ * export's `name:` placeholder; /api/artist folds either into the same artist.
+ * A song's id is its most-listened edition, which /api/track folds back into
+ * the whole song (same title, same primary artist), as songs are folded here.
+ */
+
 export interface WrappedArtist {
+  id: string;
   name: string;
   minutes: number;
   plays: number;
@@ -51,12 +61,15 @@ export interface WrappedArtist {
   days: number;
   longest_run_days: number;
   top_song: string | null;
+  top_song_id: string | null;
   image: string | null;
 }
 
 export interface WrappedSong {
+  track_id: string;
   name: string;
   artist: string;
+  artist_id: string;
   album: string | null;
   image: string | null;
   plays: number;
@@ -70,6 +83,7 @@ export interface WrappedSong {
 export interface WrappedAlbum {
   name: string;
   artist: string;
+  artist_id: string;
   image: string | null;
   plays: number;
   minutes: number;
@@ -80,7 +94,9 @@ export interface WrappedMonth {
   month: string;
   minutes: number;
   top_artist: string | null;
+  top_artist_id: string | null;
   top_song: string | null;
+  top_song_id: string | null;
   image: string | null;
 }
 
@@ -103,7 +119,7 @@ export interface Wrapped {
     songs: number;
     /** Share of the range's minutes that went to those new artists. */
     share: number;
-    top: Array<{ name: string; minutes: number; image: string | null }>;
+    top: Array<{ id: string; name: string; minutes: number; image: string | null }>;
   };
   listening_age: {
     age: number;
@@ -122,6 +138,7 @@ type MetaRow = {
   track_id: string;
   name: string;
   artist: string | null;
+  artist_id: string | null;
   album_id: string | null;
   album: string | null;
   image: string | null;
@@ -211,7 +228,7 @@ export async function computeWrapped(
     // idx_plays_track, a single index probe per track.
     db
       .prepare(
-        `SELECT t.track_id, t.name, ${PRIMARY_ARTIST_SQL('t.track_id')} AS artist, t.album_id,
+        `SELECT t.track_id, t.name, ${PRIMARY_ARTIST_PAIR_SQL('t.track_id')} AS artist_pair, t.album_id,
                 al.name AS album, al.image_url AS image, al.release_date,
                 (SELECT min(played_at_ms) FROM plays x WHERE x.track_id = t.track_id) AS first_ever_ms
            FROM tracks t LEFT JOIN albums al ON al.album_id = t.album_id
@@ -239,7 +256,10 @@ export async function computeWrapped(
     range,
     days!.results as DayRow[],
     clock!.results as ClockRow[],
-    meta!.results as MetaRow[],
+    (meta!.results as Array<Omit<MetaRow, 'artist' | 'artist_id'> & { artist_pair: string | null }>).map(({ artist_pair, ...row }) => {
+      const pair = artist_pair === null ? null : (JSON.parse(artist_pair) as [string, string]);
+      return { ...row, artist_id: pair?.[0] ?? null, artist: pair?.[1] ?? null };
+    }),
     prior!.results as PriorRow[],
     (skips!.results[0] as { n: number } | undefined)?.n ?? 0,
   );
@@ -269,8 +289,9 @@ function summarize(
     /** Minutes per track id, so the art comes from the edition played most. */
     editions: Map<string, number>;
   };
-  type Artist = { name: string; plays: number; ms: number; days: Set<string>; songs: Map<string, number> };
-  type Album = { name: string; artist: string; plays: number; ms: number; songs: Set<string>; editions: Map<string, number> };
+  /** `ids` holds minutes per artist id, as an artist folds its placeholder and real ids by name. */
+  type Artist = { name: string; plays: number; ms: number; days: Set<string>; songs: Map<string, number>; ids: Map<string, number> };
+  type Album = { name: string; artist: string; artistKey: string; plays: number; ms: number; songs: Set<string>; editions: Map<string, number> };
 
   const songs = new Map<string, Song>();
   const artists = new Map<string, Artist>();
@@ -314,19 +335,20 @@ function summarize(
 
     let artist = artists.get(artistKey);
     if (!artist) {
-      artist = { name: track.artist, plays: 0, ms: 0, days: new Set(), songs: new Map() };
+      artist = { name: track.artist, plays: 0, ms: 0, days: new Set(), songs: new Map(), ids: new Map() };
       artists.set(artistKey, artist);
     }
     artist.plays += row.plays;
     artist.ms += row.ms;
     artist.days.add(row.day);
     add(artist.songs, songKey, row.ms);
+    if (track.artist_id !== null) add(artist.ids, track.artist_id, row.ms);
 
     if (track.album) {
       const albumKey = `${track.album.toLowerCase()}|${artistKey}`;
       let album = albums.get(albumKey);
       if (!album) {
-        album = { name: track.album, artist: track.artist, plays: 0, ms: 0, songs: new Set(), editions: new Map() };
+        album = { name: track.album, artist: track.artist, artistKey, plays: 0, ms: 0, songs: new Set(), editions: new Map() };
         albums.set(albumKey, album);
       }
       album.plays += row.plays;
@@ -351,12 +373,22 @@ function summarize(
     return null;
   };
   const songImage = (key: string | null) => (key ? imageOf(songs.get(key)!.editions) : null);
+  /** The most-listened key, ties broken by key so a recompute names the same one. */
+  const topKey = (counts: Map<string, number>) =>
+    [...counts].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0]?.[0] ?? null;
+  const songId = (key: string | null) => (key ? topKey(songs.get(key)!.editions) : null);
+  /** A real id beats a `name:` placeholder however few plays it has. */
+  const artistId = (artist: Artist) => {
+    const real = new Map([...artist.ids].filter(([id]) => !id.startsWith(NAME_KEY_PREFIX)));
+    return topKey(real.size > 0 ? real : artist.ids)!;
+  };
   const byMs = <T extends { ms: number }>(a: [string, T], b: [string, T]) => b[1].ms - a[1].ms || a[0].localeCompare(b[0]);
 
   const rankedArtists = [...artists].sort(byMs);
   const topArtists: WrappedArtist[] = rankedArtists.slice(0, TOP_N).map(([, artist]) => {
     const topSong = maxBy(artist.songs);
     return {
+      id: artistId(artist),
       name: artist.name,
       minutes: minutes(artist.ms),
       plays: artist.plays,
@@ -364,6 +396,7 @@ function summarize(
       days: artist.days.size,
       longest_run_days: longestRun([...artist.days].sort())?.days ?? 0,
       top_song: topSong ? songs.get(topSong)!.name : null,
+      top_song_id: songId(topSong),
       image: songImage(topSong),
     };
   });
@@ -371,9 +404,11 @@ function summarize(
   // Songs rank by plays, as Spotify's do ("you played it 149 times");
   // artists and albums by minutes.
   const byPlays = (a: [string, Song], b: [string, Song]) => b[1].plays - a[1].plays || b[1].ms - a[1].ms || a[0].localeCompare(b[0]);
-  const topSongs: WrappedSong[] = [...songs].sort(byPlays).slice(0, TOP_N).map(([, song]) => ({
+  const topSongs: WrappedSong[] = [...songs].sort(byPlays).slice(0, TOP_N).map(([key, song]) => ({
+    track_id: songId(key)!,
     name: song.name,
     artist: song.artist,
+    artist_id: artistId(artists.get(song.artistKey)!),
     album: song.album,
     image: imageOf(song.editions),
     plays: song.plays,
@@ -391,6 +426,7 @@ function summarize(
     .map(([, album]) => ({
       name: album.name,
       artist: album.artist,
+      artist_id: artistId(artists.get(album.artistKey)!),
       image: imageOf(album.editions),
       plays: album.plays,
       minutes: minutes(album.ms),
@@ -405,7 +441,9 @@ function summarize(
       month,
       minutes: minutes(monthTotal),
       top_artist: artistKey ? artists.get(artistKey)!.name : null,
+      top_artist_id: artistKey ? artistId(artists.get(artistKey)!) : null,
       top_song: songKey ? songs.get(songKey)!.name : null,
+      top_song_id: songId(songKey),
       image: songImage(songKey),
     };
   });
@@ -448,6 +486,7 @@ function summarize(
       songs: [...songs.keys()].filter((key) => !priorSongs.has(key)).length,
       share: totalMs ? round(newArtistMs / totalMs) : 0,
       top: newArtists.slice(0, NEW_ARTISTS).map(([, artist]) => ({
+        id: artistId(artist),
         name: artist.name,
         minutes: minutes(artist.ms),
         image: songImage(maxBy(artist.songs)),
@@ -540,11 +579,12 @@ function closedRange(eras: readonly Era[], from: string, to: string, now: number
 }
 
 /**
- * The version suffix retires every stored body when the shape changes, and
+ * The version suffix retires every stored body when the shape changes (v3
+ * added track and artist ids), and
  * the era digest every body cut on eras that have since been reconfigured.
  */
 export const wrappedKey = (eras: readonly Era[], range: { from: string; to: string }) =>
-  `wrapped:v2:${eraDigest(eras)}:${range.from}:${range.to}`;
+  `wrapped:v3:${eraDigest(eras)}:${range.from}:${range.to}`;
 
 /**
  * A range that ended a while ago will never change; one that just ended might
