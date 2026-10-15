@@ -152,11 +152,15 @@ export function appAccessToken(env: Env): Promise<TokenResponse> {
 /**
  * Spotify's consent URL. Defaults to the ingestion grant; sign-in passes its
  * own redirect URI and an empty scope, which asks for identity alone.
+ *
+ * `showDialog` makes Spotify ask every time, even when the account already
+ * approved this app. Without it an approved session redirects straight back,
+ * so whoever opened the URL gets the result without the owner seeing a thing.
  */
 export function authorizeUrl(
   env: Env,
   state: string,
-  options: { redirectUri?: string; scope?: string } = {},
+  options: { redirectUri?: string; scope?: string; showDialog?: boolean } = {},
 ): string {
   const params = new URLSearchParams({
     client_id: env.SPOTIFY_CLIENT_ID,
@@ -166,6 +170,7 @@ export function authorizeUrl(
   });
   const scope = options.scope ?? SCOPE;
   if (scope) params.set('scope', scope);
+  if (options.showDialog) params.set('show_dialog', 'true');
   return `${AUTHORIZE_URL}?${params}`;
 }
 

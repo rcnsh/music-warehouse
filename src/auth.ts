@@ -13,6 +13,8 @@ export type Access = 'admin' | 'read';
 
 /** Prefix of every minted token, so a leaked one is easy to recognise and grep for. */
 const TOKEN_PREFIX = 'mw_';
+/** Every minted token: the prefix and 32 random bytes in base64url. */
+const TOKEN_SHAPE = /^mw_[A-Za-z0-9_-]{43}$/;
 
 /** `last_used_ms` is written at most this often per token, so reads stay reads. */
 const LAST_USED_RESOLUTION_MS = 60 * 60 * 1000;
@@ -48,6 +50,36 @@ export function randomSecret(bytes = 32): string {
   return base64url(crypto.getRandomValues(new Uint8Array(bytes)));
 }
 
+/**
+ * A keyed hash of the client's address, for counting and rate limiting what
+ * one client does without storing where it is. IPv6 is cut to its /64, the
+ * block one subscriber usually holds, so rotating through it does not dodge a
+ * cap. Null when the request carries no CF-Connecting-IP, which only happens
+ * off Cloudflare's edge: in `wrangler dev` and in tests.
+ */
+export async function clientKey(request: Request, env: Env): Promise<string | null> {
+  const ip = request.headers.get('CF-Connecting-IP')?.trim();
+  if (!ip) return null;
+  return sha256Hex(`client:${env.ADMIN_TOKEN}:${clientAddress(ip)}`);
+}
+
+/** An IPv4 address as is, an IPv4-mapped one as IPv4, and IPv6 as its /64. */
+export function clientAddress(ip: string): string {
+  if (!ip.includes(':')) return ip;
+  const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/i.exec(ip);
+  if (mapped) return mapped[1]!;
+  const [head = '', tail = ''] = ip.toLowerCase().split('::');
+  const before = head ? head.split(':') : [];
+  const after = tail ? tail.split(':') : [];
+  const groups = ip.includes('::')
+    ? [...before, ...Array<string>(Math.max(0, 8 - before.length - after.length)).fill('0'), ...after]
+    : before;
+  return `${groups
+    .slice(0, 4)
+    .map((group) => (Number.parseInt(group, 16) || 0).toString(16))
+    .join(':')}::/64`;
+}
+
 /** CORS_ORIGINS as a list, each without a trailing slash. */
 export function listedOrigins(env: Env): string[] {
   if (!env.CORS_ORIGINS) return [];
@@ -58,10 +90,14 @@ export function listedOrigins(env: Env): string[] {
  * Resolve the request's bearer token to an access level.
  *
  * ADMIN_TOKEN is the break-glass credential: kept offline, used to mint and
- * revoke device tokens, never carried around. READ_TOKEN predates device
- * tokens and is honoured until every reader has moved off it. Everything else
- * is a row in `api_tokens`, looked up by hash — which leaks nothing useful
- * through timing, since a caller cannot choose what their guess hashes to.
+ * revoke device tokens, never carried around. READ_TOKEN is deprecated: one
+ * shared secret that never expires and cannot be revoked per reader. It
+ * predates device tokens and is honoured until every reader has moved off it,
+ * with a warning in the log each time it is used so the stragglers show up.
+ * Everything else is a row in `api_tokens`, looked up by hash — which leaks
+ * nothing useful through timing, since a caller cannot choose what their guess
+ * hashes to. Anything not shaped like a minted token is refused before D1 is
+ * asked, so a stranger's guesses cost no reads.
  */
 export async function accessFor(request: Request, env: Env, ctx: ExecutionContext): Promise<Access | null> {
   const header = request.headers.get('Authorization') ?? '';
@@ -70,8 +106,11 @@ export async function accessFor(request: Request, env: Env, ctx: ExecutionContex
   const presented = match[1]!;
 
   if (env.ADMIN_TOKEN && (await secretsMatch(presented, env.ADMIN_TOKEN))) return 'admin';
-  if (env.READ_TOKEN && (await secretsMatch(presented, env.READ_TOKEN))) return 'read';
-  if (!presented.startsWith(TOKEN_PREFIX)) return null;
+  if (env.READ_TOKEN && (await secretsMatch(presented, env.READ_TOKEN))) {
+    console.warn('READ_TOKEN used: it is deprecated. Sign in, or mint a device token, and unset READ_TOKEN.');
+    return 'read';
+  }
+  if (!TOKEN_SHAPE.test(presented)) return null;
 
   const now = Date.now();
   const row = await env.DB.prepare(

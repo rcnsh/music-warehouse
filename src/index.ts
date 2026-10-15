@@ -13,7 +13,7 @@ import { EraConfigError } from './eras';
 import { syncSearchIndex } from './search-index';
 import { syncAllSongs } from './play-numbers';
 import { ensureRollup } from './rollup';
-import { accessFor, createTokenRoute, listTokensRoute, listedOrigins, revokeTokenRoute } from './auth';
+import { accessFor, clientKey, createTokenRoute, listTokensRoute, listedOrigins, revokeTokenRoute } from './auth';
 import { SnapshotPending } from './snapshots';
 import { isStatName, statRoute } from './stats';
 import { artistRoute, onThisDayRoute, topTracksRoute, trackRoute } from './history';
@@ -28,7 +28,7 @@ import {
   pinConcertArtistRoute,
   runConcertCheck,
 } from './concerts';
-import { recordOwner, signInCallback, signInExchange, signInStart } from './signin';
+import { recordOwner, signInCallback, signInConfirm, signInExchange, signInStart } from './signin';
 import { warmWrappedPresets, wrappedRangesRoute, wrappedRoute } from './wrapped';
 import type { Env } from './types';
 import { log } from './log';
@@ -46,7 +46,11 @@ function unauthorized(): Response {
 }
 
 function text(body: string, status = 200): Response {
-  return new Response(body, { status, headers: { 'Content-Type': 'text/plain; charset=utf-8' } });
+  return new Response(body, {
+    status,
+    // nosniff: a browser must never read this as anything but text.
+    headers: { 'Content-Type': 'text/plain; charset=utf-8', 'X-Content-Type-Options': 'nosniff' },
+  });
 }
 
 /**
@@ -70,8 +74,10 @@ async function login(env: Env): Promise<Response> {
 
 /** OAuth redirect target. Unauthenticated by necessity — the `state` value is what proves provenance. */
 async function callback(env: Env, url: URL): Promise<Response> {
+  // Spotify's error is a short code such as `access_denied`. Anything else in
+  // the query string is someone else's text, and is not repeated back.
   const error = url.searchParams.get('error');
-  if (error) return text(`Spotify refused authorization: ${error}`, 400);
+  if (error) return text(`Spotify refused authorization: ${/^[a-z_]{1,64}$/.test(error) ? error : 'unknown'}`, 400);
 
   const code = url.searchParams.get('code');
   const state = url.searchParams.get('state');
@@ -96,8 +102,10 @@ async function callback(env: Env, url: URL): Promise<Response> {
     // A fresh authorization restarts the six-month refresh-token clock.
     await persistTokenResponse(env.DB, token, Date.now(), { resetAuthorizedAt: true });
   } catch (cause) {
-    const message = cause instanceof SpotifyError ? cause.message : String(cause);
-    return text(`Token exchange failed: ${message}`, 502);
+    // The message can hold Spotify's response body: the log gets it, the page
+    // does not.
+    console.error('callback', cause instanceof SpotifyError ? cause.message : cause);
+    return text('Token exchange with Spotify failed; the Worker log has the details. Start again at /login.', 502);
   }
 
   // Whose warehouse this is, for sign-in. Not worth failing the grant over:
@@ -142,6 +150,18 @@ async function handle(request: Request, env: Env, ctx: ExecutionContext): Promis
   const route = `${request.method} ${path}`;
 
   try {
+    // Sign-in is open to anyone, so when the deployment has a rate limiter
+    // bound, each client address gets a few requests a minute before D1 is
+    // touched. Without the binding, the per-client cap in signin.ts still holds.
+    if (path.startsWith('/auth/') && env.AUTH_RATE_LIMITER) {
+      const key = await clientKey(request, env);
+      if (key && !(await env.AUTH_RATE_LIMITER.limit({ key })).success) {
+        const response = json({ error: 'Too many sign-in requests. Try again in a minute.' }, 429);
+        response.headers.set('Retry-After', '60');
+        return response;
+      }
+    }
+
     // Unauthenticated by necessity: Spotify's redirects carry no token, and
     // sign-in is how a device gets one. Each is guarded by its own single-use
     // state or code instead.
@@ -149,9 +169,11 @@ async function handle(request: Request, env: Env, ctx: ExecutionContext): Promis
       case 'GET /callback':
         return await callback(env, url);
       case 'GET /auth/login':
-        return await signInStart(env, url);
+        return await signInStart(env, request, url);
+      case 'POST /auth/login':
+        return await signInConfirm(env, request, url);
       case 'GET /auth/callback':
-        return await signInCallback(env, url);
+        return await signInCallback(env, request, url);
       case 'POST /auth/token':
         return await signInExchange(env, request);
     }

@@ -5,9 +5,11 @@ export interface Env {
   SPOTIFY_REDIRECT_URI: string;
   ADMIN_TOKEN: string;
   /**
-   * Optional read-only credential for the /api/* routes. Lets a frontend read
-   * the warehouse without holding a token that can also trigger polls or
-   * import rows. Unset means /api/* is admin-only.
+   * Deprecated. Optional read-only credential for the /api/* routes, from
+   * before device tokens: one shared secret that never expires and cannot be
+   * revoked per reader. Every use logs a warning. Readers should sign in (or
+   * be given a device token from POST /admin/tokens) instead; once none uses
+   * it, delete the secret. Unset means only device tokens and ADMIN_TOKEN work.
    */
   READ_TOKEN?: string;
   /**
@@ -50,6 +52,13 @@ export interface Env {
    * sign-in `return_to`, e.g. `app.remastered`. Loopback HTTP needs no entry.
    */
   SIGN_IN_SCHEMES?: string;
+  /**
+   * Optional Workers Rate Limiting binding for the unauthenticated /auth/*
+   * routes, keyed by a hash of the client address. See `ratelimits` in
+   * wrangler.jsonc. Unset means no per-minute limit, only the cap on pending
+   * sign-ins.
+   */
+  AUTH_RATE_LIMITER?: RateLimit;
   /**
    * Ticketmaster Discovery API consumer key, for concert alerts. Optional:
    * unset means the concert cron does nothing and /api/concerts stays empty.
