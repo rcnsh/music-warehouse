@@ -1,13 +1,32 @@
-# music-warehouse
+<div align="center">
+<h1>music-warehouse</h1>
+<p><strong>Your Spotify play history, recorded every 30 minutes into a database you own.</strong></p>
+<p>
+<a href="LICENSE"><img alt="Licence: MIT" src="https://img.shields.io/badge/licence-MIT-blue?style=flat-square"></a>
+<img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-3178C6?style=flat-square&logo=typescript&logoColor=white">
+<img alt="Cloudflare Workers" src="https://img.shields.io/badge/Cloudflare%20Workers-F38020?style=flat-square&logo=cloudflareworkers&logoColor=white">
+<a href="https://github.com/rcnsh/music-warehouse#clients"><img alt="Part of music-warehouse" src="https://img.shields.io/static/v1?label=part%20of&message=music-warehouse&color=1DB954&style=flat-square"></a>
+</p>
+<p><a href="#what-it-does">What it does</a> · <a href="#quick-start">Quick start</a> · <a href="#configuration">Configuration</a> · <a href="#api-reference">API reference</a> · <a href="#clients">Clients</a> · <a href="#related-projects">Related projects</a></p>
+</div>
 
 A Cloudflare Worker that keeps your Spotify play history in a D1 database you
 own, so it outlives Spotify's 50-play `recently-played` window. Every 30
 minutes it polls Spotify and stores new plays; a bearer-authenticated JSON API
 serves them back, along with stats, a year-in-review and per-artist history.
-There is no UI. [music-warehouse-wrapped](https://github.com/rcnsh/music-warehouse-wrapped)
-is one client.
+There is no UI; the [clients](#clients) are separate repos.
 
+> [!NOTE]
+> You need a Spotify account with **Premium** and a Cloudflare account (the
+> free Workers and D1 plans are enough). See [Requirements](#requirements).
+
+## Contents
+
+- [What it does](#what-it-does)
+- [How it fits together](#how-it-fits-together)
+- [Clients](#clients)
 - [Requirements](#requirements)
+- [Quick start](#quick-start)
 - [Setting it up from scratch](#setting-it-up-from-scratch)
 - [Authorizing](#authorizing)
 - [Device tokens](#device-tokens)
@@ -17,6 +36,57 @@ is one client.
 - [Operations](#operations)
 - [Development](#development)
 - [Design notes and limitations](docs/design.md)
+- [Related projects](#related-projects)
+- [Licence](#licence)
+
+## What it does
+
+- **Records every play.** A cron polls Spotify every 30 minutes and stores new
+  plays in D1, with track, album, artist and the playlist or album they were
+  played from.
+- **Imports your past.** Spotify's Extended streaming history export fills in
+  everything from before the Worker existed, and two scripts backfill album art.
+- **Serves a JSON API.** Plays (also as CSV), search, daily counts, top artists
+  and songs for any range, per-artist and per-song history, on-this-day, home
+  screen rows, publishable stats and Wrapped-style summaries for any range.
+- **Proxies live Spotify data.** Now playing, recently played and Spotify's top
+  lists, so clients need no Spotify credentials of their own.
+- **Finds concerts.** Optionally, a daily Ticketmaster check for upcoming gigs by
+  the artists you play most.
+- **Looks after itself.** `/health` reports whether ingestion is working, and a
+  daily sweep can push alerts to Discord, Slack or ntfy.
+- **Hands out scoped tokens.** Per-device read or admin tokens, minted by the
+  admin or by signing in with the Spotify account that owns the warehouse.
+
+## How it fits together
+
+```mermaid
+flowchart LR
+  spotify["Spotify Web API"] -- "cron, every 30 min" --> worker["music-warehouse Worker"]
+  export["Extended streaming history export"] -. "npm run import" .-> worker
+  worker <--> d1[("D1")]
+  clients["gui · mcp · spicetify · wrapped"] -- "/api/* with a read token" --> worker
+```
+
+The Worker is the only thing that talks to Spotify or the database. Clients
+read the API with their own tokens.
+
+## Clients
+
+Each reads the [API](#api-reference) with a read token, which it gets by
+[signing in with Spotify](#signing-in-with-spotify) or from a pasted
+[device token](#device-tokens). None of them stores or polls anything itself.
+
+| Repo | What it is | Routes it reads |
+|---|---|---|
+| [music-warehouse-gui](https://github.com/rcnsh/music-warehouse-gui) | Native macOS app (Rust, GPUI): history, search, stats, artist and song pages | Nearly all of `/api/*` |
+| [music-warehouse-mcp](https://github.com/rcnsh/music-warehouse-mcp) | MCP server, so an AI agent can query your history | Nearly all of `/api/*` |
+| [music-warehouse-spicetify](https://github.com/rcnsh/music-warehouse-spicetify) | Spicetify custom app: stats inside the Spotify client | `/api/plays`, `/api/home`, `/api/stats/*`, `/api/top-*`, `/api/wrapped`, `/api/concerts`, `/api/track`, `/api/artist`, `/api/on-this-day` |
+| [music-warehouse-wrapped](https://github.com/rcnsh/music-warehouse-wrapped) | Wrapped-style stories in the browser, exportable as video | `/api/wrapped`, `/api/wrapped/ranges`, `/api/top` |
+
+Browser clients (Spicetify, Wrapped) need their origin in
+[`CORS_ORIGINS`](#configuration). Changing a response shape here can break
+them, so check this table first.
 
 ## Requirements
 
@@ -24,6 +94,45 @@ is one client.
   for an owner with Premium; without it, only the export import works.
 - A Cloudflare account. The free Workers and D1 plans are enough.
 - Node.js 20 or later.
+
+## Quick start
+
+The short version. Each step links to the detail.
+
+1. [Create a Spotify app](#1-create-the-spotify-app) with redirect URIs
+   `https://<your-worker-host>/callback` and `/auth/callback`, and request your
+   Extended streaming history while you're there.
+2. Clone, install and [configure](#2-configure-the-deployment) `wrangler.jsonc`:
+
+   ```bash
+   git clone https://github.com/rcnsh/music-warehouse && cd music-warehouse
+   npm install
+   npx wrangler login
+   ```
+
+3. [Create the database](#3-create-the-database), then
+   [deploy and set secrets](#4-deploy-and-set-secrets):
+
+   ```bash
+   npx wrangler d1 create music_warehouse     # copy the id into wrangler.jsonc
+   npm run migrate:remote
+   npx wrangler deploy
+   npx wrangler secret put SPOTIFY_CLIENT_ID
+   npx wrangler secret put SPOTIFY_CLIENT_SECRET
+   npx wrangler secret put ADMIN_TOKEN        # openssl rand -hex 32
+   ```
+
+4. [Authorize](#authorizing) ingestion and start the first poll:
+
+   ```bash
+   export WORKER_URL=https://music-warehouse.<you>.workers.dev
+   export ADMIN_TOKEN=...
+   npm run authorize -- --url "$WORKER_URL" --open
+   curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" "$WORKER_URL/admin/poll"
+   ```
+
+5. Mint a [device token](#device-tokens) for each client, and
+   [import your history](#importing-your-history) when the export arrives.
 
 ## Setting it up from scratch
 
@@ -38,10 +147,11 @@ is one client.
    allows five users).
 4. Note the **client ID** and **client secret**.
 
-While you're there, request your **Extended streaming history** at
-<https://www.spotify.com/account/privacy/>. Not "Account data", which only
-covers a year. It can take up to 30 days to arrive, and it is the only way to
-get plays from before the Worker existed.
+> [!TIP]
+> While you're there, request your **Extended streaming history** at
+> <https://www.spotify.com/account/privacy/>. Not "Account data", which only
+> covers a year. It can take up to 30 days to arrive, and it is the only way to
+> get plays from before the Worker existed.
 
 ### 2. Configure the deployment
 
@@ -54,10 +164,11 @@ npx wrangler login
 Three values in [`wrangler.jsonc`](wrangler.jsonc) belong to the original
 deployment. They are marked `[1]` to `[3]` in the file:
 
-1. **`routes`**: your custom domain, or delete the block to deploy to
-   `music-warehouse.<subdomain>.workers.dev`.
-2. **`database_id`**: from the next step.
-3. **`vars.SPOTIFY_REDIRECT_URI`**: the redirect URI from step 1, exactly.
+| | Key | Set it to |
+|---|---|---|
+| `[1]` | `routes` | Your custom domain, or delete the block to deploy to `music-warehouse.<subdomain>.workers.dev`. |
+| `[2]` | `database_id` | The id from the [next step](#3-create-the-database). |
+| `[3]` | `vars.SPOTIFY_REDIRECT_URI` | The `/callback` redirect URI from step 1, exactly. |
 
 Listening stats and Wrapped read local time in one timezone, `TIMEZONE`
 (default UTC), and start at your first stored play. If you've lived in more
@@ -101,10 +212,11 @@ mode 600.
 
 ### 5. Block unauthenticated traffic (recommended)
 
-Every route but `/callback` needs a token, but unauthenticated requests still
-reach the Worker. On the Free plan they count against its 100,000 requests a
-day, which the ingestion cron shares; on Workers Paid they are only noise. A WAF custom rule (Security → WAF → Custom rules, action **Block**)
-stops them at the edge:
+Every route but `/callback` and `/auth/*` needs a token, but unauthenticated
+requests still reach the Worker. On the Free plan they count against its
+100,000 requests a day, which the ingestion cron shares; on Workers Paid they
+are only noise. A WAF custom rule (Security → WAF → Custom rules, action
+**Block**) on your custom domain's zone stops them at the edge:
 
 ```txt
 (http.host eq "your-host.example" and http.request.uri.path ne "/callback" and not starts_with(http.request.uri.path, "/auth/") and http.request.method ne "OPTIONS" and not len(http.request.headers["authorization"][0]) > 0)
@@ -112,9 +224,9 @@ stops them at the edge:
 
 `/callback` stays open for Spotify's redirect, which its single-use `state`
 guards. `/auth/*` stays open for [signing in](#signing-in-with-spotify), which
-is how a device without a token gets one; a rate-limiting rule on
-`/auth/` is a sensible extra. `OPTIONS` stays open for browser clients' CORS preflights, which never
-carry the header; drop that clause if you don't set `CORS_ORIGINS`.
+is how a device without a token gets one; a rate-limiting rule on `/auth/` is a
+sensible extra. `OPTIONS` stays open for browser clients' CORS preflights,
+which never carry the header; drop that clause if you don't set `CORS_ORIGINS`.
 
 Then [authorize](#authorizing).
 
@@ -125,7 +237,7 @@ the admin token, so a script fetches the consent URL for you rather than you
 opening `/login` in a browser:
 
 ```bash
-export WORKER_URL=https://your-host.example
+export WORKER_URL=https://music-warehouse.<you>.workers.dev
 export ADMIN_TOKEN=...                       # or: set -a && . ./.dev.vars && set +a
 npm run authorize -- --url "$WORKER_URL" --open
 ```
@@ -147,12 +259,16 @@ curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" "$WORKER_URL/admin/poll"
 
 ### Re-authorizing
 
-Spotify expires the grant **six months after authorization**, and refreshing
-does not extend it. When it lapses, polling stops, `/health` reports
-`needs_reauth` with an `action_required` line, and the [alert](#alerting) fires.
-`/health` also warns from 14 days before. Run the same `npm run authorize`
-again; the six months restart. Adding a scope to `SCOPE` in `src/spotify.ts`
-also needs a re-authorization.
+> [!IMPORTANT]
+> Spotify expires the grant **six months after authorization**, and refreshing
+> does not extend it. Put a reminder in your calendar, or set up
+> [alerting](#alerting).
+
+When it lapses, polling stops, `/health` reports `needs_reauth` with an
+`action_required` line, and the [alert](#alerting) fires. `/health` also warns
+from 14 days before. Run the same `npm run authorize` again; the six months
+restart. Adding a scope to `SCOPE` in `src/spotify.ts` also needs a
+re-authorization.
 
 ## Device tokens
 
@@ -177,6 +293,10 @@ only a hash is stored.
 `GET /admin/tokens` lists them with when each was last used (to the hour), and
 `DELETE /admin/tokens?id=tok_…` revokes one immediately. Revoked tokens stay
 in the list.
+
+Keep `ADMIN_TOKEN` in a password manager as the way back in if every device
+token is lost. Once nothing uses `READ_TOKEN`, delete it with
+`npx wrangler secret delete READ_TOKEN`.
 
 ### Signing in with Spotify
 
@@ -210,8 +330,9 @@ page. It is shown once.
    `/auth/login?name=<device>&return_to=<url on your origin>&code_challenge=<challenge>`.
 3. Spotify sends it back to `return_to` with `?code=…`, or with `?error=`:
    `access_denied`, `not_owner` or `unavailable`.
-4. Within 60 seconds, `POST /auth/token` with `{ "code": "…", "code_verifier": "…" }`. The
-   response is the minted token, as from `POST /admin/tokens`.
+4. Within 60 seconds, `POST /auth/token` with
+   `{ "code": "…", "code_verifier": "…" }`. The response is the minted token,
+   as from `POST /admin/tokens`.
 
 A code works once, even if the exchange fails, and only alongside the verifier
 that produced its challenge. A failed exchange always answers
@@ -220,11 +341,10 @@ that produced its challenge. A failed exchange always answers
 A warehouse authorized before sign-in existed learns its owner's account id on
 the first sign-in, from the stored grant.
 
-Keep `ADMIN_TOKEN` in a password manager as the way back in if every device
-token is lost. Once nothing uses `READ_TOKEN`, delete it with
-`npx wrangler secret delete READ_TOKEN`.
-
 ## Importing your history
+
+All the scripts below read `ADMIN_TOKEN` from the environment, as
+`npm run authorize` does.
 
 ### The export
 
@@ -249,8 +369,8 @@ On the Free plan D1 allows 100,000 row writes a day, index writes included, so
 the script stops at 90,000 and a long history takes several days. Re-run it
 after 00:00 UTC and it continues from `.import-state.json`. Workers Paid has no
 daily cap (50 million writes a month are included), so there pass a larger
-`--dailyRowLimit` to import in one run. Re-running is always safe:
-plays already stored are ignored, not duplicated. Podcasts and local files are
+`--dailyRowLimit` to import in one run. Re-running is always safe: plays
+already stored are ignored, not duplicated. Podcasts and local files are
 skipped.
 
 ### Album art
@@ -283,6 +403,8 @@ the script stops at the first 429, prints when to try again, and resumes from
 | `--state` | `.catalog-state.json` | |
 | `--delayMs` / `--maxRetries` | `2000` / `6` | |
 
+Both also take `--url` (default `http://127.0.0.1:8787`).
+
 ## Configuration
 
 Secrets are set with `npx wrangler secret put <NAME>`, or in `.dev.vars`
@@ -293,6 +415,7 @@ locally. `npx wrangler secret list` shows what is set.
 | `SPOTIFY_CLIENT_ID` | yes | From the Spotify dashboard. |
 | `SPOTIFY_CLIENT_SECRET` | yes | From the Spotify dashboard. |
 | `ADMIN_TOKEN` | yes | Full access. `openssl rand -hex 32`. Keep it offline and use [device tokens](#device-tokens) day to day. |
+| `SPOTIFY_REDIRECT_URI` | yes | A var in `wrangler.jsonc`, not a secret. `.dev.vars` overrides it locally. |
 | `READ_TOKEN` | no | Deprecated: `/api/*` only. Prefer a read [device token](#device-tokens). |
 | `CORS_ORIGINS` | no | Comma-separated browser origins (or `*`) allowed to call `/api/*`, e.g. `https://wrapped.example.com`. Unset sends no CORS headers. |
 | `ALERT_WEBHOOK_URL` | no | Where alerts are POSTed. See [Alerting](#alerting). |
@@ -302,11 +425,19 @@ locally. `npx wrangler secret list` shows what is set.
 | `TIMEZONE` | no | IANA timezone the stats read local time in, when `ERAS` is unset. Default `UTC`. Also the zone of the [play-count rollup](#the-play-count-rollup); with only `ERAS` set, the rollup uses the latest era's zone. |
 | `ERAS` | no | JSON list of periods, each read in its own timezone. See [step 2](#2-configure-the-deployment) and [`src/eras.ts`](src/eras.ts). |
 | `CONCERT_REGIONS` | no | JSON list of places to look for [concerts](#concerts). Unset means none. |
-| `SPOTIFY_REDIRECT_URI` | yes | A var in `wrangler.jsonc`, not a secret. |
 
-The crons in `wrangler.jsonc` are `*/30 * * * *` (poll) and `0 9 * * *`
-(alerts, plus computing one Wrapped preset). Polling every 30 minutes is 48
-requests a day; tighten it to `*/15` if plays ever go missing.
+### Crons
+
+The crons are in `wrangler.jsonc`:
+
+| Schedule (UTC) | Does |
+|---|---|
+| `*/30 * * * *` | Polls Spotify for new plays, exactly as `POST /admin/poll` does. |
+| `0 9 * * *` | The [alert](#alerting) sweep; the daily artist reconcile, search index and song sync; brings the [play-count rollup](#the-play-count-rollup) up to date; computes one Wrapped preset. |
+| `23 1 * * *` | The [concert](#concerts) check, in its own invocation so it gets a full subrequest budget. |
+
+Polling every 30 minutes is 48 requests a day; tighten it to `*/15` if plays
+ever go missing.
 
 ### Plan and limits
 
@@ -358,6 +489,30 @@ Dates are `YYYY-MM-DD` local calendar days and `tz` is an IANA zone (default
 `UTC`). Ranges are inclusive and at most 3,660 days. Timestamps in responses
 are UTC.
 
+### Endpoints at a glance
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | [`/api/plays`](#stored-plays) | Stored plays, newest first, with filters and paging. |
+| `GET` | [`/api/plays.csv`](#stored-plays) | The same plays as one CSV download. |
+| `GET` | [`/api/top-artists`](#stored-plays) | Play counts per artist over a date range. |
+| `GET` | [`/api/top-tracks`](#stored-plays) | Play counts per song over a date range. |
+| `GET` | [`/api/daily`](#stored-plays) | Plays per local day, optionally for one song or artist. |
+| `GET` | [`/api/artist`](#history) | One artist's whole history. |
+| `GET` | [`/api/track`](#history) | One song's whole history, editions folded. |
+| `GET` | [`/api/on-this-day`](#history) | Top songs on this date in earlier years. |
+| `GET` | [`/api/home`](#home) | Home-screen rows ranked from the history. |
+| `GET` | [`/api/search`](#search) | Stored artists and songs by name. |
+| `GET` | [`/api/stats/{name}`](#stats) | Cached aggregates safe to publish. |
+| `GET` | [`/api/wrapped`](#wrapped) | A Wrapped-style summary of any finished range. |
+| `GET` | [`/api/wrapped/ranges`](#wrapped) | The Wrapped presets. |
+| `GET` | [`/api/concerts`](#concerts) | Upcoming Ticketmaster events for your top artists. |
+| `GET` | [`/api/now-playing`](#live-from-spotify) | Spotify's currently-playing, live. |
+| `GET` | [`/api/recently-played`](#live-from-spotify) | Spotify's recently-played, live. |
+| `GET` | [`/api/top`](#live-from-spotify) | Spotify's top tracks and artists, live. |
+| | [`/login`, `/callback`, `/auth/*`](#sign-in-and-authorization) | Authorizing ingestion and signing in. |
+| | [`/health`, `/admin/*`](#admin) | Health, polling, imports, tokens and maintenance. Admin only. |
+
 ### Stored plays
 
 These read only D1, so they keep working when the Spotify grant has lapsed.
@@ -400,6 +555,9 @@ walking everyone's.
   "_meta": { "rows_read": 50, "duration_ms": 1.2 } }
 ```
 
+<details>
+<summary>Field notes: <code>artist_list</code>, <code>source</code>, <code>context_name</code>, <code>play_number</code>, and the cost of <code>q</code></summary>
+
 `artist_list` holds every credited artist in credit order, each with its id,
 so a client can link them without splitting `artists` (which is the same
 names joined with `, `, and so can't tell "Tyler, The Creator" from two
@@ -417,8 +575,9 @@ asked of Spotify by the poll, three a poll, so a backlog drains over a few
 polls; a playlist name is refreshed weekly. Spotify refuses third-party apps
 many editorial and algorithmic playlists ("Discover Weekly", "Daily Mix"):
 those stay `null` and are asked again every 30 days, as do private playlists
-if the grant lacks `playlist-read-private` (the Worker doesn't ask for it). Migration 0013 lists
-every context already stored. Export plays carry no context.
+if the grant lacks `playlist-read-private` (the Worker doesn't ask for it).
+Migration 0013 lists every context already stored. Export plays carry no
+context.
 
 `play_number` says which play of its song this was, counting every edition
 the way `/api/track` folds them (same title and primary artist, ignoring
@@ -437,6 +596,8 @@ track ids are cached at the edge for five minutes per query, so the pages
 after the first skip that step (one row read instead). A track stored since
 then shows up at once; a renamed one can take those five minutes.
 
+</details>
+
 **`GET /api/plays.csv`**: the same plays as one CSV download, newest first,
 for a spreadsheet or a backup. Takes `/api/plays`' filters (`q`, `track_id`,
 `artist_id`, `artist_name`, `before`, `after`) and a local-date range: `from`
@@ -446,7 +607,7 @@ it streams every matching play, 2,000 per D1 query, so the Worker holds one
 page at a time. One query per page means the Workers Paid plan (1,000 queries
 a request) reaches two million plays, the Free plan (50) 100,000.
 
-```
+```csv
 played_at,track,artists,album,track_id,context_uri,context_name,source
 2026-10-15T09:50:02.000Z,Shelter,"Porter Robinson, Madeon",Shelter,4cOdK2wGLETKBW3PvgPWqT,spotify:playlist:…,"Mix, Vol. 1",api
 ```
@@ -580,8 +741,8 @@ range that has ended (`to` before today): minutes, top artists, songs and
 albums, biggest day, streak, listening by hour and weekday, each month's top
 artist and song, discoveries, and a listening age. The first request for a
 range takes a few seconds; a concurrent one gets `503` with `Retry-After`.
-`ADMIN_TOKEN` can wrap any range; `READ_TOKEN` gets `403` for a range that is
-neither a preset nor already computed.
+An admin token can wrap any range; a read token (or `READ_TOKEN`) gets `403`
+for a range that is neither a preset nor already computed.
 
 Songs and artists carry ids for `/api/track` and `/api/artist`. A song's
 `track_id` is its most-listened edition, which `/api/track` folds back into
@@ -643,17 +804,17 @@ Regions come from `CONCERT_REGIONS`, a JSON list of up to five. Each has a
 holds the same artists one by one with their ids for `/api/artist` (a real
 Spotify id where one is stored, else the import's `name:` placeholder). When
 the bill Ticketmaster returns names none of your matched artists, both list
-Ticketmaster's names instead, with `"id": null`. `artist_list` is `null` on a row stored
-before migration 0015 until the next daily check rewrites it.
+Ticketmaster's names instead, with `"id": null`. `artist_list` is `null` on a
+row stored before migration 0015 until the next daily check rewrites it.
 
 A daily cron (01:23 UTC) refreshes it; `POST /admin/concert-check` runs it
 now. Each artist is matched to a Ticketmaster attraction by exact name
 (ignoring case, accents and `&`) at most 25 a day, and the answer kept, so the
 first few days fill in gradually. An act whose name Ticketmaster spells
-differently is missed rather than guessed at; [pin it](#admin) instead. Events Ticketmaster stops listing
-(past, cancelled) drop out, as do rows for a region taken out of
-`CONCERT_REGIONS`. Needs `TICKETMASTER_API_KEY` and at least one region; there
-are no push alerts.
+differently is missed rather than guessed at; [pin it](#admin) instead. Events
+Ticketmaster stops listing (past, cancelled) drop out, as do rows for a region
+taken out of `CONCERT_REGIONS`. Needs `TICKETMASTER_API_KEY` and at least one
+region; there are no push alerts.
 
 ### Live from Spotify
 
@@ -667,18 +828,25 @@ grant has lapsed.
 | `GET /api/recently-played?limit=` | Spotify's recently-played, newest first. `limit` 1 to 50, default 1. Includes plays not yet ingested. |
 | `GET /api/top?range=&limit=&type=` | `{ tracks, artists }` from Spotify's top lists. `range` is `short_term`, `medium_term` or `long_term`; `limit` 1 to 50, default 12; `type=tracks` or `type=artists` fetches only one (the other is `null`). |
 
+### Sign-in and authorization
+
+These take no token.
+
+| Route | |
+|---|---|
+| `GET /callback` | Spotify's redirect target for [authorizing](#authorizing) ingestion. Guarded by its single-use `state`. |
+| `GET /auth/login?name=&return_to=&code_challenge=` | [Sign in with Spotify](#signing-in-with-spotify). |
+| `GET /auth/callback` | Spotify's redirect target for sign-in. |
+| `POST /auth/token` | Body `{ code, code_verifier }`; exchanges a sign-in code for a read token. |
+
 ### Admin
 
-`ADMIN_TOKEN` only.
+`ADMIN_TOKEN` (or an `admin` device token) only.
 
 | Route | |
 |---|---|
 | `GET /` | Lists the routes. |
 | `GET /login` | `302` to Spotify's consent page. Use `npm run authorize`. |
-| `GET /callback` | Spotify's redirect target. No token; guarded by `state`. |
-| `GET /auth/login?name=&return_to=&code_challenge=` | No token. [Sign in with Spotify](#signing-in-with-spotify). |
-| `GET /auth/callback` | No token. Spotify's redirect target for sign-in. |
-| `POST /auth/token` | No token. Body `{ code, code_verifier }`; exchanges a sign-in code for a read token. |
 | `GET /health` | Whether ingestion is working. See [Health](#health). |
 | `POST /admin/poll` | Poll now, exactly as the cron does. |
 | `POST /admin/import` | Body: an array of export records, or `{ "records": [...] }`. Returns `{ inserted, duplicates, skipped }`. Use `npm run import`. |
@@ -713,7 +881,8 @@ reports `action_required`, `total_plays`, `plays_last_24h`,
 The daily cron POSTs JSON to `ALERT_WEBHOOK_URL` when something needs you. The
 body carries the message under `content` (Discord), `text` (Slack) and
 `message`, plus `title`, `severity` and `key`, so a Discord or Slack webhook
-URL, or `https://ntfy.sh/<topic>`, works as-is.
+URL, or `https://ntfy.sh/<topic>`, works as-is. Without `ALERT_WEBHOOK_URL`,
+conditions are logged but never pushed.
 
 | Key | Severity | Condition |
 |---|---|---|
@@ -754,6 +923,17 @@ npm test                                # runs against a real local D1
 npm run typecheck
 ```
 
+| Script | Runs |
+|---|---|
+| `npm run dev` | `wrangler dev` |
+| `npm run deploy` | `wrangler deploy` |
+| `npm test` / `npm run test:watch` | Vitest, once or watching |
+| `npm run typecheck` | `tsc --noEmit` |
+| `npm run migrate:local` / `migrate:remote` | Apply D1 migrations locally or to the deployed database |
+| `npm run authorize` | [Authorize](#authorizing) ingestion |
+| `npm run import` | [Import the export](#the-export) |
+| `npm run backfill:albums` / `backfill:catalog` | [Backfill album art](#album-art) |
+
 To authorize locally, register `http://127.0.0.1:8787/callback` with Spotify
 and run `npm run authorize` without `--url`.
 
@@ -762,12 +942,21 @@ reaches the deployed Worker.
 
 How it works, why, and what it can't do: [docs/design.md](docs/design.md).
 
+## Related projects
+
+| Repo | |
+|---|---|
+| [music-warehouse](https://github.com/rcnsh/music-warehouse) (this repo) | The Worker: records your plays and serves the API |
+| [music-warehouse-gui](https://github.com/rcnsh/music-warehouse-gui) | Native macOS app for browsing your history |
+| [music-warehouse-mcp](https://github.com/rcnsh/music-warehouse-mcp) | MCP server so AI agents can query your history |
+| [music-warehouse-spicetify](https://github.com/rcnsh/music-warehouse-spicetify) | Stats inside the Spotify desktop client |
+| [music-warehouse-wrapped](https://github.com/rcnsh/music-warehouse-wrapped) | Wrapped-style stories for any range, in the browser |
+
 ## Licence
 
 [MIT](LICENSE).
 
-## Terms
-
-Spotify's Developer Terms prohibit using Spotify content to train machine
-learning models. A private listening warehouse is fine; feeding it to a model is
-not.
+> [!WARNING]
+> Spotify's Developer Terms prohibit using Spotify content to train machine
+> learning models. A private listening warehouse is fine; feeding it to a model
+> is not.
