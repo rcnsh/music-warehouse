@@ -1,0 +1,1693 @@
+openapi: 3.1.0
+info:
+  title: music-warehouse read API
+  version: 1.0.0
+  license:
+    name: MIT
+    identifier: MIT
+  summary: Read API of a personal Spotify listening-history warehouse (a Cloudflare Worker).
+  description: |
+    The shared contract for the warehouse's client apps. Written from the route
+    handlers in `src/`; where this file and the code disagree, the code wins and
+    this file is the bug.
+
+    **Versioning.** `info.version` starts at the Worker's `package.json` version.
+    Bump it whenever a response shape changes: minor for an added field or
+    route, major for a removed, renamed or retyped field.
+
+    **Scope.** Only the routes clients call: `/api/*` and the sign-in pair
+    `/auth/login` and `/auth/token`. Left out on purpose: `GET /`, `/login`,
+    `/callback`, `/auth/callback` (Spotify's redirect target, described under
+    `/auth/login`), `/health`, `/api/plays.csv` and every `/admin/*` route.
+
+    **Auth.** Every route here except `/auth/*` needs `Authorization: Bearer <token>`.
+    A missing or unknown token is `401`. Tokens have one of two access levels:
+
+    - `admin`: `ADMIN_TOKEN`, or an `admin` device token. Reaches everything.
+    - `read`: `READ_TOKEN`, or a `read` device token (what sign-in mints).
+      Reaches `/api/*` only (any other route is `401`), and `/api/wrapped`
+      only for preset or already-computed ranges.
+
+    **CORS.** `/api/*` and `/auth/token` answer cross-origin requests from
+    origins in the Worker's `CORS_ORIGINS`. Exposed headers: `Retry-After`,
+    `X-Stats-Source`, `X-Stats-Computed-At`, `WWW-Authenticate`.
+
+    **Conventions.** Dates are `YYYY-MM-DD` local calendar days in `tz`, an
+    IANA zone that defaults to `UTC`. Date ranges are inclusive and at most
+    3,660 days. Timestamps are UTC: ISO 8601 strings or epoch milliseconds
+    (`*_ms`). Errors are `{ "error": "..." }`; an unknown route is
+    `404 { "error": "Not found" }`, an unexpected failure
+    `500 { "error": "Internal error" }`, and a bad deployment setting
+    (`ERAS`, `CONCERT_REGIONS`) `500 { "error": "Worker misconfigured: ..." }`.
+servers:
+  - url: https://{host}
+    variables:
+      host:
+        default: music-warehouse.example.workers.dev
+        description: The deployed Worker's host.
+security:
+  - bearerAuth: []
+tags:
+  - name: Stored plays
+    description: Read only D1, so they work when the Spotify grant has lapsed.
+  - name: History
+    description: One artist, one song, a date, search and home rows, from stored plays.
+  - name: Stats
+    description: Cached aggregates, built to be safe to publish. No parameters.
+  - name: Wrapped
+    description: Year-in-review summaries of closed date ranges, cached once computed.
+  - name: Concerts
+    description: Upcoming Ticketmaster events, refreshed by a daily cron.
+  - name: Live
+    description: Proxies to Spotify with the stored grant. Fail with `503` and `needs_reauth` when it has lapsed.
+  - name: Sign-in
+    description: Sign in with Spotify to mint a read device token. No bearer token.
+
+paths:
+  /api/plays:
+    get:
+      tags: [Stored plays]
+      operationId: getPlays
+      summary: Plays, newest first
+      description: |
+        Page with `before`: pass the last row's `played_at_ms`. Filters combine,
+        each narrowing the last, and each one given is echoed at the top level.
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 500, default: 50 }
+        - name: before
+          in: query
+          description: Only plays strictly before this epoch-ms.
+          schema: { type: integer, minimum: 0, maximum: 9007199254740991 }
+        - name: after
+          in: query
+          description: Only plays strictly after this epoch-ms.
+          schema: { type: integer, minimum: -1, maximum: 9007199254740991, default: -1 }
+        - $ref: '#/components/parameters/Q'
+        - $ref: '#/components/parameters/TrackIdFilter'
+        - $ref: '#/components/parameters/ArtistIdFilter'
+        - $ref: '#/components/parameters/ArtistNameFilter'
+      responses:
+        '200':
+          description: One page of plays.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/PlayFilterEcho'
+                  - type: object
+                    required: [plays, _meta]
+                    properties:
+                      q: { type: string }
+                      plays:
+                        type: array
+                        items: { $ref: '#/components/schemas/Play' }
+                      _meta: { $ref: '#/components/schemas/QueryMeta' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500': { $ref: '#/components/responses/ServerError' }
+
+  /api/daily:
+    get:
+      tags: [Stored plays]
+      operationId: getDaily
+      summary: Plays per local day
+      description: Every day in the range is listed, quiet days as `0`. Filters given are echoed. `q` is not accepted here.
+      parameters:
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+        - $ref: '#/components/parameters/Tz'
+        - $ref: '#/components/parameters/TrackIdFilter'
+        - $ref: '#/components/parameters/ArtistIdFilter'
+        - $ref: '#/components/parameters/ArtistNameFilter'
+      responses:
+        '200':
+          description: Daily counts, oldest first.
+          headers:
+            X-Rollup: { $ref: '#/components/headers/X-Rollup' }
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/DateRangeEcho'
+                  - $ref: '#/components/schemas/PlayFilterEcho'
+                  - type: object
+                    required: [days, _meta]
+                    properties:
+                      days:
+                        type: array
+                        items:
+                          type: object
+                          required: [day, plays]
+                          properties:
+                            day: { $ref: '#/components/schemas/LocalDate' }
+                            plays: { type: integer }
+                      _meta: { $ref: '#/components/schemas/QueryMeta' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500': { $ref: '#/components/responses/ServerError' }
+
+  /api/top-artists:
+    get:
+      tags: [Stored plays]
+      operationId: getTopArtists
+      summary: Play counts per artist
+      description: Every credited artist on a track gets the play, not only the primary one.
+      parameters:
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+        - $ref: '#/components/parameters/Tz'
+        - $ref: '#/components/parameters/Limit500'
+      responses:
+        '200':
+          description: Artists, most played first.
+          headers:
+            X-Rollup: { $ref: '#/components/headers/X-Rollup' }
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/DateRangeEcho'
+                  - type: object
+                    required: [artists, _meta]
+                    properties:
+                      artists:
+                        type: array
+                        items:
+                          type: object
+                          required: [artist_id, name, plays]
+                          properties:
+                            artist_id: { $ref: '#/components/schemas/ArtistId' }
+                            name: { type: string }
+                            plays: { type: integer }
+                      _meta: { $ref: '#/components/schemas/QueryMeta' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500': { $ref: '#/components/responses/ServerError' }
+
+  /api/top-tracks:
+    get:
+      tags: [Stored plays]
+      operationId: getTopTracks
+      summary: Play counts per song
+      description: Editions are folded (same title and primary artist); `id` is the most-played edition's.
+      parameters:
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+        - $ref: '#/components/parameters/Tz'
+        - $ref: '#/components/parameters/Limit500'
+      responses:
+        '200':
+          description: Songs, most played first.
+          headers:
+            X-Rollup: { $ref: '#/components/headers/X-Rollup' }
+            X-Rows-Read: { $ref: '#/components/headers/X-Rows-Read' }
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/DateRangeEcho'
+                  - type: object
+                    required: [tracks]
+                    properties:
+                      tracks:
+                        type: array
+                        items: { $ref: '#/components/schemas/RankedSong' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500': { $ref: '#/components/responses/ServerError' }
+
+  /api/artist:
+    get:
+      tags: [History]
+      operationId: getArtist
+      summary: One artist's whole history
+      description: |
+        Give `id`, `name` or both. Matches the id and any artist with the same
+        name ignoring case, so export `name:` placeholders fold in. Credits the
+        primary artist only. An unknown artist is a `200` with zero plays.
+      parameters:
+        - name: id
+          in: query
+          description: A Spotify artist id or a `name:` placeholder.
+          schema: { type: string, maxLength: 200 }
+        - name: name
+          in: query
+          schema: { type: string, maxLength: 200 }
+        - $ref: '#/components/parameters/Tz'
+      responses:
+        '200':
+          description: The artist's history.
+          headers:
+            X-Rows-Read: { $ref: '#/components/headers/X-Rows-Read' }
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/History'
+                  - type: object
+                    required: [artist, top_tracks]
+                    properties:
+                      artist:
+                        type: object
+                        required: [id, name]
+                        properties:
+                          id:
+                            description: Null when only a name was given and no real (non-placeholder) id matched it.
+                            type: [string, 'null']
+                          name:
+                            description: Empty string when nothing matched and no name was given.
+                            type: string
+                      top_tracks:
+                        type: array
+                        maxItems: 10
+                        items:
+                          type: object
+                          required: [id, name, plays, image]
+                          properties:
+                            id: { $ref: '#/components/schemas/TrackId' }
+                            name: { type: string }
+                            plays: { type: integer }
+                            image: { $ref: '#/components/schemas/NullableUrl' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500': { $ref: '#/components/responses/ServerError' }
+
+  /api/track:
+    get:
+      tags: [History]
+      operationId: getTrack
+      summary: One song's whole history, all editions folded
+      description: An unknown id is a `200` with zero plays and a `track` of nulls.
+      parameters:
+        - name: id
+          in: query
+          required: true
+          description: Any edition's Spotify track id.
+          schema: { type: string, minLength: 1, maxLength: 200 }
+        - $ref: '#/components/parameters/Tz'
+      responses:
+        '200':
+          description: The song's history.
+          headers:
+            X-Rows-Read: { $ref: '#/components/headers/X-Rows-Read' }
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/History'
+                  - type: object
+                    required: [track]
+                    properties:
+                      track:
+                        type: object
+                        required: [id, name, artist, image]
+                        properties:
+                          id: { $ref: '#/components/schemas/TrackId' }
+                          name:
+                            description: Null for an unknown id.
+                            type: [string, 'null']
+                          artist:
+                            description: Primary artist; null when unknown or uncredited.
+                            type: [string, 'null']
+                          image: { $ref: '#/components/schemas/NullableUrl' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500': { $ref: '#/components/responses/ServerError' }
+
+  /api/on-this-day:
+    get:
+      tags: [History]
+      operationId: getOnThisDay
+      summary: Top songs on this date in each earlier year
+      description: Years with no plays are left out. 29 February only matches leap years.
+      parameters:
+        - name: date
+          in: query
+          description: Defaults to today in `tz`. Must be a real calendar date.
+          schema: { $ref: '#/components/schemas/LocalDate' }
+        - $ref: '#/components/parameters/Tz'
+      responses:
+        '200':
+          description: One entry per earlier year with plays, newest first.
+          headers:
+            X-Rows-Read: { $ref: '#/components/headers/X-Rows-Read' }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [date, years]
+                properties:
+                  date: { $ref: '#/components/schemas/LocalDate' }
+                  years:
+                    type: array
+                    items:
+                      type: object
+                      required: [year, plays, top_tracks]
+                      properties:
+                        year: { type: integer }
+                        plays: { type: integer, description: "All plays that day, not only the top tracks'." }
+                        top_tracks:
+                          type: array
+                          maxItems: 5
+                          items: { $ref: '#/components/schemas/RankedSong' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500': { $ref: '#/components/responses/ServerError' }
+
+  /api/search:
+    get:
+      tags: [History]
+      operationId: search
+      summary: Find stored artists and songs by name
+      description: |
+        Case-insensitive substring match (ASCII case only). Exact matches first,
+        then most played. Artists and songs fold as the history routes do;
+        `plays` credits the primary artist only.
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema: { type: string, minLength: 1, maxLength: 200 }
+        - name: artist
+          in: query
+          description: Only songs whose primary artist's name contains this.
+          schema: { type: string, maxLength: 200 }
+        - name: limit
+          in: query
+          description: Per list.
+          schema: { type: integer, minimum: 1, maximum: 50, default: 10 }
+      responses:
+        '200':
+          description: Matching artists and songs.
+          headers:
+            X-Rows-Read: { $ref: '#/components/headers/X-Rows-Read' }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [q, artists, tracks]
+                properties:
+                  q: { type: string, description: "The trimmed query." }
+                  artists:
+                    type: array
+                    items:
+                      type: object
+                      required: [id, name, plays]
+                      properties:
+                        id:
+                          description: Null when only the export knows this artist; pass `name` to /api/artist instead.
+                          type: [string, 'null']
+                        name: { type: string }
+                        plays: { type: integer }
+                  tracks:
+                    type: array
+                    items:
+                      type: object
+                      required: [id, name, artist, plays]
+                      properties:
+                        id: { $ref: '#/components/schemas/TrackId' }
+                        name: { type: string }
+                        artist: { type: [string, 'null'] }
+                        plays: { type: integer }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500': { $ref: '#/components/responses/ServerError' }
+
+  /api/home:
+    get:
+      tags: [History]
+      operationId: getHome
+      summary: Home-screen rows ranked from the history
+      description: |
+        Four rows of playlists, albums and artist pages. Rows can overlap: show
+        each item once, in the order shortcuts, jump_back_in, around_now,
+        rediscover. Held at the edge until the newest play, the local hour or
+        the local day changes.
+      parameters:
+        - $ref: '#/components/parameters/Tz'
+      responses:
+        '200':
+          description: The rows.
+          headers:
+            X-Rows-Read: { $ref: '#/components/headers/X-Rows-Read' }
+            X-Cache:
+              description: '`hit` when served from the edge cache; absent otherwise.'
+              schema: { type: string, enum: [hit] }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [tz, hour, shortcuts, jump_back_in, around_now, rediscover]
+                properties:
+                  tz: { type: string }
+                  hour: { type: integer, minimum: 0, maximum: 23, description: "Local hour the rows were ranked for." }
+                  shortcuts:
+                    type: array
+                    maxItems: 8
+                    items: { $ref: '#/components/schemas/HomeItem' }
+                  jump_back_in:
+                    type: array
+                    maxItems: 20
+                    items: { $ref: '#/components/schemas/HomeItem' }
+                  around_now:
+                    type: array
+                    maxItems: 20
+                    items: { $ref: '#/components/schemas/HomeItem' }
+                  rediscover:
+                    type: array
+                    maxItems: 20
+                    items: { $ref: '#/components/schemas/HomeItem' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500': { $ref: '#/components/responses/ServerError' }
+
+  /api/stats/on-repeat:
+    get:
+      tags: [Stats]
+      operationId: getStatOnRepeat
+      summary: Songs and albums played far more than usual in the last 14 days
+      description: Whole local days, up to the midnight that started today. Recomputed daily.
+      responses:
+        '200':
+          $ref: '#/components/responses/StatOk'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500': { $ref: '#/components/responses/ServerError' }
+        '503': { $ref: '#/components/responses/StatsPending' }
+  /api/stats/rhythm:
+    get:
+      tags: [Stats]
+      operationId: getStatRhythm
+      summary: Listening streaks and plays by hour
+      description: Data up to the start of this local week. Recomputed weekly.
+      responses:
+        '200':
+          description: The stat.
+          headers:
+            X-Stats-Source: { $ref: '#/components/headers/X-Stats-Source' }
+            X-Stats-Computed-At: { $ref: '#/components/headers/X-Stats-Computed-At' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Rhythm' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500': { $ref: '#/components/responses/ServerError' }
+        '503': { $ref: '#/components/responses/StatsPending' }
+  /api/stats/top-over-time:
+    get:
+      tags: [Stats]
+      operationId: getStatTopOverTime
+      summary: Top artists and songs per UTC quarter and year
+      description: Primary artist only. Data up to the start of this local week. Recomputed weekly.
+      responses:
+        '200':
+          description: The stat.
+          headers:
+            X-Stats-Source: { $ref: '#/components/headers/X-Stats-Source' }
+            X-Stats-Computed-At: { $ref: '#/components/headers/X-Stats-Computed-At' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TopOverTime' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500': { $ref: '#/components/responses/ServerError' }
+        '503': { $ref: '#/components/responses/StatsPending' }
+  /api/stats/eras:
+    get:
+      tags: [Stats]
+      operationId: getStatEras
+      summary: How the artist mix changed between the last two eras
+      description: Whole UTC months, up to the start of this one. Recomputed monthly.
+      responses:
+        '200':
+          description: The stat.
+          headers:
+            X-Stats-Source: { $ref: '#/components/headers/X-Stats-Source' }
+            X-Stats-Computed-At: { $ref: '#/components/headers/X-Stats-Computed-At' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Drift' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500': { $ref: '#/components/responses/ServerError' }
+        '503': { $ref: '#/components/responses/StatsPending' }
+  /api/stats/albums:
+    get:
+      tags: [Stats]
+      operationId: getStatAlbums
+      summary: Most-played albums, all time and per UTC year
+      description: Only albums with at least `min_songs` different songs played. Data up to the start of this local week.
+      responses:
+        '200':
+          description: The stat.
+          headers:
+            X-Stats-Source: { $ref: '#/components/headers/X-Stats-Source' }
+            X-Stats-Computed-At: { $ref: '#/components/headers/X-Stats-Computed-At' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TopAlbums' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500': { $ref: '#/components/responses/ServerError' }
+        '503': { $ref: '#/components/responses/StatsPending' }
+
+  /api/wrapped:
+    get:
+      tags: [Wrapped]
+      operationId: getWrapped
+      summary: A Wrapped-style summary of a closed date range
+      description: |
+        `to` must be before today. Days are local to the era each play fell in.
+        An admin token computes any range. A read token gets a range already
+        computed, or computes a preset from /api/wrapped/ranges, and `403`
+        otherwise. The first request for a range computes it (a few seconds); a
+        concurrent one gets `503` with `Retry-After`.
+      parameters:
+        - name: from
+          in: query
+          required: true
+          schema: { $ref: '#/components/schemas/LocalDate' }
+        - name: to
+          in: query
+          required: true
+          schema: { $ref: '#/components/schemas/LocalDate' }
+      responses:
+        '200':
+          description: The summary.
+          headers:
+            X-Stats-Source: { $ref: '#/components/headers/X-Stats-Source' }
+            X-Stats-Computed-At: { $ref: '#/components/headers/X-Stats-Computed-At' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Wrapped' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: A read token asked for a range that is neither a preset nor already computed.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '500': { $ref: '#/components/responses/ServerError' }
+        '503': { $ref: '#/components/responses/StatsPending' }
+
+  /api/wrapped/ranges:
+    get:
+      tags: [Wrapped]
+      operationId: getWrappedRanges
+      summary: The preset ranges a read token may compute
+      description: This year up to the last full local week, then each earlier year with plays (at most 30), newest first.
+      responses:
+        '200':
+          description: The presets.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ranges]
+                properties:
+                  ranges:
+                    type: array
+                    items:
+                      type: object
+                      required: [from, to, label, kind, computed]
+                      properties:
+                        from: { $ref: '#/components/schemas/LocalDate' }
+                        to: { $ref: '#/components/schemas/LocalDate' }
+                        label: { type: string, examples: ['2026 so far', '2025'] }
+                        kind: { type: string, enum: [year, year_to_date] }
+                        computed: { type: boolean, description: "Whether a body is already stored." }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500': { $ref: '#/components/responses/ServerError' }
+
+  /api/concerts:
+    get:
+      tags: [Concerts]
+      operationId: getConcerts
+      summary: Upcoming Ticketmaster events for the most-played artists
+      description: Soonest first; events with no date last.
+      parameters:
+        - name: region
+          in: query
+          description: One of the configured region keys (see `regions` in the response).
+          schema: { type: string }
+        - name: since
+          in: query
+          description: Only events first seen on or after this local date.
+          schema: { $ref: '#/components/schemas/LocalDate' }
+        - name: tz
+          in: query
+          description: IANA zone for `since`. Only read (and validated) when `since` is given.
+          schema: { type: string, default: UTC }
+      responses:
+        '200':
+          description: The events.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [regions, checked, concerts]
+                properties:
+                  regions:
+                    type: array
+                    items:
+                      type: object
+                      required: [key, label]
+                      properties:
+                        key: { type: string }
+                        label: { type: string }
+                  checked:
+                    description: When each region was last checked, keyed by region. A region never checked is absent.
+                    type: object
+                    additionalProperties: { type: string, format: date-time }
+                  concerts:
+                    type: array
+                    items: { $ref: '#/components/schemas/Concert' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500': { $ref: '#/components/responses/ServerError' }
+
+  /api/now-playing:
+    get:
+      tags: [Live]
+      operationId: getNowPlaying
+      summary: What Spotify is playing now
+      responses:
+        '200':
+          description: Spotify's currently-playing payload, unmodified.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [item]
+                properties:
+                  item:
+                    description: Spotify's `GET /me/player/currently-playing` body, or null when nothing is playing.
+                    oneOf:
+                      - $ref: '#/components/schemas/SpotifyPayload'
+                      - type: 'null'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/SpotifyRateLimited' }
+        '500': { $ref: '#/components/responses/ServerError' }
+        '502': { $ref: '#/components/responses/SpotifyFailed' }
+        '503': { $ref: '#/components/responses/NeedsReauth' }
+
+  /api/recently-played:
+    get:
+      tags: [Live]
+      operationId: getRecentlyPlayed
+      summary: Spotify's recently-played, newest first
+      description: Includes plays not yet stored. Passed through unmodified.
+      parameters:
+        - name: limit
+          in: query
+          description: 1 to 50. Anything else silently becomes 1, not a `400`.
+          schema: { type: integer, minimum: 1, maximum: 50, default: 1 }
+      responses:
+        '200':
+          description: Spotify's `GET /me/player/recently-played` body (a cursor paging object of play history).
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/SpotifyPayload'
+                  - type: 'null'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/SpotifyRateLimited' }
+        '500': { $ref: '#/components/responses/ServerError' }
+        '502': { $ref: '#/components/responses/SpotifyFailed' }
+        '503': { $ref: '#/components/responses/NeedsReauth' }
+
+  /api/top:
+    get:
+      tags: [Live]
+      operationId: getSpotifyTop
+      summary: Spotify's own top tracks and artists
+      description: |
+        Passed through, except that each top track's `album` is relabelled with
+        the edition actually played most, when the warehouse knows one.
+        Invalid `range` or `limit` silently fall back to their defaults.
+      parameters:
+        - name: range
+          in: query
+          schema: { type: string, enum: [short_term, medium_term, long_term], default: long_term }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 50, default: 12 }
+        - name: type
+          in: query
+          description: Fetch only one list; the other is null. Any other value fetches both.
+          schema: { type: string, enum: [tracks, artists] }
+      responses:
+        '200':
+          description: The lists.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [range, limit, tracks, artists]
+                properties:
+                  range: { type: string, enum: [short_term, medium_term, long_term] }
+                  limit: { type: integer }
+                  tracks:
+                    description: Spotify's `GET /me/top/tracks` paging object, or null.
+                    oneOf:
+                      - $ref: '#/components/schemas/SpotifyPayload'
+                      - type: 'null'
+                  artists:
+                    description: Spotify's `GET /me/top/artists` paging object, or null.
+                    oneOf:
+                      - $ref: '#/components/schemas/SpotifyPayload'
+                      - type: 'null'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/SpotifyRateLimited' }
+        '500': { $ref: '#/components/responses/ServerError' }
+        '502': { $ref: '#/components/responses/SpotifyFailed' }
+        '503': { $ref: '#/components/responses/NeedsReauth' }
+
+  /auth/login:
+    get:
+      tags: [Sign-in]
+      operationId: signInStart
+      summary: Start a sign-in with Spotify
+      description: |
+        Open in a browser. Redirects to Spotify's consent page (no scopes);
+        Spotify then redirects to `/auth/callback`, which checks the Spotify
+        account is the warehouse's owner.
+
+        **With `return_to`** (an app, PKCE S256 required): `/auth/callback`
+        redirects (`302`) to `return_to` with `?code=<one-time code>` on
+        success, or `?error=` with `access_denied` (or Spotify's own error),
+        `unavailable` or `not_owner`. The code is valid for 60 seconds; exchange
+        it at `POST /auth/token`. `return_to` must be on an origin in
+        `CORS_ORIGINS` (a `*` entry does not count), `http://127.0.0.1` or
+        `http://[::1]` on any port, or a custom scheme in `SIGN_IN_SCHEMES`.
+
+        **Without `return_to`**: `/auth/callback` shows an HTML page with a
+        read token, once. Failures there are HTML pages too (`400`, `403`,
+        `502`, `503`).
+
+        The sign-in must finish within 10 minutes. Tokens minted by sign-in
+        are always `read` and expire after 90 days.
+      security: []
+      parameters:
+        - name: name
+          in: query
+          required: true
+          description: Device name for the token, 1 to 64 characters after trimming.
+          schema: { type: string, minLength: 1, maxLength: 64 }
+        - name: return_to
+          in: query
+          description: Absolute URL to send the one-time code to. Its fragment is dropped.
+          schema: { type: string, format: uri }
+        - name: code_challenge
+          in: query
+          description: Required with `return_to`. Base64url SHA-256 of the code verifier, 43 characters.
+          schema: { type: string, pattern: '^[A-Za-z0-9_-]{43}$' }
+        - name: code_challenge_method
+          in: query
+          schema: { type: string, enum: [S256], default: S256 }
+      responses:
+        '302':
+          description: Redirect to Spotify's consent page.
+          headers:
+            Location:
+              schema: { type: string, format: uri }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '429':
+          description: Too many sign-ins in progress (50).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '500': { $ref: '#/components/responses/ServerError' }
+
+  /auth/token:
+    post:
+      tags: [Sign-in]
+      operationId: signInExchange
+      summary: Exchange a one-time sign-in code for a read token
+      description: |
+        A web app must send this from the `return_to` page's origin (the
+        `Origin` header is checked); a loopback or custom-scheme app needs no
+        Origin. The code is spent by the first attempt. Every failed check is
+        the same `400 { "error": "invalid_grant" }`.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code, code_verifier]
+              properties:
+                code: { type: string }
+                code_verifier:
+                  type: string
+                  pattern: '^[A-Za-z0-9._~-]{43,128}$'
+      responses:
+        '200':
+          description: The new token. It is shown only this once.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MintedToken' }
+        '400':
+          description: |
+            `invalid_grant` for a wrong, used or expired code, wrong origin or
+            wrong verifier; otherwise a message about a malformed body.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              examples:
+                invalidGrant:
+                  value: { error: invalid_grant }
+        '500': { $ref: '#/components/responses/ServerError' }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: |
+        `ADMIN_TOKEN` or an admin device token (access `admin`), or
+        `READ_TOKEN` or a read device token (access `read`). Device tokens
+        start with `mw_`. A read token reaches `/api/*` only.
+
+  parameters:
+    Tz:
+      name: tz
+      in: query
+      description: IANA timezone for local days.
+      schema: { type: string, default: UTC, examples: [Europe/London] }
+    From:
+      name: from
+      in: query
+      description: First local day. Defaults to 29 days before today in `tz`.
+      schema: { $ref: '#/components/schemas/LocalDate' }
+    To:
+      name: to
+      in: query
+      description: Last local day, inclusive. Defaults to today in `tz`.
+      schema: { $ref: '#/components/schemas/LocalDate' }
+    Limit500:
+      name: limit
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 500, default: 50 }
+    Q:
+      name: q
+      in: query
+      description: Only plays whose track, album or any artist name contains this.
+      schema: { type: string, maxLength: 200 }
+    TrackIdFilter:
+      name: track_id
+      in: query
+      description: Only plays of this song, every edition folded as /api/track folds them.
+      schema: { type: string, maxLength: 200 }
+    ArtistIdFilter:
+      name: artist_id
+      in: query
+      description: Only plays with this primary artist, as /api/artist credits them.
+      schema: { type: string, maxLength: 200 }
+    ArtistNameFilter:
+      name: artist_name
+      in: query
+      description: The artist by name, for one with no id (/api/search gives `id` null).
+      schema: { type: string, maxLength: 200 }
+
+  headers:
+    X-Rows-Read:
+      description: D1 rows read to answer.
+      schema: { type: integer }
+    X-Rollup:
+      description: '`1` when the counts came from the play-count rollup; absent otherwise.'
+      schema: { type: string, enum: ['1'] }
+    X-Stats-Source:
+      description: Where the cached body came from.
+      schema: { type: string, enum: [edge, snapshot, stale, computed] }
+    X-Stats-Computed-At:
+      description: When the body was computed.
+      schema: { type: string, format: date-time }
+    Retry-After:
+      description: Seconds to wait before retrying.
+      schema: { type: integer }
+
+  responses:
+    BadRequest:
+      description: A bad parameter; the message says which.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Unauthorized:
+      description: Missing or unknown token, or a read token on a route it cannot reach.
+      headers:
+        WWW-Authenticate:
+          schema: { type: string, const: Bearer }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { error: Unauthorized }
+    ServerError:
+      description: '`Internal error`, or `Worker misconfigured: ...` for a bad deployment setting.'
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    StatsPending:
+      description: The body has never been computed and another request is computing it (or backing off from a failed compute).
+      headers:
+        Retry-After: { $ref: '#/components/headers/Retry-After' }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { error: Stats are being computed; try again shortly. }
+    StatOk:
+      description: The stat.
+      headers:
+        X-Stats-Source: { $ref: '#/components/headers/X-Stats-Source' }
+        X-Stats-Computed-At: { $ref: '#/components/headers/X-Stats-Computed-At' }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/OnRepeat' }
+    NeedsReauth:
+      description: The stored Spotify grant has lapsed; only the owner re-authorizing fixes it.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/NeedsReauthError' }
+    SpotifyRateLimited:
+      description: Spotify rate limit (`rate_limited`) or daily quota (`quota_exceeded`).
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/SpotifyUpstreamError' }
+    SpotifyFailed:
+      description: Any other Spotify failure (`unauthorized`, `forbidden`, `invalid_grant`, `http`, `network`).
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/SpotifyUpstreamError' }
+
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error: { type: string }
+    NeedsReauthError:
+      type: object
+      required: [error, needs_reauth]
+      properties:
+        error: { type: string, const: Spotify connection needs re-authorization. }
+        needs_reauth: { type: boolean, const: true }
+    SpotifyUpstreamError:
+      type: object
+      required: [error, retry_after_seconds]
+      properties:
+        error:
+          type: string
+          description: '`Spotify upstream: <kind>`.'
+          examples: ['Spotify upstream: rate_limited']
+        retry_after_seconds:
+          description: From Spotify's Retry-After, when it sent one.
+          type: [number, 'null']
+
+    LocalDate:
+      type: string
+      pattern: '^\d{4}-\d{2}-\d{2}$'
+      description: A local calendar day, `YYYY-MM-DD`.
+      examples: ['2026-10-15']
+    Month:
+      type: string
+      pattern: '^\d{4}-\d{2}$'
+      description: '`YYYY-MM`.'
+    TrackId:
+      type: string
+      description: A Spotify track id.
+    ArtistId:
+      type: string
+      description: A Spotify artist id, or a `name:` placeholder for an artist known only from the imported export.
+    NullableUrl:
+      type: [string, 'null']
+      description: Image URL, or null when none is stored.
+
+    QueryMeta:
+      type: object
+      required: [rows_read, duration_ms]
+      properties:
+        rows_read: { type: integer }
+        duration_ms: { type: [number, 'null'] }
+    DateRangeEcho:
+      type: object
+      required: [from, to, tz]
+      properties:
+        from: { $ref: '#/components/schemas/LocalDate' }
+        to: { $ref: '#/components/schemas/LocalDate' }
+        tz: { type: string }
+    PlayFilterEcho:
+      type: object
+      description: Each filter parameter given (non-empty after trimming), echoed back.
+      properties:
+        track_id: { type: string }
+        artist_id: { type: string }
+        artist_name: { type: string }
+
+    ArtistRef:
+      type: object
+      required: [id, name]
+      properties:
+        id: { $ref: '#/components/schemas/ArtistId' }
+        name: { type: string }
+
+    Play:
+      type: object
+      description: One stored play, joined to its track, album, artists and context.
+      required:
+        - played_at_ms
+        - track_id
+        - context_uri
+        - context_type
+        - context_name
+        - source
+        - play_number
+        - first_play
+        - track_name
+        - duration_ms
+        - isrc
+        - album_name
+        - image_url
+        - artists
+        - artist_list
+      properties:
+        played_at_ms: { type: integer, description: "When the play ended, epoch-ms UTC." }
+        track_id: { $ref: '#/components/schemas/TrackId' }
+        context_uri:
+          description: The album, artist or playlist URI it was played from. Null for export plays and plays with no context.
+          type: [string, 'null']
+        context_type: { type: [string, 'null'], examples: [playlist, album, artist] }
+        context_name:
+          description: The context's name, or null when there is none or it is not known yet.
+          type: [string, 'null']
+        source:
+          type: string
+          enum: [api, export]
+          description: '`api` for polled plays, `export` for imported ones.'
+        play_number:
+          description: Which play of its song this was (editions folded). Null when the play has not been numbered.
+          type: [integer, 'null']
+        first_play:
+          description: '`play_number === 1`; null when `play_number` is.'
+          type: [boolean, 'null']
+        track_name:
+          description: Null only if the track row is missing.
+          type: [string, 'null']
+        duration_ms: { type: [integer, 'null'] }
+        isrc: { type: [string, 'null'] }
+        album_name: { type: [string, 'null'] }
+        image_url: { $ref: '#/components/schemas/NullableUrl' }
+        artists:
+          description: Every credited artist's name joined with `, `, or null when the track has no stored credits.
+          type: [string, 'null']
+        artist_list:
+          description: Every credited artist in credit order; empty when there are no stored credits.
+          type: array
+          items: { $ref: '#/components/schemas/ArtistRef' }
+
+    RankedSong:
+      type: object
+      description: A song with editions folded; `id` is its most-played edition.
+      required: [id, name, artist, plays, image]
+      properties:
+        id: { $ref: '#/components/schemas/TrackId' }
+        name: { type: string }
+        artist: { type: [string, 'null'], description: "Primary artist." }
+        plays: { type: integer }
+        image: { $ref: '#/components/schemas/NullableUrl' }
+
+    History:
+      type: object
+      required: [plays, minutes, first_played, last_played, months]
+      properties:
+        plays: { type: integer, description: "Every stored play." }
+        minutes: { type: integer, description: "Estimated minutes listened; skips under 30 s count for nothing." }
+        first_played: { type: [string, 'null'], format: date-time }
+        last_played: { type: [string, 'null'], format: date-time }
+        months:
+          description: Every month from the first play to the last in `tz`, quiet ones as 0. Empty with no plays.
+          type: array
+          items:
+            type: object
+            required: [month, plays]
+            properties:
+              month: { $ref: '#/components/schemas/Month' }
+              plays: { type: integer }
+
+    HomeItem:
+      type: object
+      required: [uri, type, name, image, artist, sessions, last_played_ms]
+      properties:
+        uri: { type: string, examples: ['spotify:album:4aawyAB9vmqN3uQ7FjRGTy'] }
+        type: { type: string, enum: [album, playlist, artist] }
+        name:
+          description: Null when the warehouse does not know it (some playlists).
+          type: [string, 'null']
+        image:
+          description: Album art; always null for playlists and artists.
+          $ref: '#/components/schemas/NullableUrl'
+        artist:
+          description: An album's or artist page's primary artist; null for playlists.
+          type: [string, 'null']
+        sessions: { type: integer, description: "Times played from; for `rediscover`, days played on." }
+        last_played_ms: { type: integer }
+
+    # ---- /api/stats/on-repeat
+    OnRepeat:
+      type: object
+      required: [as_of, window_days, tracks, albums]
+      properties:
+        as_of: { type: string, format: date-time, description: "The data runs up to (not including) this instant." }
+        window_days: { type: integer, const: 14 }
+        tracks:
+          type: array
+          maxItems: 10
+          items:
+            type: object
+            required: [track_id, name, artists, album, image, plays, days, daily]
+            properties:
+              track_id: { $ref: '#/components/schemas/TrackId' }
+              name: { type: string }
+              artists: { type: string, description: "Every credited artist joined with `, `; empty when none." }
+              album: { type: [string, 'null'] }
+              image: { $ref: '#/components/schemas/NullableUrl' }
+              plays: { type: integer }
+              days: { type: integer }
+              daily:
+                description: Plays per day over the window, oldest first; the last is yesterday.
+                type: array
+                items: { type: integer }
+                minItems: 14
+                maxItems: 14
+        albums:
+          type: array
+          maxItems: 5
+          items:
+            type: object
+            required: [name, artist, image, tracks_on_repeat, plays]
+            properties:
+              name: { type: string }
+              artist: { type: string }
+              image: { $ref: '#/components/schemas/NullableUrl' }
+              tracks_on_repeat: { type: integer }
+              plays: { type: integer }
+
+    # ---- /api/stats/rhythm
+    Streak:
+      type: object
+      required: [days, weeks, from, to, running]
+      properties:
+        days:
+          description: Exact length; null while the streak is still running.
+          type: [integer, 'null']
+        weeks: { type: integer }
+        from: { $ref: '#/components/schemas/Month' }
+        to: { $ref: '#/components/schemas/Month' }
+        running: { type: boolean }
+    StreakSet:
+      type: object
+      required: [threshold, current_weeks, longest, top, active_share]
+      properties:
+        threshold: { type: integer, enum: [1, 10, 25], description: "Plays a day needs to count." }
+        current_weeks: { type: integer }
+        longest:
+          oneOf:
+            - $ref: '#/components/schemas/Streak'
+            - type: 'null'
+        top:
+          type: array
+          maxItems: 5
+          items: { $ref: '#/components/schemas/Streak' }
+        active_share: { type: number, description: "Share of days with at least `threshold` plays." }
+    EraRhythm:
+      type: object
+      required: [key, label, from, to, hour_share, grid, hours_available_from, grid_available_from]
+      properties:
+        key: { type: string }
+        label: { type: string }
+        from: { $ref: '#/components/schemas/Month' }
+        to:
+          description: Null while the era is still running.
+          oneOf:
+            - $ref: '#/components/schemas/Month'
+            - type: 'null'
+        hour_share:
+          description: Share of plays in each local hour 0-23; null until the era is long enough.
+          type: [array, 'null']
+          items: { type: number }
+        grid:
+          description: 7 x 24 shares, Monday first; null until the era is long enough.
+          type: [array, 'null']
+          items:
+            type: array
+            items: { type: number }
+        hours_available_from:
+          oneOf:
+            - $ref: '#/components/schemas/Month'
+            - type: 'null'
+        grid_available_from:
+          oneOf:
+            - $ref: '#/components/schemas/Month'
+            - type: 'null'
+    Rhythm:
+      type: object
+      required: [as_of, range, streaks, eras, years]
+      properties:
+        as_of: { type: string, format: date-time }
+        range:
+          type: object
+          required: [from, to]
+          properties:
+            from: { $ref: '#/components/schemas/Month' }
+            to: { $ref: '#/components/schemas/Month' }
+        streaks:
+          type: array
+          items: { $ref: '#/components/schemas/StreakSet' }
+        eras:
+          type: array
+          items: { $ref: '#/components/schemas/EraRhythm' }
+        years:
+          type: array
+          items:
+            type: object
+            required: [year, partial, streaks, eras]
+            properties:
+              year: { type: string, pattern: '^\d{4}$' }
+              partial: { type: boolean }
+              streaks:
+                type: array
+                items: { $ref: '#/components/schemas/StreakSet' }
+              eras:
+                description: Only eras covering part of the year.
+                type: array
+                items: { $ref: '#/components/schemas/EraRhythm' }
+
+    # ---- /api/stats/top-over-time
+    Period:
+      type: object
+      required: [period, partial, plays, artists, tracks]
+      properties:
+        period: { type: string, examples: ['2026-Q3', '2026'] }
+        partial: { type: boolean }
+        plays: { type: integer }
+        artists:
+          type: array
+          maxItems: 5
+          items:
+            type: object
+            required: [name, plays, share]
+            properties:
+              name: { type: string }
+              plays: { type: integer }
+              share: { type: number }
+        tracks:
+          type: array
+          maxItems: 3
+          items:
+            type: object
+            required: [track_id, name, artist, plays, image]
+            properties:
+              track_id: { $ref: '#/components/schemas/TrackId' }
+              name: { type: string }
+              artist: { type: string }
+              plays: { type: integer }
+              image: { $ref: '#/components/schemas/NullableUrl' }
+    TopOverTime:
+      type: object
+      required: [as_of, attribution, quarters, years, leaders]
+      properties:
+        as_of: { type: string, format: date-time }
+        attribution: { type: string, const: primary-artist }
+        quarters:
+          type: array
+          items: { $ref: '#/components/schemas/Period' }
+        years:
+          type: array
+          items: { $ref: '#/components/schemas/Period' }
+        leaders:
+          description: The most-played artists overall, ordered by peak quarter.
+          type: array
+          maxItems: 7
+          items:
+            type: object
+            required: [name, plays, share]
+            properties:
+              name: { type: string }
+              plays: { type: integer }
+              share:
+                description: Share of each quarter's plays, aligned with `quarters`.
+                type: array
+                items: { type: number }
+
+    # ---- /api/stats/eras
+    ArtistShare:
+      type: object
+      required: [artist, share]
+      properties:
+        artist: { type: string }
+        share: { type: number }
+    ArtistShift:
+      type: object
+      required: [artist, before, after]
+      properties:
+        artist: { type: string }
+        before: { type: number }
+        after: { type: number }
+    EraName:
+      type: object
+      required: [key, label]
+      properties:
+        key: { type: string }
+        label: { type: string }
+    MonthRange:
+      type: object
+      required: [from, to]
+      properties:
+        from: { $ref: '#/components/schemas/Month' }
+        to: { $ref: '#/components/schemas/Month' }
+    Drift:
+      type: object
+      required: [as_of, latest_era, previous_era, move_month, window_months, latest, before, ready, summary, top, risers, fallers]
+      properties:
+        as_of: { type: string, format: date-time }
+        latest_era:
+          description: Null with a single era.
+          oneOf:
+            - $ref: '#/components/schemas/EraName'
+            - type: 'null'
+        previous_era:
+          oneOf:
+            - $ref: '#/components/schemas/EraName'
+            - type: 'null'
+        move_month:
+          description: The UTC month the latest era began.
+          oneOf:
+            - $ref: '#/components/schemas/Month'
+            - type: 'null'
+        window_months: { type: integer, description: "Complete months on each side; 0 until the first ends." }
+        latest:
+          oneOf:
+            - $ref: '#/components/schemas/MonthRange'
+            - type: 'null'
+        before:
+          oneOf:
+            - $ref: '#/components/schemas/MonthRange'
+            - type: 'null'
+        ready: { type: boolean }
+        summary:
+          description: Null until `ready`.
+          oneOf:
+            - type: 'null'
+            - type: object
+              required: [known_artist_share, new_artists, artists, change, typical_change]
+              properties:
+                known_artist_share: { type: number }
+                new_artists: { type: integer }
+                artists: { type: integer }
+                change: { type: number, description: "Total variation distance between the two artist mixes." }
+                typical_change:
+                  type: object
+                  required: [median, min, max, windows, exceeded_by]
+                  properties:
+                    median: { type: number }
+                    min: { type: number }
+                    max: { type: number }
+                    windows: { type: integer }
+                    exceeded_by: { type: integer }
+        top:
+          type: object
+          required: [earlier, before, latest]
+          properties:
+            earlier:
+              description: All history before the latest era began.
+              type: array
+              items: { $ref: '#/components/schemas/ArtistShare' }
+            before:
+              type: array
+              items: { $ref: '#/components/schemas/ArtistShare' }
+            latest:
+              type: array
+              items: { $ref: '#/components/schemas/ArtistShare' }
+        risers:
+          type: array
+          maxItems: 8
+          items: { $ref: '#/components/schemas/ArtistShift' }
+        fallers:
+          type: array
+          maxItems: 8
+          items: { $ref: '#/components/schemas/ArtistShift' }
+
+    # ---- /api/stats/albums
+    TopAlbum:
+      type: object
+      required: [name, artist, image, plays, songs, from, to]
+      properties:
+        name: { type: string }
+        artist: { type: string }
+        image: { $ref: '#/components/schemas/NullableUrl' }
+        plays: { type: integer }
+        songs: { type: integer }
+        from: { $ref: '#/components/schemas/Month' }
+        to: { $ref: '#/components/schemas/Month' }
+    TopAlbums:
+      type: object
+      required: [as_of, min_songs, albums, years]
+      properties:
+        as_of: { type: string, format: date-time }
+        min_songs: { type: integer }
+        albums:
+          type: array
+          maxItems: 10
+          items: { $ref: '#/components/schemas/TopAlbum' }
+        years:
+          type: array
+          items:
+            type: object
+            required: [year, partial, albums]
+            properties:
+              year: { type: string, pattern: '^\d{4}$' }
+              partial: { type: boolean }
+              albums:
+                type: array
+                maxItems: 10
+                items: { $ref: '#/components/schemas/TopAlbum' }
+
+    # ---- /api/wrapped
+    WrappedArtist:
+      type: object
+      required: [id, name, minutes, plays, share, days, longest_run_days, top_song, top_song_id, image]
+      properties:
+        id: { $ref: '#/components/schemas/ArtistId' }
+        name: { type: string }
+        minutes: { type: integer }
+        plays: { type: integer }
+        share: { type: number, description: "Share of all minutes in the range." }
+        days: { type: integer }
+        longest_run_days: { type: integer }
+        top_song: { type: [string, 'null'] }
+        top_song_id: { type: [string, 'null'] }
+        image: { $ref: '#/components/schemas/NullableUrl' }
+    WrappedSong:
+      type: object
+      required: [track_id, name, artist, artist_id, album, image, plays, minutes, peak_month, first_played]
+      properties:
+        track_id: { $ref: '#/components/schemas/TrackId' }
+        name: { type: string }
+        artist: { type: string }
+        artist_id: { $ref: '#/components/schemas/ArtistId' }
+        album: { type: [string, 'null'] }
+        image: { $ref: '#/components/schemas/NullableUrl' }
+        plays: { type: integer }
+        minutes: { type: integer }
+        peak_month: { $ref: '#/components/schemas/Month' }
+        first_played: { $ref: '#/components/schemas/LocalDate' }
+    WrappedAlbum:
+      type: object
+      required: [name, artist, artist_id, image, plays, minutes, songs]
+      properties:
+        name: { type: string }
+        artist: { type: string }
+        artist_id: { $ref: '#/components/schemas/ArtistId' }
+        image: { $ref: '#/components/schemas/NullableUrl' }
+        plays: { type: integer }
+        minutes: { type: integer }
+        songs: { type: integer }
+    WrappedMonth:
+      type: object
+      required: [month, minutes, top_artist, top_artist_id, top_song, top_song_id, image]
+      properties:
+        month: { $ref: '#/components/schemas/Month' }
+        minutes: { type: integer }
+        top_artist: { type: [string, 'null'] }
+        top_artist_id: { type: [string, 'null'] }
+        top_song: { type: [string, 'null'] }
+        top_song_id: { type: [string, 'null'] }
+        image: { $ref: '#/components/schemas/NullableUrl' }
+    Wrapped:
+      type: object
+      required:
+        - range
+        - computed_at
+        - totals
+        - biggest_day
+        - hours
+        - weekdays
+        - top_artists
+        - top_songs
+        - top_albums
+        - months
+        - discoveries
+        - listening_age
+        - streak
+      properties:
+        range:
+          type: object
+          required: [from, to, days]
+          properties:
+            from: { $ref: '#/components/schemas/LocalDate' }
+            to: { $ref: '#/components/schemas/LocalDate' }
+            days: { type: integer }
+        computed_at: { type: string, format: date-time }
+        totals:
+          type: object
+          required: [minutes, plays, skips, days_listened, artists, songs]
+          properties:
+            minutes: { type: integer }
+            plays: { type: integer }
+            skips: { type: integer }
+            days_listened: { type: integer }
+            artists: { type: integer }
+            songs: { type: integer }
+        biggest_day:
+          oneOf:
+            - type: 'null'
+            - type: object
+              required: [date, minutes]
+              properties:
+                date: { $ref: '#/components/schemas/LocalDate' }
+                minutes: { type: integer }
+        hours:
+          description: Minutes in each local hour, 0-23.
+          type: array
+          items: { type: integer }
+          minItems: 24
+          maxItems: 24
+        weekdays:
+          description: Minutes on each weekday, Monday first.
+          type: array
+          items: { type: integer }
+          minItems: 7
+          maxItems: 7
+        top_artists:
+          type: array
+          maxItems: 5
+          items: { $ref: '#/components/schemas/WrappedArtist' }
+        top_songs:
+          type: array
+          maxItems: 5
+          items: { $ref: '#/components/schemas/WrappedSong' }
+        top_albums:
+          type: array
+          maxItems: 5
+          items: { $ref: '#/components/schemas/WrappedAlbum' }
+        months:
+          type: array
+          items: { $ref: '#/components/schemas/WrappedMonth' }
+        discoveries:
+          type: object
+          required: [artists, songs, share, top]
+          properties:
+            artists: { type: integer, description: "Artists first played ever inside the range." }
+            songs: { type: integer }
+            share: { type: number }
+            top:
+              type: array
+              maxItems: 3
+              items:
+                type: object
+                required: [id, name, minutes, image]
+                properties:
+                  id: { $ref: '#/components/schemas/ArtistId' }
+                  name: { type: string }
+                  minutes: { type: integer }
+                  image: { $ref: '#/components/schemas/NullableUrl' }
+        listening_age:
+          description: Null when under half the minutes have a known release year.
+          oneOf:
+            - type: 'null'
+            - type: object
+              required: [age, median_year, window, coverage, decades]
+              properties:
+                age: { type: integer }
+                median_year: { type: integer }
+                window:
+                  description: First and last release year of the five-year window with the most minutes.
+                  type: array
+                  items: { type: integer }
+                  minItems: 2
+                  maxItems: 2
+                coverage: { type: number }
+                decades:
+                  type: array
+                  items:
+                    type: object
+                    required: [decade, share]
+                    properties:
+                      decade: { type: integer }
+                      share: { type: number }
+        streak:
+          description: Longest run of consecutive days listened in the range.
+          oneOf:
+            - type: 'null'
+            - type: object
+              required: [days, from, to]
+              properties:
+                days: { type: integer }
+                from: { $ref: '#/components/schemas/LocalDate' }
+                to: { $ref: '#/components/schemas/LocalDate' }
+
+    # ---- /api/concerts
+    Concert:
+      type: object
+      required: [region, date, time, artists, artist_list, name, venue, city, status, url, first_seen]
+      properties:
+        region: { type: string }
+        date:
+          oneOf:
+            - $ref: '#/components/schemas/LocalDate'
+            - type: 'null'
+        time: { type: [string, 'null'], examples: ['20:00'] }
+        artists: { type: string, description: "Billed artists joined with `, `." }
+        artist_list:
+          description: |
+            The billed artists with ids for /api/artist; `id` is null for a
+            Ticketmaster name the warehouse does not match. Null on a row the
+            daily check has not rewritten since this field was added.
+          type: [array, 'null']
+          items:
+            type: object
+            required: [id, name]
+            properties:
+              id: { type: [string, 'null'] }
+              name: { type: string }
+        name: { type: string }
+        venue: { type: [string, 'null'] }
+        city: { type: [string, 'null'] }
+        status: { type: [string, 'null'], examples: [onsale] }
+        url: { type: [string, 'null'] }
+        first_seen: { type: string, format: date-time }
+
+    # ---- live
+    SpotifyPayload:
+      type: object
+      description: A Spotify Web API response body, passed through. See Spotify's docs for its shape.
+      additionalProperties: true
+
+    # ---- sign-in
+    MintedToken:
+      type: object
+      required: [id, token, name, access, expires_ms]
+      properties:
+        id: { type: string, description: "Public handle for listing and revoking, `tok_...`." }
+        token: { type: string, description: 'The bearer token, `mw_...`. Shown only once.' }
+        name: { type: string }
+        access: { type: string, const: read }
+        expires_ms: { type: integer, description: "Epoch-ms; 90 days after minting." }
