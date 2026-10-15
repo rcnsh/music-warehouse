@@ -591,7 +591,7 @@ These read only D1, so they keep working when the Spotify grant has lapsed.
 | `before` | none | The previous page's `next_before`, to page; or an epoch-ms, for plays strictly before that millisecond. |
 | `after` | none | Only plays after this epoch-ms. |
 | `q` | none | Only plays whose track, album or any artist name contains this, ignoring case and accents (at most 200 characters). Pages with `before` like the unfiltered list, and the response echoes `q`. |
-| `track_id` | none | Only plays of this song: every edition, folded as `/api/track` folds them (same title and primary artist). Any edition's id works. |
+| `track_id` | none | Only plays of this song: every edition, folded as `/api/track` folds them (same title less any remaster, "single version" or "radio edit" tag, and same primary artist). Any edition's id works. |
 | `artist_id` | none | Only plays credited to this artist as `/api/artist` credits them: primary artist only, export `name:` placeholders with the same name included. |
 | `artist_name` | none | The artist by name, as `/api/artist`'s `name`: a fallback for an artist the warehouse has no id for (`/api/search` gives `id: null`). |
 
@@ -693,8 +693,11 @@ lists every credited artist. A bad parameter is a `400` before anything
 streams. It reads about seven rows per play (the joins to names), so a whole
 history of 76k plays is about 680k rows.
 
-**`GET /api/top-artists`**: play counts per artist. Params: `from` (default 29
-days ago), `to` (default today), `tz`, `limit` (1 to 500, default 50).
+**`GET /api/top-artists`**: play counts per artist, every credited artist on
+a track getting the play. Artists are grouped by name, ignoring case, so an
+export placeholder (`name:` id) counts with the real artist; `artist_id` is
+the real id where one is known. Params: `from` (default 29 days ago), `to`
+(default today), `tz`, `limit` (1 to 500, default 50).
 
 ```json
 GET /api/top-artists?from=2026-10-01&to=2026-10-14&tz=Europe/London&limit=1
@@ -703,8 +706,9 @@ GET /api/top-artists?from=2026-10-01&to=2026-10-14&tz=Europe/London&limit=1
   "_meta": { "rows_read": 1212, "duration_ms": 3.4 } }
 ```
 
-**`GET /api/top-tracks`**: play counts per song, editions folded (same title
-and primary artist). Same params as `/api/top-artists`. Returns
+**`GET /api/top-tracks`**: play counts per song, editions folded (same title,
+less a remaster, "single version" or "radio edit" tag, and same primary
+artist). Same params as `/api/top-artists`. Returns
 `{ from, to, tz, tracks: [{ id, name, artist, plays, image }] }`; `id` is the
 most-played edition's. It has no `_meta`: the rows it read are in the
 `X-Rows-Read` header.

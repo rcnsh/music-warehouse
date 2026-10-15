@@ -2,6 +2,7 @@ import { BadRequest, json } from './api';
 import { type Era, eraAt, eraDigest, historyStartMs, loadEras, localTimeSql, startOfLocalWeek } from './eras';
 import { peekSnapshot, snapshot } from './snapshots';
 import { NAME_KEY_PREFIX } from './db';
+import { songTitle, songTitleSql } from './song-title';
 import { PRIMARY_ARTIST_PAIR_SQL, PRIMARY_ARTIST_SQL } from './stats/sql';
 import { calendarDaysInclusive, endOfLocalDayUtcMs, isRealDay, localDayKey, startOfLocalDayUtcMs } from './tz';
 import type { Access } from './auth';
@@ -246,7 +247,7 @@ export async function computeWrapped(
          )
          SELECT DISTINCT 'artist' AS kind, lower(an) AS k FROM before WHERE an IS NOT NULL
          UNION ALL
-         SELECT DISTINCT 'song', lower(name) || '|' || lower(an) FROM before WHERE an IS NOT NULL`,
+         SELECT DISTINCT 'song', ${songTitleSql('lower(name)')} || '|' || lower(an) FROM before WHERE an IS NOT NULL`,
       )
       .bind(range.fromMs),
     db.prepare(`${cte} SELECT COUNT(*) AS n FROM p WHERE NOT ${counted}`).bind(range.fromMs, range.toMs),
@@ -320,7 +321,7 @@ function summarize(
 
     if (track.artist === null) continue;
     const artistKey = track.artist.toLowerCase();
-    const songKey = `${track.name.toLowerCase()}|${artistKey}`;
+    const songKey = `${songTitle(track.name.toLowerCase())}|${artistKey}`;
 
     let song = songs.get(songKey);
     if (!song) {

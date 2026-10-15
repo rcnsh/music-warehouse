@@ -2,6 +2,7 @@ import { BadRequest, intParam, likePattern } from './api';
 import { NAME_KEY_PREFIX } from './db';
 import { respond, textParam } from './history';
 import { trigramPhrase } from './search-index';
+import { songTitle } from './song-title';
 import { PRIMARY_ARTIST_SQL } from './stats/sql';
 import type { Env } from './types';
 
@@ -111,7 +112,7 @@ export async function searchRoute(env: Env, url: URL): Promise<Response> {
   // One entry per song; the id is the most-played edition's.
   const tracks = new Map<string, { id: string; name: string; artist: string | null; plays: number; best: number }>();
   for (const row of tracksResult!.results as TrackRow[]) {
-    const key = `${row.name.toLowerCase()}|${row.artist?.toLowerCase() ?? ''}`;
+    const key = `${songTitle(row.name.toLowerCase())}|${row.artist?.toLowerCase() ?? ''}`;
     const entry = tracks.get(key);
     if (!entry) {
       tracks.set(key, { id: row.track_id, name: row.name, artist: row.artist, plays: row.plays, best: row.plays });
