@@ -1,4 +1,4 @@
-import { erasFor } from '../eras';
+import { type Era, erasFor, startOfLocalToday, startOfLocalWeek } from '../eras';
 import { snapshot } from '../snapshots';
 import type { Env } from '../types';
 import { computeDrift } from './drift';
@@ -16,19 +16,55 @@ import { computeTopOverTime } from './top';
  * on-repeat's whole local days (see repeat.ts), and nothing that changes
  * more often than daily.
  *
- * Freshness is per stat, chosen by how fast it moves and what a recompute
- * costs. The figures are D1's own rows_read, measured against the full
+ * Each stat covers data only up to a cut-off: the start of the local week
+ * (rhythm, top-over-time, albums), the start of the UTC month (eras) or local
+ * midnight (on-repeat). Between cut-offs a recompute would return the same
+ * body, so a snapshot stays fresh until the next cut-off has passed and
+ * settled. The figures are D1's own rows_read, measured against the full
  * history (75k plays); they count temporary B-trees, so they run well above
- * the row count. All five together stay near 2M rows a day however much
- * traffic arrives — see docs/design.md, "Listening stats".
+ * the row count. See docs/design.md, "Listening stats".
  */
+
+/**
+ * How long after a cut-off a stat waits before recomputing, so plays from just
+ * before it that arrive late (a missed poll, a Worker that was down for a few
+ * hours) still count. Until then the previous period's body is served.
+ *
+ * A history import is the one write this cannot see: imported plays show up
+ * at each stat's next cut-off, or sooner by bumping the key's version.
+ */
+const SETTLE_MS = 6 * 60 * 60 * 1000;
+
+/** Start of the UTC month containing `ms`, the cut-off computeDrift uses. */
+const startOfUtcMonth = (ms: number) => {
+  const d = new Date(ms);
+  return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1);
+};
+
+type Cutoff = (eras: readonly Era[], now: number) => number;
+
+interface StatDef {
+  cutoff: Cutoff;
+  compute: (db: D1Database, now: number, eras: readonly Era[]) => Promise<unknown>;
+}
+
 const STATS = {
-  'on-repeat': { freshForSeconds: 3 * 60 * 60, compute: computeOnRepeat }, // ~47k rows
-  rhythm: { freshForSeconds: 6 * 60 * 60, compute: computeRhythm }, // ~190k rows
-  'top-over-time': { freshForSeconds: 24 * 60 * 60, compute: computeTopOverTime }, // ~395k rows
-  eras: { freshForSeconds: 24 * 60 * 60, compute: computeDrift }, // ~315k rows
-  albums: { freshForSeconds: 24 * 60 * 60, compute: computeTopAlbums }, // ~270k rows
-} as const;
+  'on-repeat': { cutoff: startOfLocalToday, compute: computeOnRepeat }, // ~47k rows
+  rhythm: { cutoff: startOfLocalWeek, compute: computeRhythm }, // ~190k rows
+  'top-over-time': { cutoff: startOfLocalWeek, compute: computeTopOverTime }, // ~395k rows
+  eras: { cutoff: (_, now) => startOfUtcMonth(now), compute: computeDrift }, // ~315k rows
+  albums: { cutoff: startOfLocalWeek, compute: computeTopAlbums }, // ~270k rows
+} satisfies Record<string, StatDef>;
+
+/**
+ * Seconds a snapshot computed now-or-earlier stays fresh: anything computed
+ * after the latest settled cut-off. During the settle window that is still
+ * the previous cut-off, so the last period's body keeps serving.
+ */
+export function freshForSeconds(cutoff: Cutoff, eras: readonly Era[], now: number): number {
+  const settledSince = cutoff(eras, now - SETTLE_MS) + SETTLE_MS;
+  return Math.max(0, (now - settledSince) / 1000);
+}
 
 export type StatName = keyof typeof STATS;
 
@@ -39,10 +75,13 @@ export function isStatName(name: string): name is StatName {
 }
 
 export async function statRoute(env: Env, ctx: ExecutionContext, name: StatName): Promise<Response> {
-  const { freshForSeconds, compute } = STATS[name];
+  const { cutoff, compute }: StatDef = STATS[name];
   // The version suffix retires every cached body when a shape changes.
   const eras = erasFor(env.MOVED_AT);
-  const result = await snapshot(env.DB, ctx, `${name}:v1`, freshForSeconds, () => compute(env.DB, Date.now(), eras));
+  const now = Date.now();
+  const result = await snapshot(env.DB, ctx, `${name}:v1`, freshForSeconds(cutoff, eras, now), () =>
+    compute(env.DB, Date.now(), eras),
+  );
 
   return new Response(result.body, {
     headers: {

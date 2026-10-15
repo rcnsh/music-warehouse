@@ -1,6 +1,7 @@
 import { SELF, env } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
-import { erasFor, localTimeSql } from '../src/eras';
+import { type Era, erasFor, localTimeSql, startOfLocalToday, startOfLocalWeek } from '../src/eras';
+import { freshForSeconds } from '../src/stats';
 import { streaksFrom } from '../src/stats/rhythm';
 import { totalVariation } from '../src/stats/drift';
 import { localDayKey } from '../src/tz';
@@ -312,7 +313,9 @@ describe('snapshots', () => {
   });
 
   it('serves a stale body at once and lets only one request claim the refresh', async () => {
-    const old = Date.now() - 2 * DAY;
+    // Rhythm stays fresh until its weekly cut-off settles; eight days back is
+    // always before the latest one.
+    const old = Date.now() - 8 * DAY;
     await env.DB.prepare('INSERT INTO stats_snapshots (key, body, computed_ms) VALUES (?, ?, ?)')
       .bind('rhythm:v1', '{"stale":true}', old)
       .run();
@@ -357,5 +360,29 @@ describe('snapshots', () => {
     await stat('eras');
     const response = await SELF.fetch(`${BASE}/api/stats/eras?bust=${Math.random()}`, { headers: READ });
     expect(response.headers.get('X-Stats-Source')).toBe('edge');
+  });
+});
+
+describe('stat freshness follows each stat\'s cut-off', () => {
+  const HOUR = 3_600_000;
+  const singapore = [{ timeZone: 'Asia/Singapore', fromMs: 0 }] as unknown as readonly Era[];
+  // Monday 12 Oct 2026, 00:00 in Singapore.
+  const monday = Date.UTC(2026, 9, 11, 16);
+
+  it('keeps a weekly stat fresh until six hours after the next Monday', () => {
+    const fresh = (now: number) => freshForSeconds(startOfLocalWeek, singapore, now) * 1000;
+    // Wednesday: anything computed since Monday 06:00 is fresh.
+    const wednesday = monday + 2 * 24 * HOUR;
+    expect(wednesday - fresh(wednesday)).toBe(monday + 6 * HOUR);
+    // Next Monday 03:00, still settling: last week's cut-off still applies.
+    const nextMonday = monday + 7 * 24 * HOUR;
+    expect(nextMonday + 3 * HOUR - fresh(nextMonday + 3 * HOUR)).toBe(monday + 6 * HOUR);
+    // Next Monday 07:00: settled, so last week's body is now stale.
+    expect(nextMonday + 7 * HOUR - fresh(nextMonday + 7 * HOUR)).toBe(nextMonday + 6 * HOUR);
+  });
+
+  it('keeps a daily stat fresh until six hours after local midnight', () => {
+    const noon = monday + 12 * HOUR;
+    expect(noon - freshForSeconds(startOfLocalToday, singapore, noon) * 1000).toBe(monday + 6 * HOUR);
   });
 });

@@ -63,13 +63,13 @@ reported in whole weeks. `on-repeat` is meant to be current, so it is the
 exception: it covers complete days up to local midnight, and its per-song
 daily counts are only for songs already on repeat.
 
-| Stat | What it holds | Fresh for | D1 rows read per compute |
+| Stat | What it holds | Recomputed | D1 rows read per compute |
 |---|---|---|---|
-| `on-repeat` | Songs with 5+ plays on 3+ days in the last 14, at least twice their usual rate; albums with 4+ such songs | 3 h | ~47k |
-| `rhythm` | Daily-listening streaks (1, 10, 25 plays a day) and plays by local hour, per era, all time and per year | 6 h | ~190k |
-| `top-over-time` | Top artists and songs per quarter and year, and the seven biggest artists' share per quarter | 24 h | ~395k |
-| `eras` | Artist drift between the two eras, against the normal churn between windows of the same length | 24 h | ~315k |
-| `albums` | The ten most-played albums with at least four different songs played, all time and per year | 24 h | ~270k |
+| `on-repeat` | Songs with 5+ plays on 3+ days in the last 14, at least twice their usual rate; albums with 4+ such songs | daily | ~47k |
+| `rhythm` | Daily-listening streaks (1, 10, 25 plays a day) and plays by local hour, per era, all time and per year | weekly | ~190k |
+| `top-over-time` | Top artists and songs per quarter and year, and the seven biggest artists' share per quarter | weekly | ~395k |
+| `eras` | Artist drift between the two eras, against the normal churn between windows of the same length | monthly | ~315k |
+| `albums` | The ten most-played albums with at least four different songs played, all time and per year | weekly | ~270k |
 
 The row counts are D1's own `rows_read`, measured on about six years of
 history. They include temporary B-trees, so they run well above the number of
@@ -80,9 +80,14 @@ the Cache API for five minutes. Only a request that wins a claim computes:
 inline the first time a stat is asked for, in the background (serving the
 stale body) after that. A request that finds a claim held and nothing to serve
 gets `503` with `Retry-After`. A failed compute holds its claim for an hour, so
-an erroring query does not retry on every request. Recompute cost is set by
-the freshness window, not by traffic: all five together read about 2M rows a
-day at worst. This deployment is on Workers Paid, where D1 reads are metered
+an erroring query does not retry on every request. A stat only changes when
+its cut-off moves (local midnight, the local week, the UTC month), so a
+snapshot stays fresh until that cut-off has passed and settled for six hours,
+long enough for late polls to land; until then the previous period's body is
+served. Recompute cost is set by the calendar, not by traffic: all five
+together average under 200k rows a day. A history import is the exception:
+its plays appear at each stat's next cut-off, or sooner by bumping a key's
+version. This deployment is on Workers Paid, where D1 reads are metered
 against 25 billion a month rather than capped; the design also keeps a fork on
 the Free plan under its 5M a day. The routes take no parameters and
 the query string is never part of a cache key, so callers cannot force a
