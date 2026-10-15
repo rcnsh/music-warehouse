@@ -20,7 +20,7 @@
   "routes": [{ "pattern": "music-api.rcn.sh", "custom_domain": true }],
 
   // Poll cadence. 48 invocations/day against a 100,000/day free-plan budget.
-  // Tighten to "*/15 * * * *" if gaps ever appear (see README, gap check).
+  // Tighten to "*/15 * * * *" if gaps ever appear (see README, "Configuration").
   // Two of the free plan's five cron slots: ingestion every 30 minutes, and a
   // daily sweep that pushes to ALERT_WEBHOOK_URL when something needs a human.
   "triggers": {
