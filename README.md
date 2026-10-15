@@ -355,6 +355,25 @@ These read only D1, so they keep working when the Spotify grant has lapsed.
 | `before` | none | Only plays before this epoch-ms. Pass the last `played_at_ms` to page. |
 | `after` | none | Only plays after this epoch-ms. |
 | `q` | none | Only plays whose track, album or any artist name contains this, ignoring case and accents (at most 200 characters). Pages with `before` like the unfiltered list, and the response echoes `q`. |
+| `track_id` | none | Only plays of this song: every edition, folded as `/api/track` folds them (same title and primary artist). Any edition's id works. |
+| `artist_id` | none | Only plays credited to this artist as `/api/artist` credits them: primary artist only, export `name:` placeholders with the same name included. |
+| `artist_name` | none | The artist by name, as `/api/artist`'s `name`: a fallback for an artist the warehouse has no id for (`/api/search` gives `id: null`). |
+
+The filters combine (each narrows the last) and work with `before`, `after`
+and `limit`. Each one given is echoed at the top level of the response, as
+`q` is:
+
+```json
+GET /api/plays?artist_id=4NJhFmfw43RLBLjQvxDuRS&q=shelter&limit=1
+{ "q": "shelter", "artist_id": "4NJhFmfw43RLBLjQvxDuRS",
+  "plays": [ { "played_at_ms": 1760521802000, "track_id": "…", "track_name": "Shelter", "…": "…" } ],
+  "_meta": { "rows_read": 1507, "duration_ms": 18.4 } }
+```
+
+`track_id` and `artist_id` read about one row per track they resolve to
+(about 100 for an artist with 93 tracks), plus about one per play of the song
+or artist to fill a page: they sort that song's or artist's plays rather than
+walking everyone's.
 
 ```json
 { "plays": [ { "played_at_ms": 1760521802000, "track_id": "…", "track_name": "Shelter",
@@ -384,7 +403,18 @@ and primary artist). Same params as `/api/top-artists`. Returns
 most-played edition's.
 
 **`GET /api/daily`**: plays per local day, quiet days as `0`. Params: `from`,
-`to`, `tz`, as above.
+`to`, `tz`, as above, and `track_id`, `artist_id` and `artist_name` as on
+`/api/plays`, for one song's or one artist's daily chart. A filter given is
+echoed. Filtered, it reads about one row per play of that song or artist in
+the range rather than one per play of anything (a year of one artist: 1.9k
+rows rather than 15k).
+
+```json
+GET /api/daily?from=2026-10-01&to=2026-10-02&tz=Europe/London&track_id=…
+{ "from": "2026-10-01", "to": "2026-10-02", "tz": "Europe/London", "track_id": "…",
+  "days": [ { "day": "2026-10-01", "plays": 3 }, { "day": "2026-10-02", "plays": 0 } ],
+  "_meta": { "rows_read": 214, "duration_ms": 1.1 } }
+```
 
 ### History
 
