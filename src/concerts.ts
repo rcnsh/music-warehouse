@@ -1,5 +1,6 @@
 import { BadRequest, json, timeZoneParam } from './api';
 import { startOfLocalDayUtcMs } from './tz';
+import { NAME_KEY_PREFIX } from './db';
 import type { Env } from './types';
 
 /**
@@ -82,6 +83,12 @@ export function parseRegions(raw: string | undefined): Region[] {
   });
 }
 
+/** An artist on an event's bill: the Spotify id when it is one of ours, else null. */
+interface BilledArtist {
+  id: string | null;
+  name: string;
+}
+
 interface Attraction {
   id: string;
   name: string;
@@ -154,9 +161,18 @@ async function matchAttraction(tm: Ticketmaster, name: string): Promise<Attracti
   return body._embedded?.attractions?.find((a) => normalizeName(a.name) === wanted) ?? null;
 }
 
-async function topArtists(env: Env, now: number): Promise<Array<{ key: string; name: string }>> {
+interface TopArtist {
+  key: string;
+  name: string;
+  /** A real Spotify id when the name has one, else its `name:` placeholder, as /api/artist accepts either. */
+  id: string;
+}
+
+async function topArtists(env: Env, now: number): Promise<TopArtist[]> {
   const { results } = await env.DB.prepare(
-    `SELECT lower(a.name) AS key, max(a.name) AS name, COUNT(*) AS plays
+    `SELECT lower(a.name) AS key, max(a.name) AS name,
+            coalesce(min(CASE WHEN instr(a.artist_id, '${NAME_KEY_PREFIX}') = 1 THEN NULL ELSE a.artist_id END), min(a.artist_id)) AS id,
+            COUNT(*) AS plays
        FROM plays p
        JOIN track_artists ta ON ta.track_id = p.track_id AND ta.position = 0
        JOIN artists a ON a.artist_id = ta.artist_id
@@ -166,12 +182,12 @@ async function topArtists(env: Env, now: number): Promise<Array<{ key: string; n
       LIMIT ?`,
   )
     .bind(now - LOOKBACK_MS, TOP_ARTISTS)
-    .all<{ key: string; name: string }>();
+    .all<TopArtist>();
   return results;
 }
 
-/** Match names not yet matched, or matched too long ago; returns attraction id to artist name. */
-async function resolveArtists(env: Env, tm: Ticketmaster, artists: Array<{ key: string; name: string }>, now: number) {
+/** Match names not yet matched, or matched too long ago; returns attraction id to artist. */
+async function resolveArtists(env: Env, tm: Ticketmaster, artists: TopArtist[], now: number) {
   const { results: known } = await env.DB.prepare(
     'SELECT name_key, attraction_id, checked_ms, pinned FROM concert_artists WHERE name_key IN (SELECT value FROM json_each(?))',
   )
@@ -209,10 +225,10 @@ async function resolveArtists(env: Env, tm: Ticketmaster, artists: Array<{ key: 
   }
   if (writes.length > 0) await env.DB.batch(writes);
 
-  const attractions = new Map<string, string>();
+  const attractions = new Map<string, BilledArtist>();
   for (const artist of artists) {
     const id = byKey.get(artist.key)?.attraction_id;
-    if (id) attractions.set(id, artist.name);
+    if (id) attractions.set(id, { id: artist.id, name: artist.name });
   }
   return { attractions, lookedUp };
 }
@@ -235,22 +251,25 @@ async function fetchRegion(tm: Ticketmaster, region: Region, ids: string[]): Pro
 }
 
 /** Store a region's events, then drop the ones Ticketmaster no longer lists (past, cancelled, removed). */
-async function storeRegion(env: Env, region: string, events: TmEvent[], attractions: Map<string, string>, now: number) {
+async function storeRegion(env: Env, region: string, events: TmEvent[], attractions: Map<string, BilledArtist>, now: number) {
   const statements = events.map((event) => {
     const billed = event._embedded?.attractions ?? [];
     const ours = billed.filter((a) => attractions.has(a.id)).map((a) => attractions.get(a.id)!);
+    // Ticketmaster's own names, with no Spotify id, only when none of ours is billed.
+    const list: BilledArtist[] = ours.length > 0 ? ours : billed.map((a) => ({ id: null, name: a.name }));
     const venue = event._embedded?.venues?.[0];
     return env.DB.prepare(
-      `INSERT INTO concerts (event_id, region, artists, name, local_date, local_time, venue, city, status, url, first_seen_ms, last_seen_ms)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO concerts (event_id, region, artists, artist_list, name, local_date, local_time, venue, city, status, url, first_seen_ms, last_seen_ms)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT (event_id, region) DO UPDATE SET
-         artists = excluded.artists, name = excluded.name, local_date = excluded.local_date,
+         artists = excluded.artists, artist_list = excluded.artist_list, name = excluded.name, local_date = excluded.local_date,
          local_time = excluded.local_time, venue = excluded.venue, city = excluded.city,
          status = excluded.status, url = excluded.url, last_seen_ms = excluded.last_seen_ms`,
     ).bind(
       event.id,
       region,
-      (ours.length > 0 ? ours : billed.map((a) => a.name)).join(', '),
+      list.map((a) => a.name).join(', '),
+      JSON.stringify(list),
       event.name,
       event.dates?.start?.localDate ?? null,
       event.dates?.start?.localTime?.slice(0, 5) ?? null,
@@ -332,7 +351,7 @@ export async function concertsRoute(env: Env, url: URL): Promise<Response> {
 
   const [concerts, runs] = await env.DB.batch([
     env.DB.prepare(
-      `SELECT region, local_date AS date, local_time AS time, artists, name, venue, city, status, url, first_seen_ms
+      `SELECT region, local_date AS date, local_time AS time, artists, artist_list, name, venue, city, status, url, first_seen_ms
          FROM concerts
         WHERE (?1 IS NULL OR region = ?1) AND first_seen_ms >= ?2
           AND region IN (SELECT value FROM json_each(?3))
@@ -348,10 +367,14 @@ export async function concertsRoute(env: Env, url: URL): Promise<Response> {
   return json({
     regions: regions.map(({ key, label }) => ({ key, label })),
     checked,
-    concerts: (concerts!.results as Array<Record<string, unknown> & { first_seen_ms: number }>).map(({ first_seen_ms, ...rest }) => ({
-      ...rest,
-      first_seen: new Date(first_seen_ms).toISOString(),
-    })),
+    concerts: (concerts!.results as Array<Record<string, unknown> & { first_seen_ms: number; artist_list: string | null }>).map(
+      ({ first_seen_ms, artist_list, ...rest }) => ({
+        ...rest,
+        // Null on a row the daily check has not rewritten since the column was added.
+        artist_list: artist_list === null ? null : (JSON.parse(artist_list) as BilledArtist[]),
+        first_seen: new Date(first_seen_ms).toISOString(),
+      }),
+    ),
   });
 }
 

@@ -28,6 +28,11 @@ export interface RankedArtist {
 }
 
 export interface RankedTrack {
+  /**
+   * The song's most-played edition in the period. /api/track folds editions
+   * the same way (title and primary artist), so it opens the whole song.
+   */
+  track_id: string;
   name: string;
   artist: string;
   plays: number;
@@ -57,6 +62,7 @@ type Row = {
   k: string;
   name: string;
   artist: string | null;
+  track_id: string | null;
   plays: number;
   image: string | null;
   leader: number;
@@ -101,26 +107,29 @@ export async function computeTopOverTime(db: D1Database, now: number, eras: read
        ay_ranked AS (
          SELECT *, ROW_NUMBER() OVER (PARTITION BY y ORDER BY plays DESC, k) AS rk FROM ay
        ),
+       -- With MAX() the bare columns come from the row that holds the maximum,
+       -- so title, art and track_id are all the most-played edition's.
        songs AS (
-         SELECT 'q' AS grain, q AS period, lower(tn) || '|' || lower(an) AS k, tn AS name, an AS artist, album_id,
+         SELECT 'q' AS grain, q AS period, lower(tn) || '|' || lower(an) AS k, tn AS name, an AS artist, album_id, track_id,
                 MAX(n) AS best, SUM(n) AS plays
            FROM pt WHERE an IS NOT NULL GROUP BY q, k
          UNION ALL
-         SELECT 'y', y, lower(tn) || '|' || lower(an), tn, an, album_id, MAX(n), SUM(n)
+         SELECT 'y', y, lower(tn) || '|' || lower(an), tn, an, album_id, track_id, MAX(n), SUM(n)
            FROM pt WHERE an IS NOT NULL GROUP BY y, lower(tn) || '|' || lower(an)
        ),
        songs_ranked AS (
          SELECT *, ROW_NUMBER() OVER (PARTITION BY grain, period ORDER BY plays DESC, k) AS rk FROM songs
        )
-       SELECT 'total' AS kind, q AS period, '' AS k, '' AS name, NULL AS artist, SUM(n) AS plays, NULL AS image, 0 AS leader
+       SELECT 'total' AS kind, q AS period, '' AS k, '' AS name, NULL AS artist, NULL AS track_id, SUM(n) AS plays,
+              NULL AS image, 0 AS leader
          FROM pt GROUP BY q
        UNION ALL
-       SELECT 'artist', q, k, name, NULL, plays, NULL, k IN (SELECT k FROM leaders)
+       SELECT 'artist', q, k, name, NULL, NULL, plays, NULL, k IN (SELECT k FROM leaders)
          FROM aq_ranked WHERE rk <= ?3 OR k IN (SELECT k FROM leaders)
        UNION ALL
-       SELECT 'artist', y, k, name, NULL, plays, NULL, 0 FROM ay_ranked WHERE rk <= ?3
+       SELECT 'artist', y, k, name, NULL, NULL, plays, NULL, 0 FROM ay_ranked WHERE rk <= ?3
        UNION ALL
-       SELECT 'track', s.period, s.k, s.name, s.artist, s.plays, al.image_url, 0
+       SELECT 'track', s.period, s.k, s.name, s.artist, s.track_id, s.plays, al.image_url, 0
          FROM songs_ranked s LEFT JOIN albums al ON al.album_id = s.album_id
         WHERE s.rk <= ?4`,
     )
@@ -149,7 +158,7 @@ export async function computeTopOverTime(db: D1Database, now: number, eras: read
       const tracks = results
         .filter((row) => row.kind === 'track' && row.period === key)
         .sort((a, b) => b.plays - a.plays || a.k.localeCompare(b.k))
-        .map((row) => ({ name: row.name, artist: row.artist ?? '', plays: row.plays, image: row.image }));
+        .map((row) => ({ track_id: row.track_id!, name: row.name, artist: row.artist ?? '', plays: row.plays, image: row.image }));
       return { period: key, partial: isPartial(key), plays, artists, tracks };
     });
 

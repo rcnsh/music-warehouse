@@ -191,6 +191,29 @@ describe('rhythm', () => {
   });
 });
 
+describe('top over time', () => {
+  it('names each song by its most-played edition, which /api/track opens as the whole song', async () => {
+    // Mid-quarter, so both editions land in the same quarter and year.
+    const start = Date.UTC(2025, 4, 15, 12);
+    await seed([
+      ...session('single', start, 3, { artist: 'Porter Robinson' }),
+      ...session('album', start + 60 * 60_000, 5, { artist: 'Porter Robinson' }),
+    ]);
+    await env.DB.prepare("UPDATE tracks SET name = 'Divinity' WHERE track_id IN ('single', 'album')").run();
+
+    const body = (await (await stat('top-over-time')).json()) as {
+      quarters: Array<{ tracks: Array<{ track_id: string; name: string; plays: number }> }>;
+      years: Array<{ tracks: Array<{ track_id: string; name: string; plays: number }> }>;
+    };
+    const songs = [...body.quarters, ...body.years].flatMap((period) => period.tracks);
+    expect(songs.length).toBeGreaterThan(0);
+    for (const song of songs) expect(song).toMatchObject({ track_id: 'album', name: 'Divinity', plays: 8 });
+
+    const track = (await (await SELF.fetch(`${BASE}/api/track?id=album`, { headers: READ })).json()) as { plays: number };
+    expect(track.plays).toBe(8);
+  });
+});
+
 describe('on repeat', () => {
   it('lists a song played across several days, not one looped evening', async () => {
     const now = Date.now();

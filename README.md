@@ -394,9 +394,19 @@ walking everyone's.
 { "plays": [ { "played_at_ms": 1760521802000, "track_id": "…", "track_name": "Shelter",
                "artists": "Porter Robinson, Madeon", "album_name": "Shelter", "image_url": "https://i.scdn.co/…",
                "duration_ms": 219000, "isrc": "…", "context_uri": "spotify:playlist:…", "context_type": "playlist",
-               "context_name": "Morning Mix", "source": "api", "play_number": 96, "first_play": false } ],
+               "context_name": "Morning Mix", "source": "api", "play_number": 96, "first_play": false,
+               "artist_list": [ { "id": "3dz0NnIZhtKKeXZxLOxCam", "name": "Porter Robinson" },
+                                { "id": "5LhTec3c7dcqBvpLRWbMcf", "name": "Madeon" } ] } ],
   "_meta": { "rows_read": 50, "duration_ms": 1.2 } }
 ```
+
+`artist_list` holds every credited artist in credit order, each with its id,
+so a client can link them without splitting `artists` (which is the same
+names joined with `, `, and so can't tell "Tyler, The Creator" from two
+artists). An id may be an imported play's `name:` placeholder, which
+`/api/artist?id=` accepts. A track with no stored credits has
+`"artists": null` and `"artist_list": []`. Both come from the same read of
+the credits, so they cost no more than `artists` did alone.
 
 `source` is `api` for polled plays and `export` for imported ones.
 
@@ -531,7 +541,7 @@ rows and no date finer than a month. No parameters.
 |---|---|
 | `on-repeat` | Songs and albums you're playing far more than usual, over the last 14 days. |
 | `rhythm` | Listening streaks and plays by hour. |
-| `top-over-time` | Top artists and songs per quarter and year. |
+| `top-over-time` | Top artists and songs per quarter and year. Each song has a `track_id`: its most-played edition in that period, which `/api/track` opens as the whole song. |
 | `eras` | How your artists changed between the two eras. |
 | `albums` | Most-played albums, all time and per year. |
 
@@ -548,6 +558,26 @@ artist and song, discoveries, and a listening age. The first request for a
 range takes a few seconds; a concurrent one gets `503` with `Retry-After`.
 `ADMIN_TOKEN` can wrap any range; `READ_TOKEN` gets `403` for a range that is
 neither a preset nor already computed.
+
+Songs and artists carry ids for `/api/track` and `/api/artist`. A song's
+`track_id` is its most-listened edition, which `/api/track` folds back into
+the whole song. An artist's id is a real Spotify id when any of its plays has
+one, else the import's `name:` placeholder.
+
+| Field | Id fields added |
+|---|---|
+| `top_artists[]` | `id`, `top_song_id` |
+| `top_songs[]` | `track_id`, `artist_id` |
+| `top_albums[]` | `artist_id` |
+| `months[]` | `top_artist_id`, `top_song_id` (null when `top_artist`/`top_song` is) |
+| `discoveries.top[]` | `id` |
+
+```json
+{ "top_songs": [ { "track_id": "6PCUP3dWmTjcTtXY02oFdT", "name": "Castle on the Hill", "artist": "Ed Sheeran",
+                   "artist_id": "6eUKZXaKkcviH0Ku9w2n3V", "album": "÷", "plays": 149, "…": "…" } ],
+  "months": [ { "month": "2025-01", "minutes": 2210, "top_artist": "Ed Sheeran", "top_artist_id": "6eUKZXaKkcviH0Ku9w2n3V",
+                "top_song": "Castle on the Hill", "top_song_id": "6PCUP3dWmTjcTtXY02oFdT", "image": "https://i.scdn.co/…" } ] }
+```
 
 **`GET /api/wrapped/ranges`**: the presets, newest first: each year with plays,
 and this year up to the last full week.
@@ -580,9 +610,17 @@ Regions come from `CONCERT_REGIONS`, a JSON list of up to five. Each has a
 { "regions": [ { "key": "uk", "label": "United Kingdom" }, { "key": "nyc", "label": "New York" } ],
   "checked": { "uk": "2026-10-15T01:23:04.000Z", "nyc": "2026-10-15T01:23:05.000Z" },
   "concerts": [ { "region": "nyc", "date": "2027-02-12", "time": "20:00", "artists": "Maroon 5",
+                  "artist_list": [ { "id": "04gDigrS5kc9YWfZHwBETP", "name": "Maroon 5" } ],
                   "name": "Maroon 5 2027 Tour", "venue": "Madison Square Garden", "city": "New York",
                   "status": "onsale", "url": "https://www.ticketmaster.com/…", "first_seen": "2026-10-15T01:23:04.000Z" } ] }
 ```
+
+`artists` names the billed artists you play, joined with `, `; `artist_list`
+holds the same artists one by one with their ids for `/api/artist` (a real
+Spotify id where one is stored, else the import's `name:` placeholder). When
+the bill Ticketmaster returns names none of your matched artists, both list
+Ticketmaster's names instead, with `"id": null`. `artist_list` is `null` on a row stored
+before migration 0015 until the next daily check rewrites it.
 
 A daily cron (01:23 UTC) refreshes it; `POST /admin/concert-check` runs it
 now. Each artist is matched to a Ticketmaster attraction by exact name

@@ -75,12 +75,23 @@ export function isStatName(name: string): name is StatName {
 }
 
 /**
- * The snapshot key for a stat. The version retires bodies when a shape changes
- * (eras moved to generic field names in v2); the era digest retires bodies cut
- * on eras that have since been reconfigured.
+ * Each stat's body version. Bumping one retires its cached bodies when its
+ * shape changes: eras moved to generic field names in v2, and top-over-time's
+ * songs gained `track_id` in v2.
  */
-export const statKey = (name: StatName, eras: readonly Era[]) =>
-  `${name}:${name === 'eras' ? 'v2' : 'v1'}:${eraDigest(eras)}`;
+const STAT_VERSIONS: Record<StatName, string> = {
+  'on-repeat': 'v1',
+  rhythm: 'v1',
+  'top-over-time': 'v2',
+  eras: 'v2',
+  albums: 'v1',
+};
+
+/**
+ * The snapshot key for a stat. The era digest retires bodies cut on eras that
+ * have since been reconfigured.
+ */
+export const statKey = (name: StatName, eras: readonly Era[]) => `${name}:${STAT_VERSIONS[name]}:${eraDigest(eras)}`;
 
 export async function statRoute(env: Env, ctx: ExecutionContext, name: StatName): Promise<Response> {
   const { cutoff, compute }: StatDef = STATS[name];
