@@ -185,9 +185,12 @@ folded (411 to 6.4k even per track id), against about 100 for the page. So
 the tracks it wrote, renumbers whole any song a key change touched (the old
 key waits in `previous` until then), and numbers its own plays from the last
 correct number before the earliest of them, which for a poll is one index seek
-per song. The daily cron rekeys every track (about 31k rows read, writing
-nothing unless a key changed) for changes no write names, such as the artist
-reconcile repointing a credit. Nothing deletes plays, so numbers only ever
+per song. The daily cron rekeys, and re-indexes for search, the tracks marked
+in `track_changes` since its last run (migration 0017: triggers mark a track
+when it is stored or its name, album or credits change), for changes no write
+names, such as the artist reconcile repointing a credit or an album backfill.
+It used to rekey every track (about 31k rows read, writing nothing unless a
+key changed). Nothing deletes plays, so numbers only ever
 need renumbering forwards.
 
 Each is index seeks only: an artist or song reads about two rows per play of it
@@ -244,10 +247,12 @@ At most two albums or artist pages of one primary artist per row, except jump
 back in. Rows may overlap; a client shows each item once, in row order.
 
 The last year is read play by play (about three rows each, with the track's
-album and primary artist: some 60k rows for 19k plays) and anything older is
-counted per context and day in SQL. Bodies are held in the Cache API for an
-hour under the zone, local day, local hour and newest play, so a body is
-recomputed only after a new play or when the hour turns.
+album and primary artist: some 60k rows for 19k plays; the year starts at a
+UTC midnight, so it runs a year and up to a day). Anything older is counted
+per context and day in SQL once per UTC day and kept in `stats_snapshots`,
+since only an import of old plays changes it. Bodies are held in the Cache
+API under the zone, local day and local hour, so a new play can take up to an
+hour to show: keyed on the newest play as well, every poll missed.
 
 ## Known limitations
 

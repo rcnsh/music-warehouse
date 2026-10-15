@@ -533,6 +533,14 @@ subrequests. Every route that reads stored plays reports the D1 rows it read
 in an `X-Rows-Read` header; `/api/plays`, `/api/daily` and `/api/top-artists`
 also put it in the body's `_meta.rows_read`.
 
+`/api/artist`, `/api/track`, `/api/top-artists`, `/api/top-tracks`,
+`/api/daily` and `/api/on-this-day` are kept in the Cache API until a new
+play or track arrives (three rows read to check), and sent with
+`Cache-Control: private, max-age=60`; a kept answer has `X-Cache: hit`, and
+reports the rows its first computation read. An import of older plays can
+take up to ten minutes to show there. `/api/now-playing` shares one Spotify
+call across requests for 10 seconds.
+
 ### The play-count rollup
 
 `/api/daily`, `/api/top-tracks` and `/api/top-artists` over long ranges read
@@ -720,9 +728,10 @@ for a spreadsheet or a backup. Takes `/api/plays`' filters (`q`, `track_id`,
 `after`) and a local-date range: `from`
 and `to` with `tz`, as `/api/daily` takes them. Give neither for the whole
 history; with only one, the other takes `/api/daily`'s default. No `limit`:
-it streams every matching play, 2,000 per D1 query, so the Worker holds one
-page at a time. One query per page means the Workers Paid plan (1,000 queries
-a request) reaches two million plays, the Free plan (50) 100,000.
+it streams every matching play, 10,000 per D1 query, so the Worker holds one
+page at a time, and looks up each track's names once per download. At most
+two queries per page means the Workers Paid plan (1,000 queries a request)
+reaches five million plays, the Free plan (50) about 240,000.
 
 ```csv
 played_at,track,artists,album,track_id,context_uri,context_name,source
@@ -847,7 +856,10 @@ Queries of three or more characters take their candidates from the trigram
 index (migration 0011) and read about one row per candidate track plus the
 plays they count: "shelter" reads about 100 rows rather than 8k. One- and
 two-character queries scan the name tables (about 8k rows), so short names
-such as "U2" are still found.
+such as "U2" are still found, but count plays only for the 100 artist names
+and 200 titles that match best (exact, then prefix, then a word's prefix,
+then shortest), and rank those by plays; their answers are kept for five
+minutes, so their `plays` can lag a poll or two.
 
 ### Stats
 
