@@ -2,6 +2,7 @@ import { json } from './api';
 import { type ConcertCheckStatus, concertCheckStatus } from './concerts';
 import { readState } from './db';
 import { type PollResult, poll } from './ingest';
+import { type SpotifyPause, pruneCalls, storedPause } from './quota';
 import { daysUntilTokenExpiry } from './tokens';
 import type { Env, OAuthToken, SyncState } from './types';
 import { log } from './log';
@@ -57,11 +58,16 @@ export interface Alert {
  *
  * Ordered most-urgent first, and deliberately exclusive — a connection that
  * needs re-authorization is also stalled, but saying so twice helps nobody.
+ *
+ * A stall while Spotify calls are paused after a 429 (src/quota.ts) is still
+ * a stall, as plays can age out of the window meanwhile, but it says so: the
+ * Worker is waiting on purpose, until a known time.
  */
 export function evaluate(
   token: OAuthToken,
   sync: SyncState,
   now: number,
+  pause: SpotifyPause | null = null,
 ): Alert[] {
   const alerts: Alert[] = [];
 
@@ -106,15 +112,21 @@ export function evaluate(
   const sinceSuccess = sync.last_success_ms === null ? null : now - sync.last_success_ms;
   if (sinceSuccess === null || sinceSuccess > STALL_AFTER_MS) {
     const hours = sinceSuccess === null ? null : Math.floor(sinceSuccess / (60 * 60 * 1000));
+    const since =
+      hours === null
+        ? 'No poll has ever succeeded.'
+        : `No successful poll for ${hours} hours (${sync.consecutive_failures} consecutive failures).`;
     alerts.push({
       key: 'ingestion_stalled',
       severity: 'critical',
-      title: 'music-warehouse ingestion has stalled',
-      message:
-        (hours === null
-          ? 'No poll has ever succeeded.'
-          : `No successful poll for ${hours} hours (${sync.consecutive_failures} consecutive failures).`) +
-        ` Last error: ${sync.last_error ?? 'none recorded'}`,
+      title: pause
+        ? 'music-warehouse ingestion is paused by a Spotify rate limit'
+        : 'music-warehouse ingestion has stalled',
+      message: pause
+        ? `${since} Spotify answered 429 (${pause.kind}), so every Spotify call is paused until ` +
+          `${new Date(pause.until_ms).toISOString()}; polling resumes on its own then. The quota is shared ` +
+          `with every app on the Spotify developer account. Last error: ${sync.last_error ?? 'none recorded'}`
+        : `${since} Last error: ${sync.last_error ?? 'none recorded'}`,
     });
   }
 
@@ -195,8 +207,12 @@ export async function runAlertCheck(
   now: number = Date.now(),
   options: { force?: boolean } = {},
 ): Promise<AlertRunResult> {
-  const [{ token, sync }, concerts] = await Promise.all([readState(env.DB), concertCheckStatus(env.DB)]);
-  const firing = [...evaluate(token, sync, now), ...evaluateConcerts(concerts, Boolean(env.TICKETMASTER_API_KEY))];
+  const [{ token, sync }, concerts, pause] = await Promise.all([
+    readState(env.DB),
+    concertCheckStatus(env.DB),
+    storedPause(env.DB, now),
+  ]);
+  const firing = [...evaluate(token, sync, now, pause), ...evaluateConcerts(concerts, Boolean(env.TICKETMASTER_API_KEY))];
   const firingKeys = new Set(firing.map((alert) => alert.key));
 
   const previous = await env.DB.prepare('SELECT key, last_sent_ms FROM alerts').all<{
@@ -296,7 +312,8 @@ export interface PollCronResult {
 
 /**
  * What the half-hourly cron does: poll, ping the heartbeat if the poll
- * succeeded, then run the alert check against the state the poll just left.
+ * succeeded (or was skipped for a Spotify pause), prune old Spotify call
+ * counts, then run the alert check against the state the poll just left.
  *
  * The check runs every tick, and its resend window keeps each condition to
  * one push a day. It reads two one-row tables and the small alerts table, so
@@ -304,7 +321,16 @@ export interface PollCronResult {
  */
 export async function runPollCron(env: Env, now: number = Date.now()): Promise<PollCronResult> {
   const result = await poll(env, now);
-  const heartbeat = result.ok && env.HEARTBEAT_URL ? await pingHeartbeat(env.HEARTBEAT_URL) : null;
+  // A poll skipped for a Spotify pause still pings: the Worker and its cron
+  // are alive and doing what they should, which is what the switch watches.
+  // A pause that outlasts STALL_AFTER_MS is reported by the alert check.
+  const alive = result.ok || result.paused_until_ms !== undefined;
+  const heartbeat = alive && env.HEARTBEAT_URL ? await pingHeartbeat(env.HEARTBEAT_URL) : null;
+  try {
+    await pruneCalls(env.DB, now);
+  } catch (error) {
+    log('spotify-calls-prune-failed', { error }, 'error');
+  }
   let alerts: AlertRunResult | null = null;
   try {
     alerts = await runAlertCheck(env, now);

@@ -539,8 +539,9 @@ play or track arrives (three rows read to check), and sent with
 `Cache-Control: private, max-age=60`; a kept answer has `X-Cache: hit`, and its
 `X-Rows-Read` is the rows the check read, while the body's `_meta.rows_read`
 stays what its first computation read. A fresh answer's header matches `_meta`. An import of older plays can
-take up to ten minutes to show there. `/api/now-playing` shares one Spotify
-call across requests for 10 seconds.
+take up to ten minutes to show there. `/api/now-playing` and
+`/api/recently-played` share one Spotify answer across every client and colo;
+see [Live from Spotify](#live-from-spotify).
 
 ### The play-count rollup
 
@@ -993,6 +994,28 @@ grant has lapsed.
 A bad `limit`, `range` or `type` is a `400`, as on the other routes, checked
 before Spotify is asked.
 
+Spotify's development-mode quota is shared by every app on the owner's
+developer account, so these spend it carefully (migration 0021):
+
+- **One answer for everyone.** `/api/now-playing` keeps Spotify's answer in D1
+  for a minute when nothing is playing, and while a track plays until about
+  2 s after it should end, at least 10 s and at most 30 s.
+  `/api/recently-played` keeps one page of 50 for a minute and gives each
+  request its first `limit` (with `limit`, `href`, `next` and `cursors.before`
+  to match). Each colo keeps a copy for up to 10 s in front of D1. `X-Cache`
+  says `hit`, `miss` or `stale`.
+- **One pause after a 429.** Any 429 from Spotify, on any route, the poll,
+  context names or a backfill, pauses every Spotify call until its
+  `Retry-After` has passed (a minute without one, an hour for
+  `quota_exceeded`, a day at most); a later 429 only ever extends it. Until
+  then nothing is sent and no token is refreshed: these routes answer `429`
+  with `Retry-After` set to the time left, except that `/api/now-playing` and
+  `/api/recently-played` serve their last answer with `X-Cache: stale`. The
+  poll is skipped, not failed, and the cursor waits.
+- **Every call counted.** Each request sent to `api.spotify.com` is counted
+  per hour by what sent it and how Spotify answered, kept 14 days, and summed
+  under `spotify` in [`/health`](#health).
+
 ### Sign-in and authorization
 
 These take no token.
@@ -1050,6 +1073,14 @@ gone (`last_run_ms`, `last_success_ms`, `last_error`, `consecutive_failures`,
 and `failing` from two failures in a row). A failing concert check sets
 `action_required` but not `ok`, which is about recording plays.
 
+`spotify` is the [shared quota](#live-from-spotify): `paused_until_ms`,
+`paused_until_iso` and `pause_kind` while calls are paused after a 429 (else
+`null`), and for the last 24 hours `calls_24h` sent to `api.spotify.com`,
+`by_source_24h` (`poll`, `contexts`, `now-playing`, `recently-played`, `top`,
+`backfill`, `signin`, `admin`) and `rate_limited_24h`, how many were refused.
+A stall during a pause stays a stall, as plays can age out meanwhile, but
+`action_required` names the pause and when it ends.
+
 `total_plays` is summed from the [play-count rollup](#the-play-count-rollup),
 one row per day, rather than counted play by play, so a call reads a few
 thousand rows rather than every play. Its triggers count each play on exactly
@@ -1069,7 +1100,7 @@ conditions are logged but never pushed.
 | `not_authorized` | critical | Never authorized. |
 | `needs_reauth` | critical | The grant was rejected; ingestion has stopped. |
 | `token_expiring` | warning | The grant expires in 14 days or less. |
-| `ingestion_stalled` | critical | No successful poll for 3 hours. |
+| `ingestion_stalled` | critical | No successful poll for 3 hours. While Spotify calls are paused after a 429 it says so, and when polling resumes. |
 | `concert_check_failing` | warning | The daily concert check failed twice in a row (with `TICKETMASTER_API_KEY` set). |
 
 The first two suppress the other Spotify conditions; the concert alert is
@@ -1082,7 +1113,7 @@ day, and alerts again immediately if it clears and comes back. Test it with
 Alerts come from the Worker, so they cannot report the Worker itself being
 down, its crons stopping, or D1 refusing every query. For that, set
 `HEARTBEAT_URL` to a dead-man's switch: the cron GETs it (5-second timeout)
-after every successful poll, and the service alerts you when the pings stop.
+after every successful (or paused) poll, and the service alerts you when the pings stop.
 A failed ping is logged, never retried, and never fails the poll.
 
 With [healthchecks.io](https://healthchecks.io) (free for a few checks), make a
@@ -1095,7 +1126,9 @@ npx wrangler secret put HEARTBEAT_URL      # https://hc-ping.com/<uuid>
 
 Any service that alerts on a missing GET works, e.g. Better Stack or Cronitor
 heartbeats. A failed poll sends no ping, so a grant Spotify rejects shows up
-there too, alongside the `needs_reauth` alert.
+there too, alongside the `needs_reauth` alert. A poll skipped because Spotify
+calls are paused still pings: the Worker is running as it should, and a pause
+that outlasts 3 hours raises `ingestion_stalled` instead.
 
 ### Checking ingestion
 

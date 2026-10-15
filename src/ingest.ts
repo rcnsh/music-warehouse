@@ -1,7 +1,8 @@
 import { countStoredPlays, readState, writeStatements } from './db';
+import { CallTally } from './quota';
 import { normalize } from './normalize';
 import { nameContexts } from './contexts';
-import { SpotifyError, fetchRecentlyPlayed } from './spotify';
+import { SpotifyError, type SpotifyCaller, fetchRecentlyPlayed } from './spotify';
 import { NeedsReauthError, getAccessToken } from './tokens';
 import type { Env, RecentlyPlayedResponse } from './types';
 import { log } from './log';
@@ -20,6 +21,12 @@ export interface PollResult {
   needs_reauth: boolean;
   error?: string;
   retry_after_seconds?: number;
+  /**
+   * Set when the poll was skipped because Spotify calls are paused after a
+   * 429 (src/quota.ts): when they may resume. Nothing was asked of Spotify,
+   * and nothing is recorded as a failure.
+   */
+  paused_until_ms?: number;
 }
 
 function describe(error: unknown): string {
@@ -43,9 +50,9 @@ async function recordFailure(db: D1Database, message: string, now: number): Prom
 }
 
 /** Context names are a nicety: a failure there must never fail the poll. */
-async function nameContextsSafely(db: D1Database, accessToken: string, now: number): Promise<number> {
+async function nameContextsSafely(db: D1Database, accessToken: string, now: number, tally: CallTally): Promise<number> {
   try {
-    return await nameContexts(db, accessToken, now);
+    return await nameContexts(db, accessToken, now, { db, source: 'contexts', tally });
   } catch (error) {
     log('context-naming-failed', { message: describe(error) }, 'error');
     return 0;
@@ -69,12 +76,16 @@ async function nameContextsSafely(db: D1Database, accessToken: string, now: numb
  * that answer reaches. The next poll then picks up from there. The cursor
  * is 0 before the first poll, when there is nothing to catch up from.
  */
-async function fetchSince(accessToken: string, cursorMs: number): Promise<{ payload: RecentlyPlayedResponse; reachMs: number | null }> {
-  const latest = await fetchRecentlyPlayed(accessToken, 0);
+async function fetchSince(
+  caller: SpotifyCaller,
+  accessToken: string,
+  cursorMs: number,
+): Promise<{ payload: RecentlyPlayedResponse; reachMs: number | null }> {
+  const latest = await fetchRecentlyPlayed(caller, accessToken, 0);
   const times = (latest.items ?? []).map((item) => Date.parse(item.played_at ?? '')).filter(Number.isFinite);
   if (cursorMs === 0 || times.length === 0 || Math.min(...times) <= cursorMs) return { payload: latest, reachMs: null };
 
-  const after = await fetchRecentlyPlayed(accessToken, cursorMs);
+  const after = await fetchRecentlyPlayed(caller, accessToken, cursorMs);
   const reach = (after.items ?? []).map((item) => Date.parse(item.played_at ?? '')).filter(Number.isFinite);
   return {
     payload: { ...latest, items: [...(after.items ?? []), ...(latest.items ?? [])] },
@@ -90,11 +101,22 @@ async function fetchSince(accessToken: string, cursorMs: number): Promise<{ payl
  * Subrequest budget (R12, ceiling 50): 1 read + at most 4 for token work +
  * at most 4 recently-played fetches (two, retried once after a 401) + 1 write
  * batch = 10, then context naming: 1 read + LOOKUPS_PER_POLL (3) Spotify
- * calls + 1 write = 15 in the worst case.
+ * calls + 1 write = 15, plus 1 read of the Spotify pause and 1 write of
+ * every call's count (src/quota.ts) = 17 in the worst case.
  */
 export async function poll(env: Env, now: number = Date.now()): Promise<PollResult> {
+  const tally = new CallTally();
+  try {
+    return await pollOnce(env, now, tally);
+  } finally {
+    await tally.flush(env.DB);
+  }
+}
+
+async function pollOnce(env: Env, now: number, tally: CallTally): Promise<PollResult> {
   const db = env.DB;
   const { sync, token } = await readState(db);
+  const caller: SpotifyCaller = { db, source: 'poll', tally };
 
   let payload: RecentlyPlayedResponse;
   let reachMs: number | null;
@@ -103,15 +125,32 @@ export async function poll(env: Env, now: number = Date.now()): Promise<PollResu
     accessToken = await getAccessToken(db, env, token, now);
 
     try {
-      ({ payload, reachMs } = await fetchSince(accessToken, sync.cursor_ms));
+      ({ payload, reachMs } = await fetchSince(caller, accessToken, sync.cursor_ms));
     } catch (error) {
       if (!(error instanceof SpotifyError) || error.kind !== 'unauthorized') throw error;
       // A 401 on the data call despite a token we believed was live. Force one
       // refresh and retry exactly once; a second 401 aborts the run.
       accessToken = await getAccessToken(db, env, { ...token, access_token: null, access_expires_ms: null }, now);
-      ({ payload, reachMs } = await fetchSince(accessToken, sync.cursor_ms));
+      ({ payload, reachMs } = await fetchSince(caller, accessToken, sync.cursor_ms));
     }
   } catch (error) {
+    if (error instanceof SpotifyError && error.paused) {
+      // Skipped, not failed: the pause is already the answer, and asking
+      // anyway would only extend it. The cursor is untouched, so the first
+      // poll after it lifts picks up from here.
+      log('poll-skipped', { reason: 'spotify-paused', kind: error.kind, retry_after_seconds: error.retryAfterSeconds }, 'warn');
+      return {
+        ok: false,
+        received: 0,
+        inserted: 0,
+        skipped: 0,
+        cursor_ms: sync.cursor_ms,
+        needs_reauth: false,
+        error: describe(error),
+        retry_after_seconds: error.retryAfterSeconds ?? undefined,
+        paused_until_ms: Date.now() + (error.retryAfterSeconds ?? 0) * 1000,
+      };
+    }
     const message = describe(error);
     await recordFailure(db, message, now);
     return {
@@ -145,7 +184,7 @@ export async function poll(env: Env, now: number = Date.now()): Promise<PollResu
       skipped: rows.skipped,
       cursor_ms: sync.cursor_ms,
       needs_reauth: false,
-      contexts_named: await nameContextsSafely(db, accessToken, now),
+      contexts_named: await nameContextsSafely(db, accessToken, now, tally),
     };
   }
 
@@ -178,7 +217,7 @@ export async function poll(env: Env, now: number = Date.now()): Promise<PollResu
       skipped: rows.skipped,
       cursor_ms: Math.max(sync.cursor_ms, cursorMs),
       needs_reauth: false,
-      contexts_named: await nameContextsSafely(db, accessToken, now),
+      contexts_named: await nameContextsSafely(db, accessToken, now, tally),
     };
   } catch (error) {
     // The batch is a transaction: either every row landed or none did, and the

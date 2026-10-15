@@ -126,12 +126,12 @@ async function rawRecentlyPlayed(env: Env, url: URL): Promise<Response> {
   const { token } = await readState(env.DB);
   const accessToken = await getAccessToken(env.DB, env, token, Date.now());
   const after = Number(url.searchParams.get('after') ?? 0);
-  const payload = await fetchRecentlyPlayed(accessToken, Number.isFinite(after) ? after : 0);
+  const payload = await fetchRecentlyPlayed({ db: env.DB, source: 'admin' }, accessToken, Number.isFinite(after) ? after : 0);
   return json(payload);
 }
 
 /** Response headers a cross-origin reader of /api/* may see. */
-const EXPOSED_HEADERS = 'Retry-After, X-Stats-Source, X-Stats-Computed-At, WWW-Authenticate';
+const EXPOSED_HEADERS = 'Retry-After, X-Cache, X-Stats-Source, X-Stats-Computed-At, WWW-Authenticate';
 
 /** The request's Origin, if CORS_ORIGINS lists it (or is `*`). */
 function allowedOrigin(request: Request, env: Env): string | null {
@@ -237,11 +237,11 @@ async function handle(request: Request, env: Env, ctx: ExecutionContext): Promis
       case 'GET /api/daily':
         return await cachedHistory(env, url, () => dailyCounts(env, url));
       case 'GET /api/now-playing':
-        return await nowPlaying(env);
+        return await nowPlaying(env, ctx);
       case 'GET /api/recently-played':
-        return await recentlyPlayed(env, url);
+        return await recentlyPlayed(env, url, ctx);
       case 'GET /api/top':
-        return await topMusic(env, url);
+        return await topMusic(env, url, ctx);
       case 'GET /api/wrapped':
         return await wrappedRoute(env, ctx, url, access);
       case 'GET /api/wrapped/ranges':
@@ -318,12 +318,21 @@ async function handle(request: Request, env: Env, ctx: ExecutionContext): Promis
     if (error instanceof SpotifyError) {
       // The client only ever sees the error *kind*, so without this an
       // upstream failure is undiagnosable after the fact.
-      log('spotify-error', { kind: error.kind, status: error.status, message: error.message }, 'error');
-      const status = error.kind === 'rate_limited' || error.kind === 'quota_exceeded' ? 429 : 502;
-      return json(
-        { error: `Spotify upstream: ${error.kind}`, retry_after_seconds: error.retryAfterSeconds },
-        status,
+      // A call refused by the pause is expected while it lasts, not an error.
+      const limited = error.kind === 'rate_limited' || error.kind === 'quota_exceeded';
+      log(
+        'spotify-error',
+        { kind: error.kind, status: error.status, paused: error.paused, message: error.message },
+        limited ? 'warn' : 'error',
       );
+      const response = json(
+        { error: `Spotify upstream: ${error.kind}`, retry_after_seconds: error.retryAfterSeconds },
+        limited ? 429 : 502,
+      );
+      if (limited && error.retryAfterSeconds !== null) {
+        response.headers.set('Retry-After', String(error.retryAfterSeconds));
+      }
+      return response;
     }
     log('unhandled-error', { error }, 'error');
     return json({ error: 'Internal error' }, 500);

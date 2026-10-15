@@ -1,7 +1,7 @@
 import { json } from './api';
 import { MAX_BOUND_PARAMS, buildInserts } from './db';
 import { pickImageUrl } from './normalize';
-import { appAccessToken, spotifyGet } from './spotify';
+import { SpotifyError, appAccessToken, assertSpotifyOpen, spotifyFetch, spotifyGet } from './spotify';
 import { getAccessToken } from './tokens';
 import { readState } from './db';
 import type { Env, SpotifyAlbum, SpotifyTrack } from './types';
@@ -157,7 +157,7 @@ export async function backfillAlbums(env: Env, request: Request): Promise<Respon
   let exhausted = false;
 
   for (let page = 0; page < pages; page++) {
-    const payload = await spotifyGet(accessToken, pageUrl(source, offset, range));
+    const payload = await spotifyGet({ db: env.DB, source: 'backfill' }, accessToken, pageUrl(source, offset, range));
     const extracted = extractCandidates(source, payload);
     total = extracted.total ?? total;
 
@@ -281,6 +281,24 @@ export async function backfillFromCatalog(env: Env, request: Request): Promise<R
     return json({ done: true, examined: 0, tracks_updated: 0, missing: 0, next_cursor: cursor, rows_written: 0 });
   }
 
+  // Paused after a 429: say so as a rate limit, as a 429 mid-walk would, and mint no token.
+  try {
+    await assertSpotifyOpen(env.DB);
+  } catch (error) {
+    if (!(error instanceof SpotifyError)) throw error;
+    return json({
+      next_cursor: cursor,
+      examined: 0,
+      tracks_updated: 0,
+      missing: 0,
+      albums_written: 0,
+      rows_written: 0,
+      rate_limited: true,
+      retry_after_seconds: error.retryAfterSeconds,
+      done: false,
+    });
+  }
+
   const { access_token: appToken } = await appAccessToken(env);
 
   const candidates: AlbumCandidate[] = [];
@@ -294,24 +312,21 @@ export async function backfillFromCatalog(env: Env, request: Request): Promise<R
 
     let response: Response;
     try {
-      response = await fetch(`https://api.spotify.com/v1/tracks/${trackId}`, {
+      response = await spotifyFetch({ db: env.DB, source: 'backfill' }, `https://api.spotify.com/v1/tracks/${trackId}`, {
         headers: { Authorization: `Bearer ${appToken}` },
       });
-    } catch {
+    } catch (error) {
+      // Stop on a rate limit (which also pauses every other Spotify call) but
+      // still write what this call already gathered. Retry-After is the only
+      // thing that says how long the wait actually is — Spotify has returned
+      // an hour here — so it has to reach the caller rather than leaving it to
+      // guess with a blind exponential backoff.
+      if (error instanceof SpotifyError) {
+        rateLimited = true;
+        retryAfterSeconds = error.retryAfterSeconds;
+      }
       // A transport failure mid-walk: keep what we have and let the cursor
       // stop here, rather than losing the whole batch.
-      break;
-    }
-
-    // Stop on a rate limit but still write what this call already gathered.
-    // Retry-After is the only thing that says how long the wait actually is —
-    // Spotify has returned an hour here — so it has to reach the caller rather
-    // than leaving it to guess with a blind exponential backoff.
-    if (response.status === 429) {
-      rateLimited = true;
-      const header = response.headers.get('Retry-After');
-      retryAfterSeconds =
-        header !== null && header.trim() !== '' && Number.isFinite(Number(header)) ? Number(header) : null;
       break;
     }
     examined++;

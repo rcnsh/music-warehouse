@@ -1,6 +1,7 @@
 import { BadRequest, intParam, json } from './api';
 import { readState } from './db';
-import { spotifyGet } from './spotify';
+import type { CallSource } from './quota';
+import { SpotifyError, type SpotifyCaller, assertSpotifyOpen, spotifyGet } from './spotify';
 import { getAccessToken } from './tokens';
 import type { Env } from './types';
 import { log } from './log';
@@ -27,43 +28,218 @@ async function accessTokenFor(env: Env): Promise<string> {
   return getAccessToken(env.DB, env, token, Date.now());
 }
 
-/** How long one answer from Spotify serves every client: a GUI polls every 20 s, perhaps from several devices. */
-const NOW_PLAYING_TTL_SECONDS = 10;
-/** The Cache API request the answer is kept under. */
-export const nowPlayingKey = () => new Request('https://now-playing.internal/v1');
+function callerFor(env: Env, source: CallSource, ctx?: ExecutionContext): SpotifyCaller {
+  return { db: env.DB, source, waitUntil: ctx ? (promise) => ctx.waitUntil(promise) : undefined };
+}
+
+/** The longest a colo keeps a shared answer before asking D1 again. */
+const EDGE_TTL_SECONDS = 10;
+/** The Cache API request a shared answer is kept under in each colo. */
+export const sharedAnswerKey = (key: string) => new Request(`https://spotify-answers.internal/v1/${key}`);
+/** The now-playing answer's colo key, which tests clear. */
+export const nowPlayingKey = () => sharedAnswerKey('now-playing');
+
+interface StoredAnswer {
+  body: string;
+  fetched_ms: number;
+  fresh_until_ms: number;
+}
+
+/**
+ * One Spotify answer shared by every client in every colo (migration 0021).
+ *
+ * The development-mode quota is shared with the owner's other apps, so a
+ * client polling every 20 seconds from several devices must not cost a call
+ * each. The answer is kept in D1 until its `freshMs` has passed, with each
+ * colo keeping its own copy for up to EDGE_TTL_SECONDS in front, and after
+ * that the next request asks Spotify again. While Spotify calls are paused
+ * after a 429, the last answer is served however old (`X-Cache: stale`);
+ * with none kept, the 429 goes through as before. Other failures are never
+ * kept, and never answered from a stale copy.
+ *
+ * Concurrent misses can each ask Spotify; with one owner's few clients that
+ * costs at most a call or two, and is not worth a lock.
+ */
+async function sharedAnswer(
+  env: Env,
+  ctx: ExecutionContext | undefined,
+  key: string,
+  fetchBody: () => Promise<unknown>,
+  freshMs: (body: unknown) => number,
+): Promise<{ body: string; cache: 'hit' | 'miss' | 'stale' }> {
+  const edge = await caches.open('spotify-answers');
+  const edgeKey = sharedAnswerKey(key);
+  const kept = await edge.match(edgeKey);
+  if (kept) return { body: await kept.text(), cache: 'hit' };
+
+  const now = Date.now();
+  const stored = await env.DB.prepare('SELECT body, fetched_ms, fresh_until_ms FROM spotify_answers WHERE key = ?')
+    .bind(key)
+    .first<StoredAnswer>();
+
+  const keepAtEdge = (body: string, freshUntilMs: number) => {
+    const seconds = Math.min(EDGE_TTL_SECONDS, Math.floor((freshUntilMs - Date.now()) / 1000));
+    if (seconds <= 0) return;
+    const put = edge.put(
+      edgeKey,
+      new Response(body, { headers: { 'Content-Type': 'application/json', 'Cache-Control': `max-age=${seconds}` } }),
+    );
+    if (ctx) ctx.waitUntil(put);
+    return put;
+  };
+
+  if (stored && stored.fresh_until_ms > now) {
+    await keepAtEdge(stored.body, stored.fresh_until_ms);
+    return { body: stored.body, cache: 'hit' };
+  }
+
+  let fetched: unknown;
+  try {
+    // Checked before the token, so a paused Worker reads no grant and refreshes nothing.
+    await assertSpotifyOpen(env.DB);
+    fetched = await fetchBody();
+  } catch (error) {
+    const limited = error instanceof SpotifyError && (error.kind === 'rate_limited' || error.kind === 'quota_exceeded');
+    if (limited && stored) {
+      log('spotify-answer-stale', { key, fetched_ms: stored.fetched_ms, kind: error.kind }, 'warn');
+      return { body: stored.body, cache: 'stale' };
+    }
+    throw error;
+  }
+
+  const body = JSON.stringify(fetched);
+  const fetchedMs = Date.now();
+  const freshUntilMs = fetchedMs + freshMs(fetched);
+  const write = env.DB.prepare(
+    `INSERT INTO spotify_answers (key, body, fetched_ms, fresh_until_ms) VALUES (?, ?, ?, ?)
+     ON CONFLICT(key) DO UPDATE SET body = excluded.body, fetched_ms = excluded.fetched_ms,
+                                    fresh_until_ms = excluded.fresh_until_ms
+      WHERE excluded.fetched_ms >= spotify_answers.fetched_ms`,
+  )
+    .bind(key, body, fetchedMs, freshUntilMs)
+    .run()
+    .catch((error) => log('spotify-answer-store-failed', { key, error }, 'error'));
+  if (ctx) ctx.waitUntil(write);
+  else await write;
+  await keepAtEdge(body, freshUntilMs);
+  return { body, cache: 'miss' };
+}
+
+function answer(body: string, cache: 'hit' | 'miss' | 'stale'): Response {
+  return new Response(body, {
+    headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Cache': cache },
+  });
+}
+
+/** How long a now-playing answer is shared when nothing is playing. */
+export const IDLE_FRESH_MS = 60_000;
+/** While a track plays: until just after it should end, but within these bounds. */
+export const PLAYING_FRESH_MIN_MS = 10_000;
+export const PLAYING_FRESH_MAX_MS = 30_000;
+/** Past the track's expected end, so the next answer is the next track. */
+const TRACK_END_GRACE_MS = 2_000;
+
+/** How long one currently-playing answer is shared (body as Spotify sent it; null when idle). */
+export function nowPlayingFreshMs(payload: unknown): number {
+  const playing = payload as { is_playing?: boolean; progress_ms?: number | null; item?: { duration_ms?: number } | null } | null;
+  if (!playing || playing.is_playing === false) return IDLE_FRESH_MS;
+  const duration = playing.item?.duration_ms;
+  const progress = playing.progress_ms;
+  if (typeof duration !== 'number' || typeof progress !== 'number') return PLAYING_FRESH_MAX_MS;
+  const untilEnd = duration - progress + TRACK_END_GRACE_MS;
+  return Math.max(PLAYING_FRESH_MIN_MS, Math.min(PLAYING_FRESH_MAX_MS, untilEnd));
+}
 
 /**
  * `GET /api/now-playing` → Spotify's currently-playing payload, or null when
- * idle. One answer is kept for NOW_PLAYING_TTL_SECONDS, so polling clients
- * share a Spotify call; it is the same for any token, as there is one
+ * idle. One answer serves every client (see sharedAnswer): for a minute when
+ * idle, and while playing until just after the track should end, at least 10
+ * and at most 30 seconds. It is the same for any token, as there is one
  * Spotify account. Failures are not kept.
  */
-export async function nowPlaying(env: Env): Promise<Response> {
-  const cache = await caches.open('now-playing');
-  const key = nowPlayingKey();
-  const hit = await cache.match(key);
-  if (hit) {
-    const response = new Response(hit.body, hit);
-    response.headers.set('Cache-Control', 'no-store');
-    response.headers.set('X-Cache', 'hit');
-    return response;
-  }
-  const accessToken = await accessTokenFor(env);
-  // 204 (nothing playing) comes back as null rather than an error.
-  const response = json({ item: await spotifyGet(accessToken, '/me/player/currently-playing') });
-  const stored = response.clone();
-  stored.headers.set('Cache-Control', `max-age=${NOW_PLAYING_TTL_SECONDS}`);
-  await cache.put(key, stored);
-  return response;
+export async function nowPlaying(env: Env, ctx?: ExecutionContext): Promise<Response> {
+  const { body, cache } = await sharedAnswer(
+    env,
+    ctx,
+    'now-playing',
+    async () =>
+      // 204 (nothing playing) comes back as null rather than an error.
+      spotifyGet(callerFor(env, 'now-playing', ctx), await accessTokenFor(env), '/me/player/currently-playing'),
+    nowPlayingFreshMs,
+  );
+  return answer(`{"item":${body}}`, cache);
 }
 
-/** `GET /api/recently-played?limit=` → Spotify's recently-played payload, newest first. */
-export async function recentlyPlayed(env: Env, url: URL): Promise<Response> {
-  // Checked before the token, so a bad parameter is a 400 even with the grant lapsed.
-  const limit = intParam(url, 'limit', 1, 1, 50);
+/** How long one recently-played answer is shared. */
+export const RECENTLY_PLAYED_FRESH_MS = 60_000;
+/** Spotify's ceiling for one page, which is what is fetched and kept. */
+const RECENTLY_PLAYED_MAX = 50;
 
-  const accessToken = await accessTokenFor(env);
-  return json(await spotifyGet(accessToken, `/me/player/recently-played?limit=${limit}`));
+type PlayHistory = {
+  items?: Array<{ played_at?: string }> | null;
+  limit?: number;
+  href?: string | null;
+  next?: string | null;
+  cursors?: { after?: string | null; before?: string | null } | null;
+};
+
+/** Rewrite the `limit` in one of Spotify's paging URLs. */
+function withLimit(link: string | null | undefined, limit: number): string | null | undefined {
+  if (!link) return link;
+  try {
+    const url = new URL(link);
+    url.searchParams.set('limit', String(limit));
+    return url.href;
+  } catch {
+    return link;
+  }
+}
+
+/**
+ * The first `limit` plays of a 50-play page, as Spotify would have answered
+ * for that limit: `limit`, `href` and `next` name it, and `cursors.before`
+ * is the oldest play kept, which is where Spotify puts it.
+ */
+export function slicePlayHistory(payload: unknown, limit: number): unknown {
+  const page = payload as PlayHistory | null;
+  if (!page || !Array.isArray(page.items)) return payload;
+  const items = page.items.slice(0, limit);
+  const sliced: PlayHistory = { ...page, items };
+  if ('limit' in page) sliced.limit = limit;
+  if ('href' in page) sliced.href = withLimit(page.href, limit);
+  if ('next' in page) sliced.next = withLimit(page.next, limit);
+  const oldest = Date.parse(items.at(-1)?.played_at ?? '');
+  if (page.cursors && items.length < page.items.length && Number.isFinite(oldest)) {
+    sliced.cursors = { ...page.cursors, before: String(oldest) };
+  }
+  return sliced;
+}
+
+/**
+ * `GET /api/recently-played?limit=` → Spotify's recently-played payload, newest first.
+ *
+ * One page of 50 is fetched and shared for a minute, and each request is
+ * given the first `limit` of it. The website asks for 1, the MCP server and
+ * Wrapped for more, so one kept page serves them all where a page per limit
+ * would cost a call per limit asked for.
+ */
+export async function recentlyPlayed(env: Env, url: URL, ctx?: ExecutionContext): Promise<Response> {
+  // Checked before the token, so a bad parameter is a 400 even with the grant lapsed.
+  const limit = intParam(url, 'limit', 1, 1, RECENTLY_PLAYED_MAX);
+
+  const { body, cache } = await sharedAnswer(
+    env,
+    ctx,
+    'recently-played',
+    async () =>
+      spotifyGet(
+        callerFor(env, 'recently-played', ctx),
+        await accessTokenFor(env),
+        `/me/player/recently-played?limit=${RECENTLY_PLAYED_MAX}`,
+      ),
+    () => RECENTLY_PLAYED_FRESH_MS,
+  );
+  return answer(JSON.stringify(slicePlayHistory(JSON.parse(body), limit)), cache);
 }
 
 /**
@@ -71,7 +247,7 @@ export async function recentlyPlayed(env: Env, url: URL): Promise<Response> {
  * range. `type=artists` or `type=tracks` fetches one list and leaves the other
  * null: artists alone skip the edition relabel, the only D1 read here.
  */
-export async function topMusic(env: Env, url: URL): Promise<Response> {
+export async function topMusic(env: Env, url: URL, ctx?: ExecutionContext): Promise<Response> {
   const range = url.searchParams.get('range') || 'long_term';
   if (!TOP_RANGES.has(range)) throw new BadRequest('range must be short_term, medium_term or long_term');
   const limit = intParam(url, 'limit', 12, 1, 50);
@@ -79,9 +255,10 @@ export async function topMusic(env: Env, url: URL): Promise<Response> {
   if (type !== null && type !== 'tracks' && type !== 'artists') throw new BadRequest('type must be tracks or artists');
 
   const accessToken = await accessTokenFor(env);
+  const caller = callerFor(env, 'top', ctx);
   const [tracks, artists] = await Promise.all([
-    type === 'artists' ? null : spotifyGet(accessToken, `/me/top/tracks?time_range=${range}&limit=${limit}`),
-    type === 'tracks' ? null : spotifyGet(accessToken, `/me/top/artists?time_range=${range}&limit=${limit}`),
+    type === 'artists' ? null : spotifyGet(caller, accessToken, `/me/top/tracks?time_range=${range}&limit=${limit}`),
+    type === 'tracks' ? null : spotifyGet(caller, accessToken, `/me/top/artists?time_range=${range}&limit=${limit}`),
   ]);
 
   if (tracks) await relabelEditions(env.DB, tracks);

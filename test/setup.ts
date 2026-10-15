@@ -3,7 +3,8 @@ import { afterEach, beforeEach, vi } from 'vitest';
 import { freezeClock } from './helpers';
 import { edgeRequest } from '../src/snapshots';
 import { detailFromMs, homeCacheKey, olderKey } from '../src/home';
-import { nowPlayingKey } from '../src/live';
+import { nowPlayingKey, sharedAnswerKey } from '../src/live';
+import { forgetPauseMemo } from '../src/quota';
 import { buildEras, parseEras } from '../src/eras';
 import { STAT_NAMES, statKey } from '../src/stats';
 
@@ -29,7 +30,10 @@ beforeEach(async () => {
   await edge.delete(edgeRequest(olderKey(detailFromMs(now))));
   const home = await caches.open('home');
   await Promise.all(HOME_ZONES.map((zone) => home.delete(homeCacheKey(zone, now))));
-  await (await caches.open('now-playing')).delete(nowPlayingKey());
+  // The shared Spotify answers' colo copies, and this isolate's copy of the pause.
+  const answers = await caches.open('spotify-answers');
+  await Promise.all([answers.delete(nowPlayingKey()), answers.delete(sharedAnswerKey('recently-played'))]);
+  forgetPauseMemo();
   await env.DB.batch([
     env.DB.prepare('DELETE FROM plays'),
     env.DB.prepare('DELETE FROM tracks'),
@@ -49,6 +53,9 @@ beforeEach(async () => {
     env.DB.prepare('DELETE FROM track_songs'),
     env.DB.prepare('DELETE FROM play_numbers'),
     env.DB.prepare('DELETE FROM contexts'),
+    env.DB.prepare('DELETE FROM spotify_pause'),
+    env.DB.prepare('DELETE FROM spotify_answers'),
+    env.DB.prepare('DELETE FROM spotify_calls'),
     // Deleting tracks leaves their change marks (migration 0020) behind.
     env.DB.prepare('DELETE FROM track_changes'),
     // The plays' delete trigger has emptied the rollup; put back the
