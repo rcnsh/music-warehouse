@@ -5,14 +5,15 @@ import { importChunk } from './import';
 import { poll } from './ingest';
 import { alertCheckRoute, runAlertCheck } from './alerts';
 import { nowPlaying, recentlyPlayed, topMusic } from './live';
-import { SpotifyError, authorizeUrl, exchangeCode, fetchRecentlyPlayed } from './spotify';
+import { SpotifyError, type TokenResponse, authorizeUrl, exchangeCode, fetchRecentlyPlayed } from './spotify';
 import { NeedsReauthError, getAccessToken, persistTokenResponse } from './tokens';
 import { readState } from './db';
-import { accessFor, createTokenRoute, listTokensRoute, revokeTokenRoute } from './auth';
+import { accessFor, createTokenRoute, listTokensRoute, listedOrigins, revokeTokenRoute } from './auth';
 import { SnapshotPending } from './snapshots';
 import { isStatName, statRoute } from './stats';
 import { artistRoute, onThisDayRoute, topTracksRoute, trackRoute } from './history';
 import { searchRoute } from './search';
+import { recordOwner, signInCallback, signInExchange, signInStart } from './signin';
 import { warmWrappedPresets, wrappedRangesRoute, wrappedRoute } from './wrapped';
 import type { Env } from './types';
 
@@ -71,13 +72,22 @@ async function callback(env: Env, url: URL): Promise<Response> {
   // Single use: consume the state before spending the code.
   await env.DB.prepare('DELETE FROM oauth_state WHERE id = 1').run();
 
+  let token: TokenResponse;
   try {
-    const token = await exchangeCode(env, code);
+    token = await exchangeCode(env, code);
     // A fresh authorization restarts the six-month refresh-token clock.
     await persistTokenResponse(env.DB, token, Date.now(), { resetAuthorizedAt: true });
   } catch (cause) {
     const message = cause instanceof SpotifyError ? cause.message : String(cause);
     return text(`Token exchange failed: ${message}`, 502);
+  }
+
+  // Whose warehouse this is, for sign-in. Not worth failing the grant over:
+  // sign-in asks again with the stored grant if it is missing.
+  try {
+    await recordOwner(env.DB, token.access_token);
+  } catch (cause) {
+    console.error('owner', cause instanceof Error ? cause.message : cause);
   }
 
   return text('Authorized. Ingestion will resume on the next cron tick; POST /admin/poll to start now.');
@@ -102,8 +112,8 @@ const EXPOSED_HEADERS = 'Retry-After, X-Stats-Source, X-Stats-Computed-At, WWW-A
 /** The request's Origin, if CORS_ORIGINS lists it (or is `*`). */
 function allowedOrigin(request: Request, env: Env): string | null {
   const origin = request.headers.get('Origin');
-  if (!origin || !env.CORS_ORIGINS) return null;
-  const allowed = env.CORS_ORIGINS.split(',').map((o) => o.trim().replace(/\/+$/, ''));
+  if (!origin) return null;
+  const allowed = listedOrigins(env);
   return allowed.includes('*') || allowed.includes(origin) ? origin : null;
 }
 
@@ -111,16 +121,28 @@ async function handle(request: Request, env: Env, ctx: ExecutionContext): Promis
   const url = new URL(request.url);
   const path = url.pathname.replace(/\/+$/, '') || '/';
 
-  if (path === '/callback') return await callback(env, url);
-
-  const access = await accessFor(request, env, ctx);
-  if (access === null) return unauthorized();
-
   const route = `${request.method} ${path}`;
-  // A read-only token reaches the data routes and nothing else.
-  if (access === 'read' && !path.startsWith('/api/')) return unauthorized();
 
   try {
+    // Unauthenticated by necessity: Spotify's redirects carry no token, and
+    // sign-in is how a device gets one. Each is guarded by its own single-use
+    // state or code instead.
+    switch (route) {
+      case 'GET /callback':
+        return await callback(env, url);
+      case 'GET /auth/login':
+        return await signInStart(env, url);
+      case 'GET /auth/callback':
+        return await signInCallback(env, url);
+      case 'POST /auth/token':
+        return await signInExchange(env, request);
+    }
+
+    const access = await accessFor(request, env, ctx);
+    if (access === null) return unauthorized();
+    // A read-only token reaches the data routes and nothing else.
+    if (access === 'read' && !path.startsWith('/api/')) return unauthorized();
+
     switch (route) {
       case 'GET /':
         return json({
@@ -128,6 +150,9 @@ async function handle(request: Request, env: Env, ctx: ExecutionContext): Promis
           routes: [
             '/login',
             '/callback',
+            '/auth/login',
+            '/auth/callback',
+            '/auth/token',
             '/health',
             '/api/plays',
             '/api/top-artists',
@@ -235,10 +260,12 @@ async function handle(request: Request, env: Env, ctx: ExecutionContext): Promis
 
 const worker = {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-    // CORS covers the /api/* routes only, so a browser app on another origin
-    // can read them with the reader's own token. Admin routes never get it.
+    // CORS covers the /api/* routes, so a browser app on another origin can
+    // read them with the reader's own token, and /auth/token, so that app can
+    // finish signing in. Admin routes never get it.
     const path = new URL(request.url).pathname;
-    const origin = path.startsWith('/api/') ? allowedOrigin(request, env) : null;
+    const exchange = path === '/auth/token';
+    const origin = path.startsWith('/api/') || exchange ? allowedOrigin(request, env) : null;
     if (!origin) return await handle(request, env, ctx);
 
     // A preflight carries no Authorization header, by design, so it is
@@ -248,8 +275,8 @@ const worker = {
         status: 204,
         headers: {
           'Access-Control-Allow-Origin': origin,
-          'Access-Control-Allow-Methods': 'GET',
-          'Access-Control-Allow-Headers': 'Authorization',
+          'Access-Control-Allow-Methods': exchange ? 'POST' : 'GET',
+          'Access-Control-Allow-Headers': exchange ? 'Content-Type' : 'Authorization',
           'Access-Control-Max-Age': '86400',
           Vary: 'Origin',
         },

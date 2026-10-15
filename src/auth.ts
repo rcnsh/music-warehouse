@@ -38,10 +38,20 @@ export async function sha256Hex(value: string): Promise<string> {
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
 }
 
+export function base64url(bytes: ArrayBuffer | Uint8Array): string {
+  const raw = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  return btoa(String.fromCharCode(...raw)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
 /** `bytes` of CSPRNG output, base64url without padding. */
 export function randomSecret(bytes = 32): string {
-  const raw = crypto.getRandomValues(new Uint8Array(bytes));
-  return btoa(String.fromCharCode(...raw)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  return base64url(crypto.getRandomValues(new Uint8Array(bytes)));
+}
+
+/** CORS_ORIGINS as a list, each without a trailing slash. */
+export function listedOrigins(env: Env): string[] {
+  if (!env.CORS_ORIGINS) return [];
+  return env.CORS_ORIGINS.split(',').map((origin) => origin.trim().replace(/\/+$/, '')).filter(Boolean);
 }
 
 /**

@@ -112,7 +112,7 @@ export async function readState(db: D1Database): Promise<{ sync: SyncState; toke
       'SELECT cursor_ms, last_success_ms, last_error, last_error_ms, consecutive_failures FROM sync_state WHERE id = 1',
     ),
     db.prepare(
-      'SELECT access_token, access_expires_ms, refresh_token, authorized_at_ms, needs_reauth FROM oauth_token WHERE id = 1',
+      'SELECT access_token, access_expires_ms, refresh_token, authorized_at_ms, needs_reauth, spotify_user_id FROM oauth_token WHERE id = 1',
     ),
   ]);
 

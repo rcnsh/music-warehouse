@@ -40,7 +40,8 @@
   "vars": {
     // [3] Must exactly match a redirect URI registered in the Spotify
     // dashboard. `wrangler dev` overrides this from .dev.vars with the
-    // loopback URL.
+    // loopback URL. Sign-in uses /auth/callback on the same host, which must
+    // be registered too.
     "SPOTIFY_REDIRECT_URI": "https://music-api.rcn.sh/callback"
 
     // ALERT_MENTION is deliberately not here. It identifies a specific person

@@ -117,13 +117,14 @@ async function postToken(env: Env, body: URLSearchParams): Promise<TokenResponse
   return parsed;
 }
 
-export function exchangeCode(env: Env, code: string): Promise<TokenResponse> {
+/** `redirectUri` must be the one the authorize request named, character for character. */
+export function exchangeCode(env: Env, code: string, redirectUri = env.SPOTIFY_REDIRECT_URI): Promise<TokenResponse> {
   return postToken(
     env,
     new URLSearchParams({
       grant_type: 'authorization_code',
       code,
-      redirect_uri: env.SPOTIFY_REDIRECT_URI,
+      redirect_uri: redirectUri,
     }),
   );
 }
@@ -148,14 +149,23 @@ export function appAccessToken(env: Env): Promise<TokenResponse> {
   return postToken(env, new URLSearchParams({ grant_type: 'client_credentials' }));
 }
 
-export function authorizeUrl(env: Env, state: string): string {
+/**
+ * Spotify's consent URL. Defaults to the ingestion grant; sign-in passes its
+ * own redirect URI and an empty scope, which asks for identity alone.
+ */
+export function authorizeUrl(
+  env: Env,
+  state: string,
+  options: { redirectUri?: string; scope?: string } = {},
+): string {
   const params = new URLSearchParams({
     client_id: env.SPOTIFY_CLIENT_ID,
     response_type: 'code',
-    redirect_uri: env.SPOTIFY_REDIRECT_URI,
-    scope: SCOPE,
+    redirect_uri: options.redirectUri ?? env.SPOTIFY_REDIRECT_URI,
     state,
   });
+  const scope = options.scope ?? SCOPE;
+  if (scope) params.set('scope', scope);
   return `${AUTHORIZE_URL}?${params}`;
 }
 
