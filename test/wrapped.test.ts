@@ -4,7 +4,17 @@ import { buildEras, eraAt, parseEras } from '../src/eras';
 import { localDayKey, startOfLocalDayUtcMs } from '../src/tz';
 import { freezeClock } from './helpers';
 import { edgeRequest } from '../src/snapshots';
-import { listeningAge, warmWrappedPresets, wrappedKey, wrappedPresets, type Wrapped, type WrappedPreset } from '../src/wrapped';
+import {
+  type HourRow,
+  type Wrapped,
+  type WrappedPreset,
+  listeningAge,
+  playsCte,
+  splitHourly,
+  warmWrappedPresets,
+  wrappedKey,
+  wrappedPresets,
+} from '../src/wrapped';
 
 const ERAS = buildEras(parseEras(env.ERAS, undefined), 0);
 
@@ -334,3 +344,51 @@ describe('listeningAge', () => {
 function round(value: number) {
   return Math.round(value * 1000) / 1000;
 }
+
+describe('wrapped: one pass over the plays', () => {
+  it('gives the days, clock and skips the three separate queries gave', async () => {
+    // Plays across the change of era and London's clock changes, with gaps
+    // from seconds (skips) to hours, many tracks, and several a day.
+    const plays: Play[] = [];
+    let ms = Date.UTC(2024, 2, 20);
+    for (let i = 0; i < 1500; i++) {
+      ms += [10_000, 29_999, 30_000, 95_000, 4 * MIN, 47 * MIN, 9 * 60 * MIN][(i * 7 + (i >> 3)) % 7]!;
+      plays.push({ ms, trackId: `t${(i * i) % 37}`, durationMs: 60_000 + (i % 5) * 50_000 });
+    }
+    await seed(plays);
+    const range = { from: '2024-03-25', to: '2025-12-31', fromMs: Date.UTC(2024, 2, 25), toMs: Date.UTC(2026, 0, 1) };
+    const cte = playsCte(ERAS);
+    const counted = '(gap_ms IS NULL OR gap_ms >= 30000)';
+    const [days, clock, skips, hourly] = await env.DB.batch([
+      env.DB.prepare(
+        `${cte} SELECT track_id, date(ls, 'unixepoch') AS day, COUNT(*) AS plays, SUM(ms) AS ms
+                  FROM p WHERE ${counted} GROUP BY track_id, day`,
+      ).bind(range.fromMs, range.toMs),
+      env.DB.prepare(
+        `${cte} SELECT CAST(strftime('%w', ls, 'unixepoch') AS INTEGER) AS dow,
+                       CAST(strftime('%H', ls, 'unixepoch') AS INTEGER) AS hour, SUM(ms) AS ms
+                  FROM p WHERE ${counted} GROUP BY dow, hour`,
+      ).bind(range.fromMs, range.toMs),
+      env.DB.prepare(`${cte} SELECT COUNT(*) AS n FROM p WHERE NOT ${counted}`).bind(range.fromMs, range.toMs),
+      env.DB.prepare(
+        `${cte} SELECT track_id, date(ls, 'unixepoch') AS day, CAST(strftime('%H', ls, 'unixepoch') AS INTEGER) AS hour,
+                       SUM(${counted}) AS plays, SUM(CASE WHEN ${counted} THEN ms ELSE 0 END) AS ms, SUM(NOT ${counted}) AS skips
+                  FROM p GROUP BY track_id, day, hour ORDER BY track_id, day, hour`,
+      ).bind(range.fromMs, range.toMs),
+    ]);
+    const skipCount = (skips!.results[0] as { n: number }).n;
+    const split = splitHourly(hourly!.results as HourRow[]);
+    expect(skipCount).toBeGreaterThan(100);
+    expect(split.skips).toBe(skipCount);
+    expect(split.dayRows).toEqual(days!.results);
+    expect(split.clockRows).toEqual(clock!.results);
+    expect(split.clockRows.length).toBeGreaterThan(100);
+
+    // And the route's body counts what those queries counted.
+    const response = await wrapped(range.from, range.to);
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as Wrapped;
+    expect(body.totals.skips).toBe(skipCount);
+    expect(body.totals.plays).toBe((days!.results as Array<{ plays: number }>).reduce((sum, row) => sum + row.plays, 0));
+  });
+});

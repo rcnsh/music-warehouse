@@ -133,8 +133,10 @@ export interface Wrapped {
   streak: { days: number; from: string; to: string } | null;
 }
 
-type DayRow = { track_id: string; day: string; plays: number; ms: number };
-type ClockRow = { dow: number; hour: number; ms: number };
+export type DayRow = { track_id: string; day: string; plays: number; ms: number };
+export type ClockRow = { dow: number; hour: number; ms: number };
+/** Counted plays, their minutes and skips per track, local day and hour. */
+export type HourRow = { track_id: string; day: string; hour: number; plays: number; ms: number; skips: number };
 type MetaRow = {
   track_id: string;
   name: string;
@@ -184,7 +186,7 @@ function add<K>(map: Map<K, number>, key: K, value: number) {
  * Per-play listened time, in local time, for plays ending in [?1, ?2).
  * The lag looks a day back so the first play in the range has a predecessor.
  */
-function playsCte(eras: readonly Era[]): string {
+export function playsCte(eras: readonly Era[]): string {
   const { local } = localTimeSql(eras);
   return `WITH raw AS (
       SELECT p.played_at_ms, p.track_id,
@@ -209,20 +211,15 @@ export async function computeWrapped(
 ): Promise<Wrapped> {
   const cte = playsCte(eras);
   const counted = `(gap_ms IS NULL OR gap_ms >= ${MIN_PLAY_MS})`;
-  const [days, clock, meta, prior, skips] = await db.batch([
+  const [hourly, meta, prior] = await db.batch([
+    // One pass over the range's plays for days, hours and skips alike: each
+    // statement re-reads the plays, so this was three.
     db
       .prepare(
         `${cte}
-         SELECT track_id, date(ls, 'unixepoch') AS day, COUNT(*) AS plays, SUM(ms) AS ms
-           FROM p WHERE ${counted} GROUP BY track_id, day`,
-      )
-      .bind(range.fromMs, range.toMs),
-    db
-      .prepare(
-        `${cte}
-         SELECT CAST(strftime('%w', ls, 'unixepoch') AS INTEGER) AS dow,
-                CAST(strftime('%H', ls, 'unixepoch') AS INTEGER) AS hour, SUM(ms) AS ms
-           FROM p WHERE ${counted} GROUP BY dow, hour`,
+         SELECT track_id, date(ls, 'unixepoch') AS day, CAST(strftime('%H', ls, 'unixepoch') AS INTEGER) AS hour,
+                SUM(${counted}) AS plays, SUM(CASE WHEN ${counted} THEN ms ELSE 0 END) AS ms, SUM(NOT ${counted}) AS skips
+           FROM p GROUP BY track_id, day, hour ORDER BY track_id, day, hour`,
       )
       .bind(range.fromMs, range.toMs),
     // One row per track played in the range. The first-ever play comes off
@@ -250,20 +247,50 @@ export async function computeWrapped(
          SELECT DISTINCT 'song', ${songTitleSql('lower(name)')} || '|' || lower(an) FROM before WHERE an IS NOT NULL`,
       )
       .bind(range.fromMs),
-    db.prepare(`${cte} SELECT COUNT(*) AS n FROM p WHERE NOT ${counted}`).bind(range.fromMs, range.toMs),
   ]);
 
+  const { dayRows, clockRows, skips } = splitHourly(hourly!.results as HourRow[]);
   return summarize(
     range,
-    days!.results as DayRow[],
-    clock!.results as ClockRow[],
+    dayRows,
+    clockRows,
     (meta!.results as Array<Omit<MetaRow, 'artist' | 'artist_id'> & { artist_pair: string | null }>).map(({ artist_pair, ...row }) => {
       const pair = artist_pair === null ? null : (JSON.parse(artist_pair) as [string, string]);
       return { ...row, artist_id: pair?.[0] ?? null, artist: pair?.[1] ?? null };
     }),
     prior!.results as PriorRow[],
-    (skips!.results[0] as { n: number } | undefined)?.n ?? 0,
+    skips,
   );
+}
+
+/**
+ * Plays per track, local day and hour (ordered so) into what summarize
+ * reads: plays and minutes per track and day, minutes per weekday and hour,
+ * and the skips. Only counted plays make a day row or minutes, as when each
+ * was its own query; the sums are of integers, so they come out the same.
+ */
+export function splitHourly(rows: HourRow[]): { dayRows: DayRow[]; clockRows: ClockRow[]; skips: number } {
+  const dayRows: DayRow[] = [];
+  const clock = new Map<number, ClockRow>();
+  let skips = 0;
+  let last: DayRow | undefined;
+  for (const row of rows) {
+    skips += row.skips;
+    if (row.plays === 0) continue;
+    if (last?.track_id === row.track_id && last.day === row.day) {
+      last.plays += row.plays;
+      last.ms += row.ms;
+    } else {
+      last = { track_id: row.track_id, day: row.day, plays: row.plays, ms: row.ms };
+      dayRows.push(last);
+    }
+    // As SQLite's %w: Sunday is 0.
+    const dow = new Date(`${row.day}T00:00:00Z`).getUTCDay();
+    const slot = clock.get(dow * 24 + row.hour) ?? { dow, hour: row.hour, ms: 0 };
+    slot.ms += row.ms;
+    clock.set(dow * 24 + row.hour, slot);
+  }
+  return { dayRows, clockRows: [...clock.entries()].sort(([a], [b]) => a - b).map(([, slot]) => slot), skips };
 }
 
 function summarize(
