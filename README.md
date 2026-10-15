@@ -391,7 +391,8 @@ and artists are named from the warehouse's own tables. Everything else is
 asked of Spotify by the poll, three a poll, so a backlog drains over a few
 polls; a playlist name is refreshed weekly. Spotify refuses third-party apps
 many editorial and algorithmic playlists ("Discover Weekly", "Daily Mix"):
-those stay `null` and are asked again every 30 days. Migration 0013 lists
+those stay `null` and are asked again every 30 days, as do private playlists
+if the grant lacks `playlist-read-private` (the Worker doesn't ask for it). Migration 0013 lists
 every context already stored. Export plays carry no context.
 
 `play_number` says which play of its song this was, counting every edition
