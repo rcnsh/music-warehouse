@@ -175,6 +175,21 @@ describe('/health (R6)', () => {
     expect(body.total_plays).toBe(counted!.n);
   });
 
+  it('reports the concert check, without affecting ok', async () => {
+    const now = Date.now();
+    await seedAuthorized({ authorizedAtMs: now - 10 * 86_400_000 });
+    await env.DB.prepare('UPDATE sync_state SET last_success_ms = ? WHERE id = 1').bind(now - 60_000).run();
+
+    let body = (await (await get('/health')).json()) as Record<string, any>;
+    expect(body.concerts).toMatchObject({ consecutive_failures: 0, failing: false });
+
+    await env.DB.prepare("UPDATE concert_check_state SET consecutive_failures = 2, last_error = 'quota' WHERE id = 1").run();
+    body = (await (await get('/health')).json()) as Record<string, any>;
+    expect(body.concerts).toMatchObject({ consecutive_failures: 2, last_error: 'quota', failing: true });
+    expect(body.ok).toBe(true);
+    expect(String(body.action_required)).toContain('concert check');
+  });
+
   it('reports zero plays on an empty warehouse, not null', async () => {
     const body = (await (await get('/health')).json()) as Record<string, unknown>;
     expect(body.total_plays).toBe(0);

@@ -919,8 +919,10 @@ taken out of `CONCERT_REGIONS`. A region with more than 600 events is read up
 to the date its third page reaches, and later events keep their rows (and
 `first_seen`) until a run reaches them. A 429 is retried after its
 `Retry-After` when that is short (30 s a run in all); the last run, and the
-last failure, are kept in `concert_check_state` (migration 0017). Needs
-`TICKETMASTER_API_KEY` and at least one region; there are no push alerts.
+last failure, are kept in `concert_check_state` (migration 0017), shown under
+`concerts` in `/health`, and two failed runs in a row raise the
+`concert_check_failing` [alert](#alerting). Needs `TICKETMASTER_API_KEY` and at
+least one region; new events themselves are not pushed.
 
 ### Live from Spotify
 
@@ -988,7 +990,10 @@ same line as the `ingestion_stalled` alert); `stalled` says when it hasn't.
 `action_required` names what to do whenever `ok` is false, and warns 14 days
 before the grant expires. It also reports `total_plays`, `plays_last_24h`,
 `days_until_token_expiry`, `cursor_iso`, `last_error` and
-`consecutive_failures`.
+`consecutive_failures`, and under `concerts` how the daily concert check has
+gone (`last_run_ms`, `last_success_ms`, `last_error`, `consecutive_failures`,
+and `failing` from two failures in a row). A failing concert check sets
+`action_required` but not `ok`, which is about recording plays.
 
 `total_plays` is summed from the [play-count rollup](#the-play-count-rollup),
 one row per day, rather than counted play by play, so a call reads a few
@@ -1010,8 +1015,10 @@ conditions are logged but never pushed.
 | `needs_reauth` | critical | The grant was rejected; ingestion has stopped. |
 | `token_expiring` | warning | The grant expires in 14 days or less. |
 | `ingestion_stalled` | critical | No successful poll for 3 hours. |
+| `concert_check_failing` | warning | The daily concert check failed twice in a row (with `TICKETMASTER_API_KEY` set). |
 
-The first two suppress the others. A firing condition is re-sent at most once a
+The first two suppress the other Spotify conditions; the concert alert is
+independent of them. A firing condition is re-sent at most once a
 day, and alerts again immediately if it clears and comes back. Test it with
 `POST /admin/alert-check?force=1`.
 
