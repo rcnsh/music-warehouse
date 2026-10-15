@@ -8,6 +8,7 @@ import {
   startOfLocalDayUtcMs,
 } from './tz';
 import { ARTIST_TRACKS_CTE, SONG_TRACKS_CTE, textParam } from './history';
+import { NAME_KEY_PREFIX } from './db';
 import { trigramPhrase } from './search-index';
 import { ROLLUP_STATE_SQL, type RollupState, beginsDay, endsDay, rollupServes, rollupZone, withTrackCounts } from './rollup';
 import type { Env } from './types';
@@ -360,21 +361,35 @@ export async function topArtists(env: Env, url: URL): Promise<Response> {
   // Plays are counted per track before artists are credited, so each track's
   // credits are looked up once rather than once per play: half the rows read
   // (49k instead of 100k for a year). Over whole months the counts come from
-  // the rollup (src/rollup.ts). artist_id breaks full ties, so both ways of
-  // counting list them in the same order.
+  // the rollup (src/rollup.ts).
+  //
+  // Artists are grouped by lowercased name, as /api/artist, search and the
+  // concerts fold them, so the export's `name:` placeholders count with the
+  // real id: one row per artist, with the real id and spelling where there is
+  // one. A track counts once per name even if it credits both. Ties are
+  // broken by the key, so both ways of counting list them in the same order.
   const { result: query, all, rollup } = await withTrackCounts(
     env,
     { from, to, fromMs, toMs, timeZone },
     'n',
     (cte) =>
-      `WITH ${cte}
-       SELECT a.artist_id, a.name, SUM(c.n) AS plays
-         FROM c
-         JOIN track_artists ta ON ta.track_id = c.track_id
-         JOIN artists a        ON a.artist_id = ta.artist_id
-        GROUP BY a.artist_id, a.name
-        ORDER BY plays DESC, a.name ASC, a.artist_id ASC
-        LIMIT ?`,
+      `WITH ${cte},
+       credits AS (
+         SELECT DISTINCT ta.track_id, lower(a.name) AS k
+           FROM c JOIN track_artists ta ON ta.track_id = c.track_id JOIN artists a ON a.artist_id = ta.artist_id
+       ),
+       top AS (
+         SELECT cr.k, SUM(c.n) AS plays FROM credits cr JOIN c ON c.track_id = cr.track_id
+          GROUP BY cr.k ORDER BY plays DESC, cr.k LIMIT ?
+       ),
+       named AS (
+         SELECT top.k, top.plays,
+                (SELECT json_array(a.artist_id, a.name) FROM artists a WHERE a.name = top.k COLLATE NOCASE
+                  ORDER BY instr(a.artist_id, '${NAME_KEY_PREFIX}') = 1, a.artist_id LIMIT 1) AS pair
+           FROM top
+       )
+       SELECT json_extract(pair, '$[0]') AS artist_id, json_extract(pair, '$[1]') AS name, plays
+         FROM named ORDER BY plays DESC, k`,
     [limit],
   );
 

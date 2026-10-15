@@ -292,6 +292,32 @@ describe('read endpoints (R9)', () => {
     ]);
   });
 
+  it('counts an export placeholder with the real artist, under the real id and spelling', async () => {
+    const day = Date.parse('2026-09-08T12:00:00Z');
+    await seedPlays([
+      { ms: day, trackId: 't1', artistId: 'real-porter', artistName: 'Porter Robinson' },
+      { ms: day + 1000, trackId: 'old', artistId: 'name:porter robinson', artistName: 'porter robinson' },
+      { ms: day + 2000, trackId: 'old', artistId: 'name:porter robinson', artistName: 'porter robinson' },
+      { ms: day + 3000, trackId: 'ph', artistId: 'name:only placeholder', artistName: 'Only Placeholder' },
+      { ms: day + 4000, trackId: 't2', artistId: 'b', artistName: 'Beta' },
+      { ms: day + 5000, trackId: 't3', artistId: 'b', artistName: 'Beta' },
+    ]);
+    // A track crediting the same artist twice (both ids) counts once.
+    await env.DB.prepare("INSERT INTO track_artists (track_id, artist_id, position) VALUES ('t1', 'name:porter robinson', 1)").run();
+
+    type Body = { artists: Array<{ artist_id: string; name: string; plays: number }> };
+    const expected = [
+      { artist_id: 'real-porter', name: 'Porter Robinson', plays: 3 },
+      { artist_id: 'b', name: 'Beta', plays: 2 },
+      { artist_id: 'name:only placeholder', name: 'Only Placeholder', plays: 1 },
+    ];
+    // Whole month (rollup) and part of one (plays) agree.
+    expect(((await (await get('/api/top-artists?from=2026-09-01&to=2026-09-30&tz=UTC')).json()) as Body).artists).toEqual(expected);
+    expect(((await (await get('/api/top-artists?from=2026-09-02&to=2026-09-29&tz=UTC')).json()) as Body).artists).toEqual(expected);
+    const limited = (await (await get('/api/top-artists?from=2026-09-02&to=2026-09-29&tz=UTC&limit=1')).json()) as Body;
+    expect(limited.artists).toEqual(expected.slice(0, 1));
+  });
+
   it('reports rows_read so query cost can be checked against D1 usage', async () => {
     await seedPlays([{ ms: Date.parse('2026-09-08T12:00:00Z'), trackId: 't1' }]);
     const body = (await (await get('/api/plays')).json()) as { _meta: { rows_read: number | null } };
