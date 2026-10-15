@@ -1,0 +1,5 @@
+# Test-only variables. vitest.config.ts runs the pool with the Wrangler
+# environment "test", which makes Wrangler read this file instead of .dev.vars,
+# so a developer's real secrets never reach the test Worker. Everything the
+# tests need is set explicitly as a binding in vitest.config.ts; this file
+# exists to shadow .dev.vars and must hold dummy values only.

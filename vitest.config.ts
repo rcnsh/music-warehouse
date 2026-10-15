@@ -22,7 +22,10 @@ function loadFixture(): Record<string, unknown> {
 export default defineConfig({
   plugins: [
     cloudflareTest({
-      wrangler: { configPath: './wrangler.jsonc' },
+      // The "test" environment makes Wrangler load .dev.vars.test (dummy
+      // values, committed) in place of .dev.vars, so real secrets stay out of
+      // tests and CI needs no .dev.vars.
+      wrangler: { configPath: './wrangler.jsonc', environment: 'test' },
       miniflare: {
         bindings: {
           TEST_MIGRATIONS: migrations,
