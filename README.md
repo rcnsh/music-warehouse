@@ -59,10 +59,23 @@ deployment. They are marked `[1]` to `[3]` in the file:
 2. **`database_id`**: from the next step.
 3. **`vars.SPOTIFY_REDIRECT_URI`**: the redirect URI from step 1, exactly.
 
-Listening stats and Wrapped assume your history starts in July 2020 and read
-local time as Europe/London, then Asia/Singapore from `MOVED_AT`. If yours
-differs, edit `HISTORY_START_MS` and the eras in [`src/eras.ts`](src/eras.ts).
-Ingestion and the other routes don't depend on them.
+Listening stats and Wrapped read local time in one timezone, `TIMEZONE`
+(default UTC), and start at your first stored play. If you've lived in more
+than one zone, set `ERAS` instead: a JSON list of periods, each with its own
+timezone, for example
+
+```json
+[{ "key": "home", "label": "Home", "timeZone": "Europe/London", "from": "2020-07-01T00:00:00+01:00" },
+ { "key": "abroad", "label": "Abroad", "timeZone": "Asia/Tokyo", "from": "2024-09-01T00:00:00Z" }]
+```
+
+`key` is lowercase letters, digits and `-`, and appears in stats responses;
+`label` is for display. Every era after the first needs `from`. On the first,
+`from` is optional and also marks where history starts, which helps if your
+first few plays are noise. The `eras` stat compares the latest era with the
+months before it. Set `ERAS` as a secret if an era's start is private: the
+stats only publish the month. See [`src/eras.ts`](src/eras.ts). Ingestion and
+the other routes don't depend on it.
 
 ### 3. Create the database
 
@@ -286,7 +299,9 @@ locally. `npx wrangler secret list` shows what is set.
 | `ALERT_MENTION` | no | Prefix for every alert, e.g. a Discord `<@id>`. |
 | `SIGN_IN_SCHEMES` | no | Comma-separated custom URL schemes a mobile app may [sign in](#signing-in-with-spotify) to, e.g. `app.remastered`. |
 | `TICKETMASTER_API_KEY` | no | A Ticketmaster Discovery API consumer key, from <https://developer.ticketmaster.com>, for [concerts](#concerts). The consumer secret isn't needed. Unset turns the concert check off. |
-| `MOVED_AT` | no | ISO instant the second era starts. See [`src/eras.ts`](src/eras.ts). |
+| `TIMEZONE` | no | IANA timezone the stats read local time in, when `ERAS` is unset. Default `UTC`. |
+| `ERAS` | no | JSON list of periods, each read in its own timezone. See [step 2](#2-configure-the-deployment) and [`src/eras.ts`](src/eras.ts). |
+| `CONCERT_REGIONS` | no | JSON list of places to look for [concerts](#concerts). Unset means none. |
 | `SPOTIFY_REDIRECT_URI` | yes | A var in `wrangler.jsonc`, not a secret. |
 
 The crons in `wrangler.jsonc` are `*/30 * * * *` (poll) and `0 9 * * *`
@@ -454,16 +469,27 @@ and this year up to the last full week.
 ### Concerts
 
 **`GET /api/concerts?region=&since=&tz=`**: upcoming Ticketmaster music
-events, in Singapore and within 50 km of central London, for the 80 artists
-you played most over the last year. Soonest first. `region` is `singapore` or
-`london`; `since` (a local date) keeps only events first seen on or after it,
-which is how to ask what's new.
+events in the regions you configure, for the 80 artists you played most over
+the last year. Soonest first. `region` is one of the configured keys; `since`
+(a local date) keeps only events first seen on or after it, which is how to
+ask what's new. `regions` lists the configured keys with their labels.
+
+Regions come from `CONCERT_REGIONS`, a JSON list of up to five. Each has a
+`key`, a `label`, and either a Ticketmaster `countryCode` or a `geoPoint`
+[geohash](https://www.movable-type.co.uk/scripts/geohash.html) with a
+`radius` in km:
 
 ```json
-{ "checked": { "singapore": "2026-10-15T01:23:04.000Z", "london": "2026-10-15T01:23:05.000Z" },
-  "concerts": [ { "region": "singapore", "date": "2027-02-12", "time": "20:00", "artists": "Maroon 5",
-                  "name": "Maroon 5 Asia 2027 in Singapore", "venue": "National Stadium", "city": "Singapore",
-                  "status": "onsale", "url": "https://ticketmaster.sg/…", "first_seen": "2026-10-15T01:23:04.000Z" } ] }
+[{ "key": "uk", "label": "United Kingdom", "countryCode": "GB" },
+ { "key": "nyc", "label": "New York", "geoPoint": "dr5ru", "radius": 40 }]
+```
+
+```json
+{ "regions": [ { "key": "uk", "label": "United Kingdom" }, { "key": "nyc", "label": "New York" } ],
+  "checked": { "uk": "2026-10-15T01:23:04.000Z", "nyc": "2026-10-15T01:23:05.000Z" },
+  "concerts": [ { "region": "nyc", "date": "2027-02-12", "time": "20:00", "artists": "Maroon 5",
+                  "name": "Maroon 5 2027 Tour", "venue": "Madison Square Garden", "city": "New York",
+                  "status": "onsale", "url": "https://www.ticketmaster.com/…", "first_seen": "2026-10-15T01:23:04.000Z" } ] }
 ```
 
 A daily cron (01:23 UTC) refreshes it; `POST /admin/concert-check` runs it
@@ -471,8 +497,9 @@ now. Each artist is matched to a Ticketmaster attraction by exact name
 (ignoring case, accents and `&`) at most 25 a day, and the answer kept, so the
 first few days fill in gradually. An act whose name Ticketmaster spells
 differently is missed rather than guessed at; [pin it](#admin) instead. Events Ticketmaster stops listing
-(past, cancelled) drop out. Needs `TICKETMASTER_API_KEY`; there are no push
-alerts.
+(past, cancelled) drop out, as do rows for a region taken out of
+`CONCERT_REGIONS`. Needs `TICKETMASTER_API_KEY` and at least one region; there
+are no push alerts.
 
 ### Live from Spotify
 

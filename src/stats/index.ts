@@ -1,4 +1,4 @@
-import { type Era, erasFor, startOfLocalToday, startOfLocalWeek } from '../eras';
+import { type Era, eraDigest, loadEras, startOfLocalToday, startOfLocalWeek } from '../eras';
 import { snapshot } from '../snapshots';
 import type { Env } from '../types';
 import { computeDrift } from './drift';
@@ -74,12 +74,20 @@ export function isStatName(name: string): name is StatName {
   return Object.hasOwn(STATS, name);
 }
 
+/**
+ * The snapshot key for a stat. The version retires bodies when a shape changes
+ * (eras moved to generic field names in v2); the era digest retires bodies cut
+ * on eras that have since been reconfigured.
+ */
+export const statKey = (name: StatName, eras: readonly Era[]) =>
+  `${name}:${name === 'eras' ? 'v2' : 'v1'}:${eraDigest(eras)}`;
+
 export async function statRoute(env: Env, ctx: ExecutionContext, name: StatName): Promise<Response> {
   const { cutoff, compute }: StatDef = STATS[name];
   // The version suffix retires every cached body when a shape changes.
-  const eras = erasFor(env.MOVED_AT);
   const now = Date.now();
-  const result = await snapshot(env.DB, ctx, `${name}:v1`, freshForSeconds(cutoff, eras, now), () =>
+  const eras = await loadEras(env, now);
+  const result = await snapshot(env.DB, ctx, statKey(name, eras), freshForSeconds(cutoff, eras, now), () =>
     compute(env.DB, Date.now(), eras),
   );
 

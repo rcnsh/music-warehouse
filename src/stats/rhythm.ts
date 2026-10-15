@@ -1,4 +1,4 @@
-import { HISTORY_START_MS, type Era, eraAt, eraEndMs, localTimeSql, monthOf, startOfLocalWeek } from '../eras';
+import { type Era, eraAt, eraEndMs, historyStartMs, localTimeSql, monthOf, startOfLocalWeek } from '../eras';
 import { localDayKey } from '../tz';
 
 /**
@@ -144,7 +144,7 @@ export async function computeRhythm(db: D1Database, now: number, eras: readonly 
        ),
        loc AS (
          SELECT n, ${era} AS era, ${local} AS ls
-           FROM (SELECT n, s, strftime('%Y', s, 'unixepoch') AS y FROM h)
+           FROM (SELECT n, s FROM h)
        )
        SELECT 'day' AS kind, NULL AS era, date(ls, 'unixepoch') AS day, NULL AS dow, NULL AS hour, SUM(n) AS plays
          FROM loc GROUP BY day
@@ -153,7 +153,7 @@ export async function computeRhythm(db: D1Database, now: number, eras: readonly 
               CAST(strftime('%H', ls, 'unixepoch') AS INTEGER), SUM(n)
          FROM loc GROUP BY era, 3, 4, 5`,
     )
-    .bind(HISTORY_START_MS, cutoff)
+    .bind(historyStartMs(eras), cutoff)
     .all<{ kind: string; era: number | null; day: string | null; dow: number | null; hour: number | null; plays: number }>();
 
   const lastDay = localDayKey(cutoff - 1, eraAt(eras, cutoff - 1).timeZone);
@@ -161,7 +161,7 @@ export async function computeRhythm(db: D1Database, now: number, eras: readonly 
     .filter((row) => row.kind === 'day')
     .map((row) => ({ day: row.day!, plays: row.plays }))
     .sort((a, b) => a.day.localeCompare(b.day));
-  const range = { from: monthOf(HISTORY_START_MS, eras[0]!.timeZone), to: lastDay.slice(0, 7) };
+  const range = { from: monthOf(historyStartMs(eras), eras[0]!.timeZone), to: lastDay.slice(0, 7) };
 
   type Grid = number[][];
   const emptyGrid = (): Grid => Array.from({ length: 7 }, () => new Array<number>(24).fill(0));
@@ -215,7 +215,7 @@ export async function computeRhythm(db: D1Database, now: number, eras: readonly 
   };
 
   const eraRhythms = eras.map((_, index) =>
-    eraRhythm(index, sumGrids([...cells[index]!.values()]), HISTORY_START_MS, Infinity, true),
+    eraRhythm(index, sumGrids([...cells[index]!.values()]), historyStartMs(eras), Infinity, true),
   );
 
   const currentYear = lastDay.slice(0, 4);

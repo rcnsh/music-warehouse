@@ -1,4 +1,4 @@
-import { HISTORY_START_MS, type Era, startOfLocalWeek } from '../eras';
+import { type Era, historyStartMs, startOfLocalWeek } from '../eras';
 import { PRIMARY_ARTIST_SQL } from './sql';
 
 /**
@@ -11,8 +11,8 @@ import { PRIMARY_ARTIST_SQL } from './sql';
  * `name:` placeholder ids into their real-id twins; songs by title + artist,
  * which folds single/album/re-release ids of the same recording.
  *
- * Periods are UTC calendar quarters. At that size the Newcastle/Singapore
- * offset moves a few hours of plays across a boundary at most. The data stops
+ * Periods are UTC calendar quarters. At that size an era's local offset moves
+ * a few hours of plays across a boundary at most. The data stops
  * at the start of this week, so the current quarter's total can't be diffed
  * day to day into a daily play count.
  */
@@ -124,7 +124,7 @@ export async function computeTopOverTime(db: D1Database, now: number, eras: read
          FROM songs_ranked s LEFT JOIN albums al ON al.album_id = s.album_id
         WHERE s.rk <= ?4`,
     )
-    .bind(HISTORY_START_MS, LEADERS, ARTISTS_PER_PERIOD, TRACKS_PER_PERIOD, cutoff)
+    .bind(historyStartMs(eras), LEADERS, ARTISTS_PER_PERIOD, TRACKS_PER_PERIOD, cutoff)
     .all<Row>();
 
   const quarterTotals = new Map<string, number>();

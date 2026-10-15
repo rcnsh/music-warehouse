@@ -3,9 +3,9 @@ import { startOfLocalDayUtcMs } from './tz';
 import type { Env } from './types';
 
 /**
- * Concert alerts: upcoming Ticketmaster events, in Singapore and around
- * London, for the artists played most over the last year. Pull only: a daily
- * cron fills the `concerts` table and GET /api/concerts reads it.
+ * Concert alerts: upcoming Ticketmaster events in the configured regions
+ * (CONCERT_REGIONS), for the artists played most over the last year. Pull
+ * only: a daily cron fills the `concerts` table and GET /api/concerts reads it.
  *
  * Each run fits the Free plan's 50 subrequests (Workers Paid allows 10,000),
  * so the check works on either plan. Names are matched to Ticketmaster
@@ -29,12 +29,58 @@ const MAX_PAGES = 3;
 /** Ticketmaster allows five calls a second. */
 const DEFAULT_SPACING_MS = 250;
 
-export const REGIONS = {
-  singapore: { countryCode: 'SG' },
-  // Geohash gcpvj is central London; 50 km takes in Wembley and the O2.
-  london: { geoPoint: 'gcpvj', radius: '50', unit: 'km' },
-} as const satisfies Record<string, Record<string, string>>;
-type Region = keyof typeof REGIONS;
+/** Most regions a run checks, so a run stays inside the Free plan's 50 subrequests. */
+const MAX_REGIONS = 5;
+
+/** A place to look for concerts, and the Discovery API filter that finds it. */
+export interface Region {
+  key: string;
+  label: string;
+  query: Record<string, string>;
+}
+
+/** Thrown for a CONCERT_REGIONS setting that cannot be used, naming what is wrong. */
+export class RegionConfigError extends Error {}
+
+/**
+ * The configured regions, from CONCERT_REGIONS: a JSON list where each entry
+ * has a key, a label, and either a Ticketmaster `countryCode` (e.g. "GB") or
+ * a `geoPoint` geohash with `radius` in km, e.g.
+ *
+ *   [{"key":"london","label":"London","geoPoint":"gcpvj","radius":50}]
+ *
+ * (geohash gcpvj is central London; 50 km takes in Wembley and the O2).
+ * Unset means none, so the check has nothing to do.
+ */
+export function parseRegions(raw: string | undefined): Region[] {
+  if (!raw?.trim()) return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new RegionConfigError('CONCERT_REGIONS is not valid JSON');
+  }
+  if (!Array.isArray(parsed)) throw new RegionConfigError('CONCERT_REGIONS must be a JSON array');
+  if (parsed.length > MAX_REGIONS) throw new RegionConfigError(`CONCERT_REGIONS holds at most ${MAX_REGIONS} regions`);
+  const seen = new Set<string>();
+  return parsed.map((entry: Record<string, unknown>, i): Region => {
+    const where = `CONCERT_REGIONS[${i}]`;
+    const { key, label, countryCode, geoPoint, radius } = entry ?? {};
+    if (typeof key !== 'string' || !/^[a-z0-9-]{1,32}$/.test(key)) throw new RegionConfigError(`${where}.key must be 1-32 of a-z, 0-9, -`);
+    if (seen.has(key)) throw new RegionConfigError(`${where}.key repeats "${key}"`);
+    seen.add(key);
+    if (typeof label !== 'string' || !label.trim()) throw new RegionConfigError(`${where}.label is required`);
+    if (typeof countryCode === 'string' && /^[A-Z]{2}$/.test(countryCode) && geoPoint === undefined) {
+      return { key, label, query: { countryCode } };
+    }
+    if (typeof geoPoint === 'string' && /^[0-9b-hjkmnp-z]{1,12}$/.test(geoPoint) && countryCode === undefined) {
+      const km = Number(radius);
+      if (!Number.isFinite(km) || km <= 0 || km > 500) throw new RegionConfigError(`${where}.radius must be 1 to 500 km`);
+      return { key, label, query: { geoPoint, radius: String(km), unit: 'km' } };
+    }
+    throw new RegionConfigError(`${where} needs either a two-letter countryCode or a geoPoint geohash with a radius`);
+  });
+}
 
 interface Attraction {
   id: string;
@@ -175,7 +221,7 @@ async function fetchRegion(tm: Ticketmaster, region: Region, ids: string[]): Pro
   const events: TmEvent[] = [];
   for (let page = 0; page < MAX_PAGES; page++) {
     const body = await tm.get<TmPage<{ events?: TmEvent[] }>>('/events.json', {
-      ...REGIONS[region],
+      ...region.query,
       attractionId: ids.join(','),
       classificationName: 'music',
       sort: 'date,asc',
@@ -189,7 +235,7 @@ async function fetchRegion(tm: Ticketmaster, region: Region, ids: string[]): Pro
 }
 
 /** Store a region's events, then drop the ones Ticketmaster no longer lists (past, cancelled, removed). */
-async function storeRegion(env: Env, region: Region, events: TmEvent[], attractions: Map<string, string>, now: number) {
+async function storeRegion(env: Env, region: string, events: TmEvent[], attractions: Map<string, string>, now: number) {
   const statements = events.map((event) => {
     const billed = event._embedded?.attractions ?? [];
     const ours = billed.filter((a) => attractions.has(a.id)).map((a) => attractions.get(a.id)!);
@@ -232,21 +278,28 @@ export async function runConcertCheck(
   const now = options.now ?? Date.now();
   const result: ConcertCheckResult = { artists: 0, looked_up: 0, matched: 0, regions: {} };
   if (!env.TICKETMASTER_API_KEY) return { ...result, skipped: 'TICKETMASTER_API_KEY is not set' };
+  const regions = parseRegions(env.CONCERT_REGIONS);
+  // Rows for a region taken out of the settings would otherwise linger forever.
+  await env.DB.batch([
+    env.DB.prepare('DELETE FROM concerts WHERE region NOT IN (SELECT value FROM json_each(?))').bind(JSON.stringify(regions.map((r) => r.key))),
+    env.DB.prepare('DELETE FROM concert_runs WHERE region NOT IN (SELECT value FROM json_each(?))').bind(JSON.stringify(regions.map((r) => r.key))),
+  ]);
+  if (regions.length === 0) return { ...result, skipped: 'CONCERT_REGIONS is not set' };
 
   const tm = new Ticketmaster(env.TICKETMASTER_API_KEY, options.spacingMs ?? DEFAULT_SPACING_MS);
   const artists = await topArtists(env, now);
   const { attractions, lookedUp } = await resolveArtists(env, tm, artists, now);
   Object.assign(result, { artists: artists.length, looked_up: lookedUp, matched: attractions.size });
 
-  for (const region of Object.keys(REGIONS) as Region[]) {
+  for (const region of regions) {
     try {
       // With nobody matched there is nothing to list, and an empty attractionId would list everything.
       const events = attractions.size > 0 ? await fetchRegion(tm, region, [...attractions.keys()]) : [];
-      await storeRegion(env, region, events, attractions, now);
-      result.regions[region] = { events: events.length };
+      await storeRegion(env, region.key, events, attractions, now);
+      result.regions[region.key] = { events: events.length };
     } catch (error) {
       // A failed region keeps yesterday's rows rather than being emptied.
-      result.regions[region] = { error: (error as Error).message };
+      result.regions[region.key] = { error: (error as Error).message };
     }
   }
   return result;
@@ -261,8 +314,11 @@ export async function concertCheckRoute(env: Env, url: URL): Promise<Response> {
 
 /** GET /api/concerts?region=&since=&tz= */
 export async function concertsRoute(env: Env, url: URL): Promise<Response> {
+  const regions = parseRegions(env.CONCERT_REGIONS);
   const region = url.searchParams.get('region');
-  if (region !== null && !(region in REGIONS)) throw new BadRequest(`region must be one of ${Object.keys(REGIONS).join(', ')}`);
+  if (region !== null && !regions.some((r) => r.key === region)) {
+    throw new BadRequest(regions.length ? `region must be one of ${regions.map((r) => r.key).join(', ')}` : 'no concert regions are configured');
+  }
   const since = url.searchParams.get('since');
   let sinceMs = 0;
   if (since !== null) {
@@ -277,15 +333,20 @@ export async function concertsRoute(env: Env, url: URL): Promise<Response> {
   const [concerts, runs] = await env.DB.batch([
     env.DB.prepare(
       `SELECT region, local_date AS date, local_time AS time, artists, name, venue, city, status, url, first_seen_ms
-         FROM concerts WHERE (?1 IS NULL OR region = ?1) AND first_seen_ms >= ?2
+         FROM concerts
+        WHERE (?1 IS NULL OR region = ?1) AND first_seen_ms >= ?2
+          AND region IN (SELECT value FROM json_each(?3))
         ORDER BY local_date IS NULL, local_date, local_time, name`,
-    ).bind(region, sinceMs),
+    ).bind(region, sinceMs, JSON.stringify(regions.map((r) => r.key))),
     env.DB.prepare('SELECT region, checked_ms FROM concert_runs'),
   ]);
   const checked = Object.fromEntries(
     (runs!.results as Array<{ region: string; checked_ms: number }>).map((run) => [run.region, new Date(run.checked_ms).toISOString()]),
   );
+  // `regions` names each key, so a client can label results without knowing
+  // this deployment's places.
   return json({
+    regions: regions.map(({ key, label }) => ({ key, label })),
     checked,
     concerts: (concerts!.results as Array<Record<string, unknown> & { first_seen_ms: number }>).map(({ first_seen_ms, ...rest }) => ({
       ...rest,

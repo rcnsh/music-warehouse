@@ -23,12 +23,14 @@ export interface Env {
    */
   ALERT_MENTION?: string;
   /**
-   * ISO instant the listener moved from Newcastle to Singapore, which splits
-   * the listening stats into two eras with their own local time. A secret
-   * rather than a var because this repo is public and the stats deliberately
-   * publish only the month. Unset means a single Newcastle era.
+   * JSON list of eras, each read in its own timezone: key, label, IANA
+   * timeZone, and `from` (an ISO instant; optional on the first, where it also
+   * marks where history starts). See src/eras.ts. Optional: unset means one
+   * era in TIMEZONE. Set it as a secret if an era's exact start is private.
    */
-  MOVED_AT?: string;
+  ERAS?: string;
+  /** IANA timezone for the single era used when ERAS is unset. Default UTC. */
+  TIMEZONE?: string;
   /**
    * Comma-separated browser origins allowed to call /api/* cross-origin, e.g.
    * a Wrapped app the reader points at this warehouse. Optional: unset means
@@ -46,6 +48,12 @@ export interface Env {
    * unset means the concert cron does nothing and /api/concerts stays empty.
    */
   TICKETMASTER_API_KEY?: string;
+  /**
+   * JSON list of places to look for concerts: key, label, and either a
+   * Ticketmaster `countryCode` or a `geoPoint` geohash with `radius` in km.
+   * See src/concerts.ts. Optional: unset means no regions, so no checks.
+   */
+  CONCERT_REGIONS?: string;
 }
 
 /**

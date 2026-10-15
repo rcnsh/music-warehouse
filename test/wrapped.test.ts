@@ -1,8 +1,10 @@
 import { SELF, createExecutionContext, env, waitOnExecutionContext } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
-import { erasFor } from '../src/eras';
+import { buildEras, parseEras } from '../src/eras';
 import { edgeRequest } from '../src/snapshots';
-import { listeningAge, warmWrappedPresets, wrappedPresets, type Wrapped, type WrappedPreset } from '../src/wrapped';
+import { listeningAge, warmWrappedPresets, wrappedKey, wrappedPresets, type Wrapped, type WrappedPreset } from '../src/wrapped';
+
+const ERAS = buildEras(parseEras(env.ERAS, undefined), 0);
 
 const BASE = 'https://warehouse.test';
 const ADMIN = { Authorization: 'Bearer test-admin-token' };
@@ -53,11 +55,11 @@ function session(trackId: string, startMs: number, count: number, extra: Partial
 async function wrapped(from: string, to: string, headers: Record<string, string> = ADMIN) {
   // setup.ts empties stats_snapshots but not the Cache API, where a body from
   // an earlier test would otherwise answer.
-  await (await caches.open('stats')).delete(edgeRequest(`wrapped:v2:${from}:${to}`));
+  await (await caches.open('stats')).delete(edgeRequest(wrappedKey(ERAS, { from, to })));
   return SELF.fetch(`${BASE}/api/wrapped?from=${from}&to=${to}`, { headers });
 }
 
-// March 2024 is Newcastle-era (GMT); the test MOVED_AT is 2025-03-10.
+// March 2024 is in the first (Europe/London, GMT) era; the second starts 2025-03-10.
 const MARCH_2 = Date.UTC(2024, 2, 2, 12);
 const DAY = 86_400_000;
 
@@ -184,7 +186,7 @@ describe('wrapped: body', () => {
 });
 
 describe('wrapped: presets', () => {
-  const eras = erasFor('2025-03-10T00:00:00Z');
+  const eras = buildEras(parseEras(env.ERAS, undefined), 0);
   // Wednesday 14 October 2026, midday in Singapore.
   const NOW = Date.UTC(2026, 9, 14, 4);
 
@@ -251,15 +253,15 @@ describe('wrapped: presets', () => {
     await seed([...session('a', Date.UTC(2023, 2, 2, 12), 1), ...session('b', MARCH_2, 1)]);
     // An earlier test's body would otherwise answer from the Cache API.
     const edge = await caches.open('stats');
-    for (const year of [2023, 2024]) await edge.delete(edgeRequest(`wrapped:v2:${year}-01-01:${year}-12-31`));
+    for (const year of [2023, 2024]) await edge.delete(edgeRequest(wrappedKey(ERAS, { from: `${year}-01-01`, to: `${year}-12-31` })));
     const warm = async () => {
       const ctx = createExecutionContext();
       const warmed = await warmWrappedPresets(env, ctx, NOW);
       await waitOnExecutionContext(ctx);
       return warmed;
     };
-    expect(await warm()).toEqual(['wrapped:v2:2024-01-01:2024-12-31']);
-    expect(await warm()).toEqual(['wrapped:v2:2023-01-01:2023-12-31']);
+    expect(await warm()).toEqual([wrappedKey(ERAS, { from: '2024-01-01', to: '2024-12-31' })]);
+    expect(await warm()).toEqual([wrappedKey(ERAS, { from: '2023-01-01', to: '2023-12-31' })]);
     expect(await warm()).toEqual([]);
     const stored = await env.DB.prepare('SELECT COUNT(*) AS n FROM stats_snapshots WHERE body IS NOT NULL').first<{ n: number }>();
     expect(stored?.n).toBe(2);

@@ -12,7 +12,7 @@ CREATE TABLE concert_artists (
 -- Upcoming events, one row per event and region. first_seen_ms says what is new.
 CREATE TABLE concerts (
   event_id      TEXT    NOT NULL,
-  region        TEXT    NOT NULL,     -- 'singapore' or 'london'
+  region        TEXT    NOT NULL,     -- a key from CONCERT_REGIONS
   artists       TEXT    NOT NULL,     -- the matched artists on the bill
   name          TEXT    NOT NULL,
   local_date    TEXT,

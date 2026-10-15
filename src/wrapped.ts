@@ -1,5 +1,5 @@
 import { BadRequest, json } from './api';
-import { HISTORY_START_MS, type Era, eraAt, erasFor, localTimeSql, startOfLocalWeek } from './eras';
+import { type Era, eraAt, eraDigest, historyStartMs, loadEras, localTimeSql, startOfLocalWeek } from './eras';
 import { peekSnapshot, snapshot } from './snapshots';
 import { PRIMARY_ARTIST_SQL } from './stats/sql';
 import { endOfLocalDayUtcMs, isRealDay, localDayKey, startOfLocalDayUtcMs } from './tz';
@@ -16,9 +16,8 @@ import type { Env } from './types';
  * presets (see wrappedPresets). READ_TOKEN gets any other body already
  * computed, and a 403 otherwise.
  *
- * Local time is the era's, as everywhere else: a range that spans the move
- * buckets Newcastle plays in London time and Singapore plays in Singapore
- * time.
+ * Local time is the era's, as everywhere else: a range that spans a change
+ * of era buckets each play in the timezone of the era it fell in.
  *
  * Minutes are estimated. `played_at_ms` is when a play ended, so a play ran
  * for at most the gap since the one before, and at most the track's length.
@@ -179,7 +178,7 @@ function playsCte(eras: readonly Era[]): string {
       SELECT r.track_id, r.gap_ms,
              min(coalesce(r.gap_ms, ${FALLBACK_DURATION_MS}), coalesce(t.duration_ms, ${FALLBACK_DURATION_MS})) AS ms,
              ${local} AS ls
-        FROM (SELECT *, played_at_ms / 1000 AS s, strftime('%Y', played_at_ms / 1000, 'unixepoch') AS y FROM raw) r
+        FROM (SELECT *, played_at_ms / 1000 AS s FROM raw) r
         JOIN tracks t ON t.track_id = r.track_id
        WHERE r.played_at_ms >= ?1
     )`;
@@ -536,12 +535,16 @@ function closedRange(eras: readonly Era[], from: string, to: string, now: number
   if (toMs - fromMs > MAX_RANGE_DAYS * DAY_MS) throw new BadRequest(`Range too large; at most ${MAX_RANGE_DAYS} days`);
   const today = localDayKey(now, eraAt(eras, now).timeZone);
   if (to >= today) throw new BadRequest('`to` must be before today: a range is summarized once it has ended');
-  if (toMs <= HISTORY_START_MS) throw new BadRequest('Range ends before the history starts');
+  if (toMs <= historyStartMs(eras)) throw new BadRequest('Range ends before the history starts');
   return { from, to, fromMs, toMs };
 }
 
-/** The version suffix retires every stored body when the shape changes. */
-export const wrappedKey = (range: { from: string; to: string }) => `wrapped:v2:${range.from}:${range.to}`;
+/**
+ * The version suffix retires every stored body when the shape changes, and
+ * the era digest every body cut on eras that have since been reconfigured.
+ */
+export const wrappedKey = (eras: readonly Era[], range: { from: string; to: string }) =>
+  `wrapped:v2:${eraDigest(eras)}:${range.from}:${range.to}`;
 
 /**
  * A range that ended a while ago will never change; one that just ended might
@@ -577,7 +580,7 @@ const MAX_PRESET_YEARS = 30;
 export async function wrappedPresets(db: D1Database, eras: readonly Era[], now: number): Promise<WrappedPreset[]> {
   const { timeZone } = eraAt(eras, now);
   const thisYear = Number(localDayKey(now, timeZone).slice(0, 4));
-  const firstYear = Math.max(new Date(HISTORY_START_MS).getUTCFullYear(), thisYear - MAX_PRESET_YEARS);
+  const firstYear = Math.max(new Date(historyStartMs(eras)).getUTCFullYear(), thisYear - MAX_PRESET_YEARS);
 
   const candidates: Array<Omit<WrappedPreset, 'computed'> & WrappedRange> = [];
   const lastSunday = localDayKey(startOfLocalWeek(eras, now) - 1, timeZone);
@@ -600,18 +603,18 @@ export async function wrappedPresets(db: D1Database, eras: readonly Era[], now: 
       .bind(...candidates.flatMap((c, i) => [i, c.fromMs, c.toMs])),
     db
       .prepare(`SELECT key FROM stats_snapshots WHERE body IS NOT NULL AND key IN (${candidates.map(() => '?').join(', ')})`)
-      .bind(...candidates.map(wrappedKey)),
+      .bind(...candidates.map((c) => wrappedKey(eras, c))),
   ]);
   const withPlays = new Set((played!.results as Array<{ i: number }>).map((row) => row.i));
   const computed = new Set((stored!.results as Array<{ key: string }>).map((row) => row.key));
 
   return candidates
     .filter((_, i) => withPlays.has(i))
-    .map((c) => ({ from: c.from, to: c.to, label: c.label, kind: c.kind, computed: computed.has(wrappedKey(c)) }));
+    .map((c) => ({ from: c.from, to: c.to, label: c.label, kind: c.kind, computed: computed.has(wrappedKey(eras, c)) }));
 }
 
 export async function wrappedRangesRoute(env: Env): Promise<Response> {
-  return json({ ranges: await wrappedPresets(env.DB, erasFor(env.MOVED_AT), Date.now()) });
+  return json({ ranges: await wrappedPresets(env.DB, await loadEras(env), Date.now()) });
 }
 
 /**
@@ -621,22 +624,22 @@ export async function wrappedRangesRoute(env: Env): Promise<Response> {
  * read. Returns the keys computed.
  */
 export async function warmWrappedPresets(env: Env, ctx: ExecutionContext, now = Date.now(), limit = 1): Promise<string[]> {
-  const eras = erasFor(env.MOVED_AT);
+  const eras = await loadEras(env);
   const pending = (await wrappedPresets(env.DB, eras, now)).filter((preset) => !preset.computed).slice(0, limit);
   const warmed: string[] = [];
   for (const preset of pending) {
     const range = closedRange(eras, preset.from, preset.to, now);
-    await snapshot(env.DB, ctx, wrappedKey(range), freshForSeconds(range, now), () => computeWrapped(env.DB, eras, range));
-    warmed.push(wrappedKey(range));
+    await snapshot(env.DB, ctx, wrappedKey(eras, range), freshForSeconds(range, now), () => computeWrapped(env.DB, eras, range));
+    warmed.push(wrappedKey(eras, range));
   }
   return warmed;
 }
 
 export async function wrappedRoute(env: Env, ctx: ExecutionContext, url: URL, access: Access): Promise<Response> {
   const now = Date.now();
-  const eras = erasFor(env.MOVED_AT);
+  const eras = await loadEras(env);
   const range = wrappedRange(eras, url, now);
-  const key = wrappedKey(range);
+  const key = wrappedKey(eras, range);
 
   let result: { body: string; computedMs: number; source: string } | null = null;
   if (access === 'read') {

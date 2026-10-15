@@ -1,7 +1,11 @@
 import { applyD1Migrations, env } from 'cloudflare:test';
 import { beforeEach } from 'vitest';
 import { edgeRequest } from '../src/snapshots';
-import { STAT_NAMES } from '../src/stats';
+import { buildEras, parseEras } from '../src/eras';
+import { STAT_NAMES, statKey } from '../src/stats';
+
+// The test settings give the first era a start, so these are the eras every route loads.
+const ERAS = buildEras(parseEras(env.ERAS, env.TIMEZONE), 0);
 
 /**
  * Every test starts against the real schema with an empty warehouse. The pool
@@ -13,7 +17,7 @@ beforeEach(async () => {
   // The stats routes keep bodies in the Cache API as well as D1; a body cached
   // by one test would otherwise answer the next.
   const edge = await caches.open('stats');
-  await Promise.all(STAT_NAMES.map((name) => edge.delete(edgeRequest(`${name}:v1`))));
+  await Promise.all(STAT_NAMES.map((name) => edge.delete(edgeRequest(statKey(name, ERAS)))));
   await env.DB.batch([
     env.DB.prepare('DELETE FROM plays'),
     env.DB.prepare('DELETE FROM tracks'),
@@ -29,6 +33,7 @@ beforeEach(async () => {
     env.DB.prepare('DELETE FROM concerts'),
     env.DB.prepare('DELETE FROM concert_artists'),
     env.DB.prepare('DELETE FROM concert_runs'),
+    env.DB.prepare('DELETE FROM track_search_text'),
     env.DB.prepare('UPDATE oauth_token SET access_token = NULL, access_expires_ms = NULL, refresh_token = NULL, authorized_at_ms = 0, needs_reauth = 0, spotify_user_id = NULL WHERE id = 1'),
     env.DB.prepare('UPDATE sync_state SET cursor_ms = 0, last_success_ms = NULL, last_error = NULL, last_error_ms = NULL, consecutive_failures = 0 WHERE id = 1'),
   ]);

@@ -93,14 +93,18 @@ the Free plan under its 5M a day. The routes take no parameters and
 the query string is never part of a cache key, so callers cannot force a
 recompute.
 
-**Eras and local time.** Plays carry no location. `src/eras.ts` defines two
-eras: Europe/London from `HISTORY_START_MS` (July 2020), then Asia/Singapore
-from the `MOVED_AT` secret. `MOVED_AT` is a secret, not a constant, because
-this repo is public and the stats publish only the month of the move. Without
-it everything is one London era. SQLite has no zone database, so each era's
-UTC offset is spelled out in SQL (UK summer time, then a fixed +8), and a test
-checks it against `Intl` across DST changes and the move. `eras` compares whole
-calendar months, leaving the month of the move out of both sides.
+**Eras and local time.** Plays carry no location. `src/eras.ts` reads eras
+from the `ERAS` setting: periods, each with its own IANA timezone and start.
+Without it there is one era in `TIMEZONE` (default UTC). History starts at the
+first era's `from`, or at the first stored play. A deployment whose era starts
+are private sets `ERAS` as a secret; the stats publish only the month an era
+began. SQLite has no zone database, so each era's UTC offset is written out in
+SQL as the zone's transitions over the era (found with `Intl`, to the minute),
+and tests check it against `Intl` across DST changes, southern-hemisphere
+zones, half-hour offsets and a change of era. Snapshot keys carry a digest of
+the eras, so changing them recomputes. `eras` compares the latest era with the
+same number of whole calendar months before it, leaving the month it began
+out of both sides.
 
 **What counts.** Rankings credit the primary artist only, because export rows
 carry nothing else, and group by lowercased name so `name:` placeholders fold
@@ -201,9 +205,6 @@ one range per year. The artist name match needs migration 0006.
   are indistinguishable under the primary key.
 - **`/health` counts the whole table.** `total_plays` is a `COUNT(*)`, so do
   not poll it in a loop.
-- **The eras are hard-coded** to London then Singapore (see
-  [Listening stats](#listening-stats)). A fork in another zone edits
-  `src/eras.ts`.
 
 ## Verified against the live API
 

@@ -49,7 +49,7 @@ function parts(utcMs: number, timeZone: string): Record<string, number> {
 }
 
 /** The zone's UTC offset in ms at the given instant (positive east of Greenwich). */
-function offsetMsAt(utcMs: number, timeZone: string): number {
+export function offsetMsAt(utcMs: number, timeZone: string): number {
   const p = parts(utcMs, timeZone);
   // en-CA with hour12:false yields hour 24 for midnight in some ICU versions.
   const hour = p.hour === 24 ? 0 : p.hour!;

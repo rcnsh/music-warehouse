@@ -32,8 +32,17 @@ export default defineConfig({
           SPOTIFY_REDIRECT_URI: 'http://127.0.0.1:8787/callback',
           ADMIN_TOKEN: 'test-admin-token',
           READ_TOKEN: 'test-read-token',
-          // Synthetic: the real move instant is a secret, kept out of this public repo.
-          MOVED_AT: '2025-03-10T00:00:00Z',
+          // Synthetic eras and regions: a deployment's own live in its secrets.
+          // Two zones with different rules, one with summer time, so local-time
+          // SQL is exercised across a change of era and a change of offset.
+          ERAS: JSON.stringify([
+            { key: 'home', label: 'Home', timeZone: 'Europe/London', from: '2020-07-01T00:00:00+01:00' },
+            { key: 'abroad', label: 'Abroad', timeZone: 'Asia/Singapore', from: '2025-03-10T00:00:00Z' },
+          ]),
+          CONCERT_REGIONS: JSON.stringify([
+            { key: 'singapore', label: 'Singapore', countryCode: 'SG' },
+            { key: 'london', label: 'London', geoPoint: 'gcpvj', radius: 50 },
+          ]),
           CORS_ORIGINS: 'https://wrapped.test, https://other.test/',
           TICKETMASTER_API_KEY: 'test-tm-key',
           SIGN_IN_SCHEMES: 'app.test',

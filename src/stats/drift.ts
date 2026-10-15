@@ -1,19 +1,19 @@
-import { HISTORY_START_MS, type Era, monthOf } from '../eras';
+import { type Era, historyStartMs, monthOf } from '../eras';
 import { PRIMARY_ARTIST_SQL } from './sql';
 
 /**
- * Artist drift across the move.
+ * Artist drift into the latest era (see src/eras.ts), usually a move.
  *
- * The Singapore era is far shorter than the Newcastle one, so it is compared
- * with the same number of months immediately before the move, not with six
- * years. To say whether that change is unusual, history is cut into
+ * The latest era is usually far shorter than everything before it, so it is
+ * compared with the same number of months immediately before it began, not
+ * with all of history. To say whether that change is unusual, history is cut into
  * back-to-back blocks of the same length and the change between each
  * neighbouring pair is measured the same way. Without that baseline any
  * two-month slice looks like a reinvention.
  *
  * Everything is in whole UTC calendar months, and the month of the move
  * belongs to neither side. A window counted in days would date the move:
- * "73 days in Singapore" beside today's date names the day.
+ * "73 days since moving" beside today's date names the day.
  *
  * There is no genre data in the warehouse, so this is artists only. Change is
  * total variation distance between the two artist mixes: the share of
@@ -27,23 +27,33 @@ export interface ArtistShare {
   share: number;
 }
 
+export interface EraName {
+  key: string;
+  label: string;
+}
+
 export interface Drift {
   as_of: string;
+  /** The latest era, and the one before it; null with a single era. */
+  latest_era: EraName | null;
+  previous_era: EraName | null;
+  /** The UTC month the latest era began. */
   move_month: string | null;
   /** Complete months on each side of the move; 0 until the first one ends. */
   window_months: number;
-  singapore: { from: string; to: string } | null;
+  latest: { from: string; to: string } | null;
   before: { from: string; to: string } | null;
   ready: boolean;
   summary: {
-    /** Share of Singapore plays that went to artists already played in Newcastle. */
+    /** Share of the latest era's plays that went to artists already played before it. */
     known_artist_share: number;
     new_artists: number;
     artists: number;
     change: number;
     typical_change: { median: number; min: number; max: number; windows: number; exceeded_by: number };
   } | null;
-  top: { newcastle: ArtistShare[]; before: ArtistShare[]; singapore: ArtistShare[] };
+  /** `earlier` is all history before the latest era began. */
+  top: { earlier: ArtistShare[]; before: ArtistShare[]; latest: ArtistShare[] };
   risers: Array<{ artist: string; before: number; after: number }>;
   fallers: Array<{ artist: string; before: number; after: number }>;
 }
@@ -97,7 +107,7 @@ export async function computeDrift(db: D1Database, now: number, eras: readonly E
         WHERE an IS NOT NULL
         GROUP BY m, k`,
     )
-    .bind(HISTORY_START_MS, startOfMonth)
+    .bind(historyStartMs(eras), startOfMonth)
     .all<{ m: string; k: string; name: string; plays: number }>();
 
   const names = new Map<string, string>();
@@ -109,32 +119,36 @@ export async function computeDrift(db: D1Database, now: number, eras: readonly E
     months.get(index)!.set(row.k, row.plays);
   }
 
-  const move = eras[1];
+  const move = eras.length > 1 ? eras.at(-1)! : undefined;
+  const previous = eras.length > 1 ? eras.at(-2)! : undefined;
+  const name = (era: Era | undefined): EraName | null => (era ? { key: era.key, label: era.label } : null);
   const empty = {
     as_of: new Date(startOfMonth).toISOString(),
+    latest_era: name(move),
+    previous_era: name(previous),
     move_month: move ? monthOf(move.fromMs, 'UTC') : null,
     window_months: 0,
-    singapore: null,
+    latest: null,
     before: null,
     ready: false,
     summary: null,
-    top: { newcastle: [], before: [], singapore: [] },
+    top: { earlier: [], before: [], latest: [] },
     risers: [],
     fallers: [],
   } satisfies Drift;
   if (!move) return empty;
 
   const moveMonth = monthIndex(monthOf(move.fromMs, 'UTC'));
-  const firstMonth = monthIndex(monthOf(HISTORY_START_MS, 'UTC'));
+  const firstMonth = monthIndex(monthOf(historyStartMs(eras), 'UTC'));
   const n = currentMonth - moveMonth - 1;
   if (n < 1) return empty;
 
   const range = (from: number, count: number) => Array.from({ length: count }, (_, i) => from + i);
-  const singaporeMonths = range(moveMonth + 1, n);
+  const latestMonths = range(moveMonth + 1, n);
   const beforeMonths = range(moveMonth - n, n);
-  const singapore = merge(singaporeMonths.map((m) => months.get(m)));
+  const latest = merge(latestMonths.map((m) => months.get(m)));
   const before = merge(beforeMonths.map((m) => months.get(m)));
-  const newcastle = merge(range(firstMonth, moveMonth - firstMonth + 1).map((m) => months.get(m)));
+  const earlier = merge(range(firstMonth, moveMonth - firstMonth + 1).map((m) => months.get(m)));
 
   // Back-to-back blocks of n months ending where `before` ends, each compared
   // with the one before it.
@@ -152,7 +166,7 @@ export async function computeDrift(db: D1Database, now: number, eras: readonly E
       .map(([k, share]) => ({ artist: names.get(k) ?? k, share: round(share) }));
 
   const sBefore = shares(before);
-  const sAfter = shares(singapore);
+  const sAfter = shares(latest);
   const deltas = [...new Set([...sBefore.keys(), ...sAfter.keys()])].map((k) => ({
     artist: names.get(k) ?? k,
     before: round(sBefore.get(k) ?? 0),
@@ -161,22 +175,22 @@ export async function computeDrift(db: D1Database, now: number, eras: readonly E
   }));
   const strip = ({ artist, before, after }: (typeof deltas)[number]) => ({ artist, before, after });
 
-  const change = totalVariation(before, singapore);
-  const singaporePlays = [...singapore.values()].reduce((sum, v) => sum + v, 0);
-  const knownPlays = [...singapore].filter(([k]) => newcastle.has(k)).reduce((sum, [, v]) => sum + v, 0);
-  const ready = singaporePlays > 0 && changes.length > 0;
+  const change = totalVariation(before, latest);
+  const latestPlays = [...latest.values()].reduce((sum, v) => sum + v, 0);
+  const knownPlays = [...latest].filter(([k]) => earlier.has(k)).reduce((sum, [, v]) => sum + v, 0);
+  const ready = latestPlays > 0 && changes.length > 0;
 
   return {
     ...empty,
     window_months: n,
-    singapore: { from: monthKey(singaporeMonths[0]!), to: monthKey(singaporeMonths.at(-1)!) },
+    latest: { from: monthKey(latestMonths[0]!), to: monthKey(latestMonths.at(-1)!) },
     before: { from: monthKey(beforeMonths[0]!), to: monthKey(beforeMonths.at(-1)!) },
     ready,
     summary: ready
       ? {
-          known_artist_share: round(knownPlays / singaporePlays),
-          new_artists: [...singapore.keys()].filter((k) => !newcastle.has(k)).length,
-          artists: singapore.size,
+          known_artist_share: round(knownPlays / latestPlays),
+          new_artists: [...latest.keys()].filter((k) => !earlier.has(k)).length,
+          artists: latest.size,
           change: round(change),
           typical_change: {
             median: round(median(changes)),
@@ -187,7 +201,7 @@ export async function computeDrift(db: D1Database, now: number, eras: readonly E
           },
         }
       : null,
-    top: { newcastle: topOf(newcastle), before: topOf(before), singapore: topOf(singapore) },
+    top: { earlier: topOf(earlier), before: topOf(before), latest: topOf(latest) },
     risers: deltas
       .filter((d) => d.delta > 0)
       .sort((a, b) => b.delta - a.delta)

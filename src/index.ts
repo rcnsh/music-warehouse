@@ -8,20 +8,28 @@ import { nowPlaying, recentlyPlayed, topMusic } from './live';
 import { SpotifyError, type TokenResponse, authorizeUrl, exchangeCode, fetchRecentlyPlayed } from './spotify';
 import { NeedsReauthError, getAccessToken, persistTokenResponse } from './tokens';
 import { readState, reconcileNameKeyedArtists } from './db';
+import { EraConfigError } from './eras';
 import { syncSearchIndex } from './search-index';
 import { accessFor, createTokenRoute, listTokensRoute, listedOrigins, revokeTokenRoute } from './auth';
 import { SnapshotPending } from './snapshots';
 import { isStatName, statRoute } from './stats';
 import { artistRoute, onThisDayRoute, topTracksRoute, trackRoute } from './history';
 import { searchRoute } from './search';
-import { concertArtistsRoute, concertCheckRoute, concertsRoute, pinConcertArtistRoute, runConcertCheck } from './concerts';
+import {
+  RegionConfigError,
+  concertArtistsRoute,
+  concertCheckRoute,
+  concertsRoute,
+  pinConcertArtistRoute,
+  runConcertCheck,
+} from './concerts';
 import { recordOwner, signInCallback, signInExchange, signInStart } from './signin';
 import { warmWrappedPresets, wrappedRangesRoute, wrappedRoute } from './wrapped';
 import type { Env } from './types';
 
 /** The cron expression reserved for the alert sweep; everything else polls. */
 const ALERT_CRON = '0 9 * * *';
-/** Its own invocation, so its Ticketmaster calls get a full subrequest budget. 09:23 in Singapore. */
+/** Its own invocation, so its Ticketmaster calls get a full subrequest budget. */
 const CONCERT_CRON = '23 1 * * *';
 
 function unauthorized(): Response {
@@ -249,6 +257,12 @@ async function handle(request: Request, env: Env, ctx: ExecutionContext): Promis
     }
   } catch (error) {
     if (error instanceof BadRequest) return json({ error: error.message }, 400);
+    // A deployment setting is wrong, not the request: name it so the operator
+    // can fix it. The message holds the setting's shape, never its values.
+    if (error instanceof EraConfigError || error instanceof RegionConfigError) {
+      console.error('config', error.message);
+      return json({ error: `Worker misconfigured: ${error.message}` }, 500);
+    }
     if (error instanceof SnapshotPending) {
       const response = json({ error: error.message }, 503);
       response.headers.set('Retry-After', String(error.retryAfterSeconds));

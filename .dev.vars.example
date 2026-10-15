@@ -33,6 +33,19 @@ CORS_ORIGINS=
 # See README, "Signing in with Spotify".
 SIGN_IN_SCHEMES=
 
+# Optional. The timezone listening stats read local time in, when ERAS is
+# unset. An IANA name such as Europe/Berlin. Default UTC.
+TIMEZONE=
+
+# Optional. Periods you lived in different timezones, as a JSON list; each
+# after the first needs `from`. Replaces TIMEZONE. See README, step 2.
+# ERAS=[{"key":"home","label":"Home","timeZone":"Europe/London"},{"key":"abroad","label":"Abroad","timeZone":"Asia/Tokyo","from":"2024-09-01T00:00:00Z"}]
+
+# Optional. Where to look for concerts, as a JSON list of up to five regions:
+# a Ticketmaster countryCode, or a geoPoint geohash with a radius in km.
+# Needs TICKETMASTER_API_KEY. See README, "Concerts".
+# CONCERT_REGIONS=[{"key":"uk","label":"United Kingdom","countryCode":"GB"}]
+
 # Overrides the production value in wrangler.jsonc for local dev. Spotify
 # permits plain HTTP only on the loopback address, and this must match a
 # redirect URI registered in the Spotify dashboard character for character.

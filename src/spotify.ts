@@ -5,7 +5,7 @@ export const TOKEN_URL = 'https://accounts.spotify.com/api/token';
 export const RECENTLY_PLAYED_URL = 'https://api.spotify.com/v1/me/player/recently-played';
 /**
  * `user-read-recently-played` drives ingestion. The next two exist so the
- * Worker can serve rcn.sh's live widgets, which keeps the website free of any
+ * Worker can serve a website's live widgets, which keeps the website free of any
  * Spotify credential of its own — one token, one six-month clock, one place to
  * re-authorize. Changing this list requires a fresh /login.
  *

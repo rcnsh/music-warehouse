@@ -8,7 +8,7 @@
  * token stays in a header, never a URL), which means the consent URL has to be
  * pulled out of a 302 rather than opened directly.
  *
- *   ADMIN_TOKEN=... npm run authorize -- --url https://music-api.rcn.sh
+ *   ADMIN_TOKEN=... npm run authorize -- --url https://music-api.example.com
  *
  * Note this is *re-authorization*, not an access-token refresh. Access tokens
  * refresh themselves inside the Worker (see getAccessToken in src/tokens.ts)

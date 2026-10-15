@@ -1,4 +1,4 @@
-import { HISTORY_START_MS, type Era, startOfLocalWeek } from '../eras';
+import { type Era, historyStartMs, startOfLocalWeek } from '../eras';
 import { PRIMARY_ARTIST_SQL } from './sql';
 
 /**
@@ -80,7 +80,7 @@ export async function computeTopAlbums(db: D1Database, now: number, eras: readon
         WHERE r.rk <= ?4
         ORDER BY r.y, r.rk`,
     )
-    .bind(HISTORY_START_MS, cutoff, MIN_SONGS, LIMIT)
+    .bind(historyStartMs(eras), cutoff, MIN_SONGS, LIMIT)
     .all<TopAlbum & { y: string }>();
 
   const strip = ({ y: _, ...album }: TopAlbum & { y: string }): TopAlbum => album;

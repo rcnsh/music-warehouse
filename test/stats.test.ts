@@ -1,7 +1,7 @@
 import { SELF, env } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
-import { type Era, erasFor, localTimeSql, startOfLocalToday, startOfLocalWeek } from '../src/eras';
-import { freshForSeconds } from '../src/stats';
+import { type Era, buildEras, localTimeSql, parseEras, startOfLocalToday, startOfLocalWeek } from '../src/eras';
+import { freshForSeconds, statKey } from '../src/stats';
 import { streaksFrom } from '../src/stats/rhythm';
 import { totalVariation } from '../src/stats/drift';
 import { localDayKey } from '../src/tz';
@@ -11,7 +11,7 @@ const BASE = 'https://warehouse.test';
 const READ = { Authorization: 'Bearer test-read-token' };
 const DAY = 86_400_000;
 const STATS = ['on-repeat', 'rhythm', 'top-over-time', 'eras', 'albums'];
-const ERAS = erasFor(env.MOVED_AT);
+const ERAS = buildEras(parseEras(env.ERAS, env.TIMEZONE), 0);
 const MOVE_MS = ERAS[1]!.fromMs;
 
 function stat(name: string) {
@@ -285,12 +285,16 @@ describe('artist drift', () => {
     const body = (await (await stat('eras')).json()) as {
       move_month: string;
       window_months: number;
-      singapore: { from: string; to: string };
+      latest: { from: string; to: string };
+      latest_era: { key: string; label: string };
+      previous_era: { key: string; label: string };
       before: { from: string; to: string };
     };
     expect(body.move_month).toBe(key(moveMonth));
     expect(body.window_months).toBe(n);
-    expect(body.singapore).toEqual({ from: key(moveMonth + 1), to: key(moveMonth + n) });
+    expect(body.latest).toEqual({ from: key(moveMonth + 1), to: key(moveMonth + n) });
+    expect(body.latest_era).toEqual({ key: 'abroad', label: 'Abroad' });
+    expect(body.previous_era).toEqual({ key: 'home', label: 'Home' });
     expect(body.before).toEqual({ from: key(moveMonth - n), to: key(moveMonth - 1) });
   });
 });
@@ -303,7 +307,7 @@ describe('snapshots', () => {
     expect(first.headers.get('X-Stats-Source')).toBe('computed');
     const firstBody = await first.text();
 
-    await (await caches.open('stats')).delete(edgeRequest('rhythm:v1'));
+    await (await caches.open('stats')).delete(edgeRequest(statKey('rhythm', ERAS)));
     const second = await stat('rhythm');
     expect(second.headers.get('X-Stats-Source')).toBe('snapshot');
     expect(await second.text()).toBe(firstBody);
@@ -317,7 +321,7 @@ describe('snapshots', () => {
     // always before the latest one.
     const old = Date.now() - 8 * DAY;
     await env.DB.prepare('INSERT INTO stats_snapshots (key, body, computed_ms) VALUES (?, ?, ?)')
-      .bind('rhythm:v1', '{"stale":true}', old)
+      .bind(statKey('rhythm', ERAS), '{"stale":true}', old)
       .run();
 
     const response = await stat('rhythm');
@@ -325,7 +329,7 @@ describe('snapshots', () => {
     expect(await response.json()).toEqual({ stale: true });
 
     const row = await env.DB.prepare('SELECT claimed_until_ms, computed_ms FROM stats_snapshots WHERE key = ?')
-      .bind('rhythm:v1')
+      .bind(statKey('rhythm', ERAS))
       .first<{ claimed_until_ms: number | null; computed_ms: number }>();
     // Either still claimed or already refreshed (the claim clears on store).
     expect(row!.claimed_until_ms !== null || row!.computed_ms > old).toBe(true);
@@ -334,21 +338,21 @@ describe('snapshots', () => {
   it('does not compute a key someone else has claimed, even when nothing is cached yet', async () => {
     // Another isolate is mid-compute (or backing off from a failure).
     await env.DB.prepare('INSERT INTO stats_snapshots (key, claimed_until_ms) VALUES (?, ?)')
-      .bind('albums:v1', Date.now() + 60_000)
+      .bind(statKey('albums', ERAS), Date.now() + 60_000)
       .run();
 
     const response = await stat('albums');
     expect(response.status).toBe(503);
     expect(Number(response.headers.get('Retry-After'))).toBeGreaterThan(0);
     const row = await env.DB.prepare('SELECT body FROM stats_snapshots WHERE key = ?')
-      .bind('albums:v1')
+      .bind(statKey('albums', ERAS))
       .first<{ body: string | null }>();
     expect(row!.body).toBeNull();
   });
 
   it('takes over a claim that has lapsed', async () => {
     await env.DB.prepare('INSERT INTO stats_snapshots (key, claimed_until_ms) VALUES (?, ?)')
-      .bind('eras:v1', Date.now() - 1)
+      .bind(statKey('eras', ERAS), Date.now() - 1)
       .run();
     const response = await stat('eras');
     expect(response.status).toBe(200);

@@ -6,7 +6,7 @@
  * development mode, so this closes the long tail the Top Tracks / Liked Songs /
  * Saved Albums walk cannot: tracks played once years ago and never saved.
  *
- *   ADMIN_TOKEN=... npm run backfill:catalog -- --url https://music-api.rcn.sh
+ *   ADMIN_TOKEN=... npm run backfill:catalog -- --url https://music-api.example.com
  *
  * One Spotify request per track, so it is slower than the user-scoped sources
  * — but it needs no user scope at all, and reaches everything it is allowed to.

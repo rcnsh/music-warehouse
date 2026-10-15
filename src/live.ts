@@ -10,10 +10,10 @@ import type { Env } from './types';
  * cron interval), and Spotify's own ranked "top" lists (which carry artist
  * images that `recently-played` never returns).
  *
- * These exist so rcn.sh holds no Spotify credential of its own. The payloads
- * are passed through unmodified — the website keeps its own schemas and
- * decides what to render, and this Worker stays out of presentation — with
- * one exception: top tracks are relabelled with the edition actually played
+ * These exist so a website showing live listening holds no Spotify
+ * credential of its own. The payloads are passed through unmodified — the
+ * website keeps its own schemas and decides what to render, and this Worker
+ * stays out of presentation — with one exception: top tracks are relabelled with the edition actually played
  * (see `relabelEditions`).
  *
  * Neither touches sync_state, so nothing here can disturb ingestion.

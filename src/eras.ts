@@ -1,12 +1,24 @@
-import { localDayKey, startOfLocalDayUtcMs } from './tz';
+import { isValidTimeZone, localDayKey, offsetMsAt, startOfLocalDayUtcMs } from './tz';
+import type { Env } from './types';
 
 /**
  * Where the listener lived, and so which clock "local time" means.
  *
- * Plays carry no location. The Singapore era starts at MOVED_AT, an ISO
- * instant held as a Worker secret rather than in this public repo: the stats
- * only ever publish the month of the move, and the exact day would undo that.
- * Without MOVED_AT everything is read as one Newcastle era.
+ * Plays carry no location, so the timeline is split into eras, each read in
+ * its own timezone. They come from the ERAS setting, a JSON list such as
+ *
+ *   [{"key":"home","label":"Home","timeZone":"Europe/London","from":"2020-07-01T00:00:00+01:00"},
+ *    {"key":"abroad","label":"Abroad","timeZone":"Asia/Tokyo","from":"2024-09-01T00:00:00Z"}]
+ *
+ * Every era after the first needs `from`, an ISO instant. The first era's
+ * `from` is optional and also marks where history starts for the stats
+ * (plays before it are ignored, useful when the first few are noise);
+ * without it history starts at the first stored play. Without ERAS there is
+ * one era in TIMEZONE, or UTC.
+ *
+ * Set ERAS as a Worker secret rather than a var if an era's start is private:
+ * the stats only ever publish the month an era began, and the exact day would
+ * undo that.
  */
 
 export interface Era {
@@ -17,34 +29,148 @@ export interface Era {
   fromMs: number;
   /**
    * SQL for this era's UTC offset in seconds, in terms of `s` (UTC epoch
-   * seconds) and `y` (its UTC year as text). SQLite has no zone database, so
-   * the rule is spelled out; the stats tests check it against Intl.
+   * seconds). SQLite has no zone database, so the zone's transitions are
+   * written out as a CASE; the stats tests check it against Intl.
    */
   offsetSql: string;
 }
 
-/** Before this there are only a few dozen plays, which would read as noise. */
-export const HISTORY_START_MS = Date.UTC(2020, 5, 30, 23); // 2020-07-01 00:00 Europe/London
+export interface EraConfig {
+  key: string;
+  label: string;
+  timeZone: string;
+  from?: string;
+}
 
 const DAY_MS = 86_400_000;
+const HOUR_MS = 3_600_000;
 
-// UK summer time runs from 01:00 UTC on the last Sunday in March to 01:00 UTC
-// on the last Sunday in October (unchanged since 1996).
-const LONDON_OFFSET_SQL = `CASE
-  WHEN s >= CAST(strftime('%s', date(y || '-03-25', 'weekday 0') || ' 01:00') AS INTEGER)
-   AND s <  CAST(strftime('%s', date(y || '-10-25', 'weekday 0') || ' 01:00') AS INTEGER)
-  THEN 3600 ELSE 0 END`;
+/** Thrown for an ERAS or TIMEZONE setting that cannot be used, naming what is wrong. */
+export class EraConfigError extends Error {}
 
-export function erasFor(movedAt: string | undefined): Era[] {
-  const eras: Era[] = [
-    { key: 'newcastle', label: 'Newcastle', timeZone: 'Europe/London', fromMs: HISTORY_START_MS, offsetSql: LONDON_OFFSET_SQL },
-  ];
-  const moveMs = movedAt ? Date.parse(movedAt) : Number.NaN;
-  if (Number.isFinite(moveMs) && moveMs > HISTORY_START_MS) {
-    eras.push({ key: 'singapore', label: 'Singapore', timeZone: 'Asia/Singapore', fromMs: moveMs, offsetSql: '28800' });
+/**
+ * The configured eras, validated. Keys are lowercase words so they can stand
+ * as JSON keys and CSS hooks in a client.
+ */
+export function parseEras(raw: string | undefined, timeZone: string | undefined): EraConfig[] {
+  if (!raw?.trim()) {
+    const zone = timeZone?.trim() || 'UTC';
+    if (!isValidTimeZone(zone)) throw new EraConfigError(`TIMEZONE is not an IANA timezone: ${zone}`);
+    return [{ key: 'local', label: 'Local time', timeZone: zone }];
   }
-  return eras;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new EraConfigError('ERAS is not valid JSON');
+  }
+  if (!Array.isArray(parsed) || parsed.length === 0) throw new EraConfigError('ERAS must be a non-empty JSON array');
+  const seen = new Set<string>();
+  let previous = -Infinity;
+  return parsed.map((entry: Record<string, unknown>, i): EraConfig => {
+    const where = `ERAS[${i}]`;
+    const { key, label, timeZone: zone, from } = entry ?? {};
+    if (typeof key !== 'string' || !/^[a-z0-9-]{1,32}$/.test(key)) throw new EraConfigError(`${where}.key must be 1-32 of a-z, 0-9, -`);
+    if (seen.has(key)) throw new EraConfigError(`${where}.key repeats "${key}"`);
+    seen.add(key);
+    if (typeof label !== 'string' || !label.trim()) throw new EraConfigError(`${where}.label is required`);
+    if (typeof zone !== 'string' || !isValidTimeZone(zone)) throw new EraConfigError(`${where}.timeZone is not an IANA timezone`);
+    if (from === undefined && i === 0) return { key, label, timeZone: zone };
+    const ms = typeof from === 'string' ? Date.parse(from) : Number.NaN;
+    if (!Number.isFinite(ms)) throw new EraConfigError(`${where}.from must be an ISO instant`);
+    if (ms <= previous) throw new EraConfigError(`${where}.from must be after the era before it`);
+    previous = ms;
+    return { key, label, timeZone: zone, from: from as string };
+  });
 }
+
+/**
+ * Transitions of `timeZone` in [fromMs, toMs) as [instant, offset after] pairs.
+ * Offsets are sampled every 12 hours (no zone changes twice in that time) and
+ * each change is narrowed to the minute.
+ */
+function transitions(timeZone: string, fromMs: number, toMs: number): Array<[number, number]> {
+  const out: Array<[number, number]> = [];
+  let at = fromMs;
+  let offset = offsetMsAt(at, timeZone);
+  while (at < toMs) {
+    const next = Math.min(at + 12 * HOUR_MS, toMs);
+    const nextOffset = offsetMsAt(next, timeZone);
+    if (nextOffset !== offset) {
+      let lo = at;
+      let hi = next;
+      while (hi - lo > 60_000) {
+        const mid = lo + Math.floor((hi - lo) / 2);
+        if (offsetMsAt(mid, timeZone) === offset) lo = mid;
+        else hi = mid;
+      }
+      out.push([hi, nextOffset]);
+      offset = nextOffset;
+    }
+    at = next;
+  }
+  return out;
+}
+
+const offsetSqlCache = new Map<string, string>();
+
+/** SQL for `timeZone`'s offset in seconds, valid for `s` within [fromMs, toMs). */
+export function offsetSqlFor(timeZone: string, fromMs: number, toMs: number): string {
+  const cacheKey = `${timeZone}|${fromMs}|${toMs}`;
+  let sql = offsetSqlCache.get(cacheKey);
+  if (sql === undefined) {
+    const first = offsetMsAt(fromMs, timeZone) / 1000;
+    const changes = transitions(timeZone, fromMs, toMs);
+    sql = changes.length
+      ? `CASE ${changes
+          .map(([ms], i) => `WHEN s < ${Math.floor(ms / 1000)} THEN ${i === 0 ? first : changes[i - 1]![1] / 1000}`)
+          .join(' ')} ELSE ${changes.at(-1)![1] / 1000} END`
+      : String(first);
+    offsetSqlCache.set(cacheKey, sql);
+  }
+  return sql;
+}
+
+/**
+ * Eras with their start instants and offset SQL. `historyStartMs` stands in
+ * for the first era's start when it has none. The current era's offsets are
+ * written out to a year past today, rounded to the day so the SQL (and its
+ * cache entry) changes once a day at most.
+ */
+export function buildEras(configs: EraConfig[], historyStartMs: number, now = Date.now()): Era[] {
+  const starts = configs.map((config, i) => (config.from ? Date.parse(config.from) : i === 0 ? historyStartMs : Number.NaN));
+  const horizon = Math.ceil((now + 366 * DAY_MS) / DAY_MS) * DAY_MS;
+  return configs.map((config, i) => {
+    const fromMs = starts[i]!;
+    const toMs = starts[i + 1] ?? horizon;
+    return { key: config.key, label: config.label, timeZone: config.timeZone, fromMs, offsetSql: offsetSqlFor(config.timeZone, fromMs, toMs) };
+  });
+}
+
+/**
+ * The deployment's eras. Without a configured start, history starts at the
+ * first stored play: one primary-key read.
+ */
+export async function loadEras(env: Pick<Env, 'DB' | 'ERAS' | 'TIMEZONE'>, now = Date.now()): Promise<Era[]> {
+  const configs = parseEras(env.ERAS, env.TIMEZONE);
+  if (configs[0]!.from) return buildEras(configs, Date.parse(configs[0]!.from), now);
+  const first = await env.DB.prepare('SELECT played_at_ms FROM plays ORDER BY played_at_ms LIMIT 1').first<{ played_at_ms: number }>();
+  return buildEras(configs, first?.played_at_ms ?? now, now);
+}
+
+/**
+ * A short stable tag for the era settings, for snapshot keys: stats cut on
+ * one set of eras must not be served after the settings change.
+ */
+export function eraDigest(eras: readonly Era[]): string {
+  const text = eras.map((era) => `${era.key}|${era.label}|${era.timeZone}|${era.fromMs}`).join(';');
+  let hash = 2166136261;
+  for (let i = 0; i < text.length; i++) hash = Math.imul(hash ^ text.charCodeAt(i), 16777619);
+  return (hash >>> 0).toString(36);
+}
+
+/** Where the stats' history starts: the first era's start. */
+export const historyStartMs = (eras: readonly Era[]) => eras[0]!.fromMs;
 
 export function eraAt(eras: readonly Era[], utcMs: number): Era {
   let current = eras[0]!;
@@ -60,8 +186,8 @@ export function eraEndMs(eras: readonly Era[], era: Era): number | null {
 
 /**
  * SQL giving local epoch seconds (UTC seconds shifted by the offset in force)
- * plus a 0-based era index, for a row whose UTC seconds are `s` and UTC year
- * text is `y`. `date(local, 'unixepoch')` then yields the local calendar day.
+ * plus a 0-based era index, for a row whose UTC seconds are `s`.
+ * `date(local, 'unixepoch')` then yields the local calendar day.
  */
 export function localTimeSql(eras: readonly Era[]): { local: string; era: string } {
   const latestFirst = eras.map((era, index) => ({ era, index })).reverse();

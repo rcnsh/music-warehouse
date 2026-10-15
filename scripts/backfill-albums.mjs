@@ -7,7 +7,7 @@
  * The catalog endpoints that would do this directly are 403 in Spotify's
  * development mode. See src/albums.ts.
  *
- *   ADMIN_TOKEN=... node scripts/backfill-albums.mjs --url https://music-api.rcn.sh
+ *   ADMIN_TOKEN=... node scripts/backfill-albums.mjs --url https://music-api.example.com
  *
  * `--source top` needs no scope beyond the one ingestion already holds;
  * `saved` and `albums` need `user-library-read`, so a fresh /login first.
