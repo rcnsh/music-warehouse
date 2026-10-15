@@ -198,6 +198,51 @@ export function respond(body: unknown, results: D1Result[]): Response {
   });
 }
 
+const HISTORY_CACHE_ORIGIN = 'https://history.internal';
+/** How long an answer is kept at the edge; a new play or track starts a new key sooner. */
+const HISTORY_EDGE_TTL_SECONDS = 600;
+/** How long a client may reuse one. */
+const HISTORY_CLIENT_MAX_AGE = 60;
+/** Defaults such as "the last 30 days" or "today" move with the clock; a key lasts this long, so they never go stale (zones are offset in quarter hours). */
+const CLOCK_BUCKET_MS = 15 * 60_000;
+
+/**
+ * A history route's answer through the Cache API. The key is the route and
+ * its whole query, the newest play and the newest search-index row (so a new
+ * play, or a new track, artist or album, starts a new key), the rollup's
+ * state (its zone, or a rebuild, changes which plays answer; three rows read in
+ * all), and the quarter hour, for the routes' date defaults. An import
+ * of older plays changes neither newest, so it can take up to
+ * HISTORY_EDGE_TTL_SECONDS to show.
+ *
+ * The routes answer the same whatever token asked (this is one listener's
+ * history, and the token was checked before this), so the key holds no
+ * token; only successful answers are kept. The CORS headers are added after,
+ * per request, so a kept answer carries none.
+ */
+export async function cachedHistory(env: Env, url: URL, route: () => Promise<Response>): Promise<Response> {
+  const state = await env.DB.prepare(
+    `SELECT (SELECT MAX(played_at_ms) FROM plays) AS play, (SELECT MAX(id) FROM track_search_text) AS track,
+            (SELECT time_zone || ':' || usable || ':' || horizon_ms FROM rollup_state WHERE id = 1) AS rollup`,
+  ).first<{ play: number | null; track: number | null; rollup: string | null }>();
+  const query = [...url.searchParams].sort(([a, x], [b, y]) => (a < b ? -1 : a > b ? 1 : x < y ? -1 : x > y ? 1 : 0));
+  const version = [state?.play ?? 0, state?.track ?? 0, encodeURIComponent(state?.rollup ?? ''), Math.floor(Date.now() / CLOCK_BUCKET_MS)];
+  const key = new Request(`${HISTORY_CACHE_ORIGIN}/v1/${version.join('/')}${url.pathname}?${new URLSearchParams(query)}`);
+  const cache = await caches.open('history');
+  const hit = await cache.match(key);
+  const response = hit ? new Response(hit.body, hit) : await route();
+  if (!hit && response.status === 200) {
+    const stored = response.clone();
+    stored.headers.set('Cache-Control', `max-age=${HISTORY_EDGE_TTL_SECONDS}`);
+    await cache.put(key, stored);
+  }
+  if (response.status !== 200) return response;
+  const out = new Response(response.body, response);
+  out.headers.set('Cache-Control', `private, max-age=${HISTORY_CLIENT_MAX_AGE}`);
+  if (hit) out.headers.set('X-Cache', 'hit');
+  return out;
+}
+
 /** GET /api/artist?id=&name=&tz= */
 export async function artistRoute(env: Env, url: URL): Promise<Response> {
   const timeZone = timeZoneParam(url, env);
