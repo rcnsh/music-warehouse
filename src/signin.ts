@@ -18,15 +18,27 @@ import type { Env } from './types';
  *
  * An app signs in like an OAuth public client with PKCE: it sends a
  * code_challenge to /auth/login, gets a one-time code back on its return_to
- * URL, and exchanges code plus verifier at /auth/token from its own origin.
- * The code in the URL is worthless alone, and expires within a minute anyway.
- * Without return_to, the token is shown once on a page, for a shell or script.
+ * URL, and exchanges code plus verifier at /auth/token. The code in the URL is
+ * worthless alone, and expires within a minute anyway. Without return_to, the
+ * token is shown once on a page, for a shell or script.
+ *
+ * return_to is one of three kinds (RFC 8252 for the native two):
+ * - a web page on an origin in CORS_ORIGINS, which must also be the Origin of
+ *   the exchange;
+ * - http://127.0.0.1 or http://[::1] on any port, for a desktop app or CLI
+ *   listening on loopback;
+ * - a custom scheme in SIGN_IN_SCHEMES, for a mobile app.
+ * A native app's exchange carries no Origin, so for those PKCE alone binds the
+ * code to the app that started the sign-in.
  */
 
 const STATE_TTL_MS = 10 * 60 * 1000;
 const CODE_TTL_MS = 60 * 1000;
 /** Sign-ins in flight at once. The routes are unauthenticated, so this bounds the rows a stranger can create. */
 const MAX_PENDING = 50;
+
+/** Stored as a code's origin when its exchange is not checked against one. */
+const NATIVE = 'native';
 
 /** Base64url SHA-256, the only code_challenge_method accepted (RFC 7636 S256). */
 const CHALLENGE = /^[A-Za-z0-9_-]{43}$/;
@@ -57,6 +69,24 @@ async function ownerId(env: Env): Promise<string | null> {
   return recordOwner(env.DB, await getAccessToken(env.DB, env, token, Date.now()));
 }
 
+/**
+ * Who may exchange a code sent to `returnTo`: its web origin, NATIVE, or null
+ * when it is not somewhere a code may be sent at all.
+ */
+function exchangeOrigin(env: Env, returnTo: URL): string | null {
+  // Exact origins only. A `*` in CORS_ORIGINS opens reads, never sign-in:
+  // that would hand a code to any page that asked.
+  if (listedOrigins(env).includes(returnTo.origin)) return returnTo.origin;
+  // IP literals, not `localhost`, which a hosts file or resolver can point
+  // elsewhere (RFC 8252 section 8.3).
+  if (returnTo.protocol === 'http:' && (returnTo.hostname === '127.0.0.1' || returnTo.hostname === '[::1]')) {
+    return NATIVE;
+  }
+  const schemes = (env.SIGN_IN_SCHEMES ?? '').split(',').map((scheme) => scheme.trim().toLowerCase()).filter(Boolean);
+  if (schemes.includes(returnTo.protocol.slice(0, -1))) return NATIVE;
+  return null;
+}
+
 function returnToParam(env: Env, value: string): string {
   let parsed: URL;
   try {
@@ -64,10 +94,10 @@ function returnToParam(env: Env, value: string): string {
   } catch {
     throw new BadRequest('`return_to` must be an absolute URL.');
   }
-  // Exact origins only. A `*` in CORS_ORIGINS opens reads, never sign-in:
-  // that would hand a code to any page that asked.
-  if (!listedOrigins(env).includes(parsed.origin)) {
-    throw new BadRequest('`return_to` must be on an origin listed in CORS_ORIGINS.');
+  if (!exchangeOrigin(env, parsed)) {
+    throw new BadRequest(
+      '`return_to` must be on an origin in CORS_ORIGINS, on http://127.0.0.1, or use a scheme in SIGN_IN_SCHEMES.',
+    );
   }
   parsed.hash = '';
   return parsed.href;
@@ -165,14 +195,22 @@ export async function signInCallback(env: Env, url: URL): Promise<Response> {
     env.DB.prepare('DELETE FROM login_codes WHERE created_ms < ?').bind(now - CODE_TTL_MS),
     env.DB.prepare(
       'INSERT INTO login_codes (code_hash, created_ms, device_name, origin, code_challenge) VALUES (?, ?, ?, ?, ?)',
-    ).bind(await sha256Hex(oneTimeCode), now, pending.device_name, new URL(pending.return_to).origin, pending.code_challenge),
+    ).bind(
+      await sha256Hex(oneTimeCode),
+      now,
+      pending.device_name,
+      // Validated at /auth/login. If the config has since dropped it, the
+      // strictest reading: only the page's own origin may exchange.
+      exchangeOrigin(env, new URL(pending.return_to)) ?? new URL(pending.return_to).origin,
+      pending.code_challenge,
+    ),
   ]);
   return backTo(pending.return_to, { code: oneTimeCode });
 }
 
 /**
  * POST /auth/token `{ code, code_verifier }`, from the origin that started the
- * sign-in. Returns a read device token. Every failure is the same
+ * sign-in, or from a native app. Returns a read device token. Every failure is the same
  * `invalid_grant`, so a caller learns nothing about which check failed, and
  * the code is spent by the first attempt either way.
  */
@@ -197,7 +235,7 @@ export async function signInExchange(env: Env, request: Request): Promise<Respon
     .bind(await sha256Hex(code))
     .first<{ created_ms: number; device_name: string; origin: string; code_challenge: string }>();
   if (!pending || Date.now() - pending.created_ms > CODE_TTL_MS) return invalid();
-  if (request.headers.get('Origin') !== pending.origin) return invalid();
+  if (pending.origin !== NATIVE && request.headers.get('Origin') !== pending.origin) return invalid();
 
   const challenge = base64url(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier)));
   if (challenge !== pending.code_challenge) return invalid();

@@ -28,6 +28,11 @@ ALERT_MENTION=
 # dev server. Unset means no CORS headers. See README, "Configuration".
 CORS_ORIGINS=
 
+# Optional. Comma-separated custom URL schemes a mobile app may sign in to,
+# e.g. app.remastered. Loopback (http://127.0.0.1:<port>) needs no entry.
+# See README, "Signing in with Spotify".
+SIGN_IN_SCHEMES=
+
 # Overrides the production value in wrangler.jsonc for local dev. Spotify
 # permits plain HTTP only on the loopback address, and this must match a
 # redirect URI registered in the Spotify dashboard character for character.

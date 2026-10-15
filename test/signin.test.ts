@@ -227,6 +227,61 @@ describe('sign in with Spotify, from an app', () => {
   });
 });
 
+describe('sign in with Spotify, from a native app', () => {
+  /** Run a sign-in to `returnTo` and return the code handed back, plus the verifier. */
+  async function codeFor(returnTo: string) {
+    await ownerSet();
+    const { verifier, challenge } = await pkce();
+    const callback = await signIn({ name: 'native', return_to: returnTo, code_challenge: challenge });
+    const location = new URL(callback.headers.get('Location')!);
+    return { location, code: location.searchParams.get('code')!, verifier };
+  }
+
+  /** As a native app sends it: no Origin header. */
+  function nativeExchange(body: Record<string, unknown>) {
+    return SELF.fetch(`${BASE}/auth/token`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  }
+
+  it.each(['http://127.0.0.1:53682/done', 'http://[::1]:8000/', 'app.test://warehouse-auth'])(
+    'hands a code to %s, exchangeable without an Origin',
+    async (returnTo) => {
+      const { location, code, verifier } = await codeFor(returnTo);
+      expect(location.href.startsWith(returnTo.replace(/\/$/, ''))).toBe(true);
+      const response = await nativeExchange({ code, code_verifier: verifier });
+      expect(response.status).toBe(200);
+      expect(((await response.json()) as { access: string }).access).toBe('read');
+    },
+  );
+
+  it('still needs the verifier', async () => {
+    const { code } = await codeFor('http://127.0.0.1:53682/');
+    expect((await nativeExchange({ code, code_verifier: randomSecret(48) })).status).toBe(400);
+  });
+
+  it('still requires the Origin for a web return_to', async () => {
+    await ownerSet();
+    const { verifier, challenge } = await pkce();
+    const callback = await signIn({ name: 'iPhone', return_to: WRAPPED, code_challenge: challenge });
+    const code = new URL(callback.headers.get('Location')!).searchParams.get('code')!;
+    expect((await nativeExchange({ code, code_verifier: verifier })).status).toBe(400);
+  });
+
+  it.each([
+    'http://localhost:53682/',
+    'http://127.0.0.2:53682/',
+    'https://127.0.0.1:53682/',
+    'evil.app://warehouse-auth',
+    'javascript://alert(1)',
+  ])('refuses %s as a return_to', async (returnTo) => {
+    const { challenge } = await pkce();
+    expect((await start({ name: 'native', return_to: returnTo, code_challenge: challenge })).status).toBe(400);
+  });
+});
+
 describe('sign in with Spotify, for a shell', () => {
   it('shows the token once on a page when there is no return_to', async () => {
     await ownerSet();
