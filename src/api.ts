@@ -99,6 +99,37 @@ async function matchingTrackIds(env: Env, q: string): Promise<{ ids: string[]; r
   return { ids: result.results.map((row) => row.track_id), rowsRead: result.meta?.rows_read ?? 0 };
 }
 
+/** How long a search's matching track ids are reused across pages. */
+const MATCH_TTL_SECONDS = 300;
+const MATCH_CACHE_ORIGIN = 'https://search-matches.internal';
+
+/**
+ * matchingTrackIds, reused for a few minutes through the Cache API, so paging
+ * through a broad search matches names once rather than once per page.
+ *
+ * The key carries the newest search-index row id (one row read), so a track
+ * stored since the ids were cached starts a new key and shows up at once.
+ * Text changes to tracks already indexed (an album filled in, artists merged)
+ * can take up to the TTL to change what matches; that is the accepted cost.
+ * Both matchers fold ASCII case, so the key does too and "Porter" shares
+ * "porter"'s entry; nothing else is folded, since LIKE would not fold it.
+ */
+async function cachedMatchingTrackIds(env: Env, q: string): Promise<{ ids: string[]; rowsRead: number }> {
+  const latest = await env.DB.prepare('SELECT MAX(id) AS id FROM track_search_text').first<{ id: number | null }>();
+  const folded = q.replace(/[A-Z]/g, (c) => c.toLowerCase());
+  const key = new Request(`${MATCH_CACHE_ORIGIN}/v1/${latest?.id ?? 0}/${encodeURIComponent(folded)}`);
+  const cache = await caches.open('search-matches');
+  const hit = await cache.match(key);
+  if (hit) return { ids: (await hit.json()) as string[], rowsRead: 1 };
+
+  const match = await matchingTrackIds(env, q);
+  await cache.put(
+    key,
+    new Response(JSON.stringify(match.ids), { headers: { 'Cache-Control': `max-age=${MATCH_TTL_SECONDS}` } }),
+  );
+  return { ids: match.ids, rowsRead: match.rowsRead + 1 };
+}
+
 /**
  * Most recent plays, newest first, joined to track, album and artist names.
  * `q` keeps only plays whose track, album or artist name contains it, with
@@ -130,7 +161,7 @@ export async function recentPlays(env: Env, url: URL): Promise<Response> {
     });
   }
 
-  const match = await matchingTrackIds(env, q);
+  const match = await cachedMatchingTrackIds(env, q);
   if (match.ids.length === 0) {
     return json({ q, plays: [], _meta: { rows_read: match.rowsRead, duration_ms: null } });
   }

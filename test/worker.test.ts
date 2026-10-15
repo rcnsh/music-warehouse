@@ -346,6 +346,28 @@ describe('searching plays with q', () => {
     expect(plain.q).toBeUndefined();
   });
 
+  it('reuses a search\'s matches for later pages, but not past a newly stored track', async () => {
+    await seedCatalog();
+    const meta = async (query: string) =>
+      ((await (await get(`/api/plays?${query}`)).json()) as { _meta: { rows_read: number }; plays: Array<{ track_id: string }> });
+    const first = await meta('q=Machine&limit=1');
+    const second = await meta('q=machine&limit=1&before=1');
+    expect(first.plays.map((p) => p.track_id)).toEqual(['sad']);
+    // The cached ids skip the index lookup: only the id probe and the page are read.
+    expect(second._meta.rows_read).toBeLessThan(first._meta.rows_read);
+
+    // Renaming an indexed track waits out the cache...
+    await env.DB.batch([env.DB.prepare("UPDATE tracks SET name = 'Divinity Machine' WHERE track_id = 'div'"), syncSearchIndex(env.DB)]);
+    expect(new Set((await search('q=machine')).map((p) => p.track_id))).toEqual(new Set(['sad']));
+    // ...but a new track starts a new key at once.
+    await env.DB.batch([
+      env.DB.prepare("INSERT INTO tracks (track_id, name, duration_ms, first_seen_ms) VALUES ('new', 'New Machine', 1, 0)"),
+      env.DB.prepare("INSERT INTO plays (played_at_ms, track_id, source) VALUES (?, 'new', 'api')").bind(base + 9 * 86_400_000),
+      syncSearchIndex(env.DB),
+    ]);
+    expect(new Set((await search('q=machine')).map((p) => p.track_id))).toEqual(new Set(['new', 'sad', 'div']));
+  });
+
   it('ignores accents and case beyond ASCII', async () => {
     await env.DB.batch([
       env.DB.prepare('INSERT INTO tracks (track_id, name, duration_ms, first_seen_ms) VALUES (?, ?, 1, 0)').bind('apt', 'APT.'),
