@@ -1,4 +1,15 @@
+import {
+  type CallOutcome,
+  type CallSource,
+  type CallTally,
+  type SpotifyPause,
+  countCall,
+  pauseSeconds,
+  readPause,
+  recordPause,
+} from './quota';
 import type { Env, RecentlyPlayedResponse } from './types';
+import { log } from './log';
 
 export const AUTHORIZE_URL = 'https://accounts.spotify.com/authorize';
 export const TOKEN_URL = 'https://accounts.spotify.com/api/token';
@@ -41,17 +52,20 @@ export class SpotifyError extends Error {
   readonly status: number | null;
   /** Seconds from the Retry-After header, when present. */
   readonly retryAfterSeconds: number | null;
+  /** True when the request was never sent, because calls are paused after an earlier 429. */
+  readonly paused: boolean;
 
   constructor(
     kind: SpotifyErrorKind,
     message: string,
-    options: { status?: number | null; retryAfterSeconds?: number | null } = {},
+    options: { status?: number | null; retryAfterSeconds?: number | null; paused?: boolean } = {},
   ) {
     super(message);
     this.name = 'SpotifyError';
     this.kind = kind;
     this.status = options.status ?? null;
     this.retryAfterSeconds = options.retryAfterSeconds ?? null;
+    this.paused = options.paused ?? false;
   }
 }
 
@@ -174,6 +188,97 @@ export function authorizeUrl(
   return `${AUTHORIZE_URL}?${params}`;
 }
 
+/** Who is calling Spotify, for the pause and the call counts (src/quota.ts). */
+export interface SpotifyCaller {
+  db: D1Database;
+  source: CallSource;
+  /** Lets the call's count be written after the response; without it the count is awaited. */
+  waitUntil?: (promise: Promise<unknown>) => void;
+  /** Holds the count for the caller to write with others, in place of a write per call. */
+  tally?: CallTally;
+}
+
+function pausedError(pause: SpotifyPause, now: number): SpotifyError {
+  return new SpotifyError(
+    pause.kind,
+    `Spotify calls are paused after a 429 (${pause.kind}) until ${new Date(pause.until_ms).toISOString()}; not sent.`,
+    { status: 429, retryAfterSeconds: Math.max(1, Math.ceil((pause.until_ms - now) / 1000)), paused: true },
+  );
+}
+
+/**
+ * Throw the pause's own SpotifyError while Spotify calls are paused: the same
+ * kind, and a Retry-After of the time left, so a blocked call maps to the 429
+ * a sent one would have. spotifyFetch runs this before every request, and
+ * getAccessToken before a refresh, so a paused Worker doesn't refresh a
+ * token it cannot use.
+ */
+export async function assertSpotifyOpen(db: D1Database, now: number = Date.now()): Promise<void> {
+  const pause = await readPause(db, now);
+  if (pause) throw pausedError(pause, now);
+}
+
+function retryAfterOf(response: Response): number | null {
+  const header = response.headers.get('Retry-After');
+  return header !== null && header.trim() !== '' && Number.isFinite(Number(header)) ? Number(header) : null;
+}
+
+/**
+ * The one way a request reaches api.spotify.com. Refused without sending
+ * while calls are paused; counted once sent; and a 429 pauses every caller
+ * until its Retry-After has passed, then throws as `rate_limited` or, for the
+ * development-mode quota, `quota_exceeded`. Any other response is returned
+ * for the caller to read. A transport failure is rethrown as it came.
+ */
+export async function spotifyFetch(caller: SpotifyCaller, url: string | URL, init: RequestInit): Promise<Response> {
+  await assertSpotifyOpen(caller.db);
+
+  const count = async (outcome: CallOutcome) => {
+    if (caller.tally) return caller.tally.add(caller.source, outcome);
+    const counted = countCall(caller.db, caller.source, outcome).then(
+      () => undefined,
+      (error) => log('spotify-count-failed', { source: caller.source, outcome, error }, 'error'),
+    );
+    if (caller.waitUntil) caller.waitUntil(counted);
+    else await counted;
+  };
+
+  let response: Response;
+  try {
+    response = await fetch(url, init);
+  } catch (error) {
+    // It may or may not have reached Spotify, so it may have cost a call.
+    await count('other');
+    throw error;
+  }
+
+  if (response.status !== 429) {
+    await count(response.ok ? '2xx' : 'other');
+    return response;
+  }
+
+  await count('429');
+  const path = new URL(url).pathname.replace(/^\/v1/, '');
+  // Retry-After is the only thing that says how long the wait actually is:
+  // a long-running backfill needs it, and so does everything sharing the quota.
+  const retryAfterSeconds = retryAfterOf(response);
+  const body = truncate(await response.text(), 300);
+  const kind = body.includes('QUOTA_EXCEEDED') ? 'quota_exceeded' : 'rate_limited';
+  const pause = await recordPause(caller.db, kind, pauseSeconds(kind, retryAfterSeconds));
+  log(
+    'spotify-paused',
+    { source: caller.source, kind, retry_after_seconds: retryAfterSeconds, until_ms: pause.until_ms },
+    'warn',
+  );
+  throw new SpotifyError(
+    kind,
+    `${kind === 'quota_exceeded' ? 'Development-mode quota exceeded' : 'Rate limited'} on ${path} (Retry-After: ${
+      retryAfterSeconds ?? 'absent'
+    }): ${body}`,
+    { status: 429, retryAfterSeconds },
+  );
+}
+
 /**
  * A plain authenticated GET against the Spotify API, returning the parsed body
  * verbatim. Used by the read-through proxy routes; deliberately does no
@@ -181,32 +286,19 @@ export function authorizeUrl(
  *
  * Returns null for 204 (Spotify's "nothing is playing").
  */
-export async function spotifyGet(accessToken: string, path: string): Promise<unknown> {
+export async function spotifyGet(caller: SpotifyCaller, accessToken: string, path: string): Promise<unknown> {
   let response: Response;
   try {
-    response = await fetch(`https://api.spotify.com/v1${path}`, {
+    response = await spotifyFetch(caller, `https://api.spotify.com/v1${path}`, {
       headers: { Authorization: `Bearer ${accessToken}` },
     });
   } catch (cause) {
+    if (cause instanceof SpotifyError) throw cause;
     throw new SpotifyError('network', `${path} request failed: ${(cause as Error).message}`);
   }
 
   if (response.status === 204) return null;
   if (response.status === 401) throw new SpotifyError('unauthorized', `${path} returned 401.`, { status: 401 });
-  if (response.status === 429) {
-    // Same Retry-After handling as fetchRecentlyPlayed: a long-running backfill
-    // needs to know how long to wait, not just that it was refused.
-    const header = response.headers.get('Retry-After');
-    const retryAfterSeconds =
-      header !== null && header.trim() !== '' && Number.isFinite(Number(header)) ? Number(header) : null;
-    const body = truncate(await response.text(), 300);
-    const quotaExceeded = body.includes('QUOTA_EXCEEDED');
-    throw new SpotifyError(
-      quotaExceeded ? 'quota_exceeded' : 'rate_limited',
-      `${path} was rate limited (Retry-After: ${retryAfterSeconds ?? 'absent'}): ${body}`,
-      { status: 429, retryAfterSeconds },
-    );
-  }
   if (!response.ok) {
     throw new SpotifyError('http', `${path} returned ${response.status}: ${truncate(await response.text(), 300)}`, {
       status: response.status,
@@ -224,6 +316,7 @@ export async function spotifyGet(accessToken: string, path: string): Promise<unk
  * entirely rather than sent as 0, and Spotify returns its most recent window.
  */
 export async function fetchRecentlyPlayed(
+  caller: SpotifyCaller,
   accessToken: string,
   afterMs: number,
 ): Promise<RecentlyPlayedResponse> {
@@ -235,25 +328,10 @@ export async function fetchRecentlyPlayed(
 
   let response: Response;
   try {
-    response = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
+    response = await spotifyFetch(caller, url, { headers: { Authorization: `Bearer ${accessToken}` } });
   } catch (cause) {
+    if (cause instanceof SpotifyError) throw cause;
     throw new SpotifyError('network', `recently-played request failed: ${(cause as Error).message}`);
-  }
-
-  if (response.status === 429) {
-    const header = response.headers.get('Retry-After');
-    const retryAfterSeconds = header !== null && header.trim() !== '' && Number.isFinite(Number(header))
-      ? Number(header)
-      : null;
-    const body = truncate(await response.text(), 300);
-    const quotaExceeded = body.includes('QUOTA_EXCEEDED');
-    throw new SpotifyError(
-      quotaExceeded ? 'quota_exceeded' : 'rate_limited',
-      `${quotaExceeded ? 'Development-mode quota exceeded' : 'Rate limited'} (Retry-After: ${
-        retryAfterSeconds ?? 'absent'
-      }): ${body}`,
-      { status: 429, retryAfterSeconds },
-    );
   }
 
   if (response.status === 401) {

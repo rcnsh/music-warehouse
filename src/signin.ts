@@ -78,7 +78,7 @@ export function signInRedirectUri(env: Env): string {
 
 /** Store the Spotify user id an access token belongs to as the warehouse's owner. */
 export async function recordOwner(db: D1Database, accessToken: string): Promise<string> {
-  const me = (await spotifyGet(accessToken, '/me')) as { id?: string } | null;
+  const me = (await spotifyGet({ db, source: 'signin' }, accessToken, '/me')) as { id?: string } | null;
   if (!me?.id) throw new SpotifyError('http', '/me returned no user id.');
   await db.prepare('UPDATE oauth_token SET spotify_user_id = ? WHERE id = 1').bind(me.id).run();
   return me.id;
@@ -298,7 +298,7 @@ async function finishSignIn(env: Env, request: Request, url: URL, state: string)
   let owner: string | null;
   try {
     const identity = await exchangeCode(env, code, signInRedirectUri(env));
-    const me = (await spotifyGet(identity.access_token, '/me')) as { id?: string } | null;
+    const me = (await spotifyGet({ db: env.DB, source: 'signin' }, identity.access_token, '/me')) as { id?: string } | null;
     if (!me?.id) throw new SpotifyError('http', '/me returned no user id.');
     signedIn = me.id;
     owner = await ownerId(env);

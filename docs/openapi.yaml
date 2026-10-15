@@ -774,6 +774,10 @@ paths:
       responses:
         '200':
           description: Spotify's currently-playing payload, unmodified.
+          headers:
+            X-Cache:
+              description: '`hit` for the shared answer, `miss` when Spotify was just asked, `stale` for the last answer while Spotify calls are paused after a 429.'
+              schema: { type: string, enum: [hit, miss, stale] }
           content:
             application/json:
               schema:
@@ -796,7 +800,10 @@ paths:
       tags: [Live]
       operationId: getRecentlyPlayed
       summary: Spotify's recently-played, newest first
-      description: Includes plays not yet stored. Passed through unmodified.
+      description: |
+        Includes plays not yet stored. Passed through unmodified, except that
+        one page of 50 is shared and each request gets its first `limit` plays,
+        with `limit`, `href`, `next` and `cursors.before` to match.
       parameters:
         - name: limit
           in: query
@@ -805,6 +812,10 @@ paths:
       responses:
         '200':
           description: Spotify's `GET /me/player/recently-played` body (a cursor paging object of play history).
+          headers:
+            X-Cache:
+              description: '`hit` for the shared answer, `miss` when Spotify was just asked, `stale` for the last answer while Spotify calls are paused after a 429.'
+              schema: { type: string, enum: [hit, miss, stale] }
           content:
             application/json:
               schema:
@@ -1146,7 +1157,13 @@ components:
         application/json:
           schema: { $ref: '#/components/schemas/NeedsReauthError' }
     SpotifyRateLimited:
-      description: Spotify rate limit (`rate_limited`) or daily quota (`quota_exceeded`).
+      description: |
+        Spotify rate limit (`rate_limited`) or daily quota (`quota_exceeded`).
+        Every Spotify call is paused until the time in `Retry-After` has passed.
+      headers:
+        Retry-After:
+          description: Seconds until Spotify calls resume, when known.
+          schema: { type: integer }
       content:
         application/json:
           schema: { $ref: '#/components/schemas/SpotifyUpstreamError' }

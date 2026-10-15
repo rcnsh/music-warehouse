@@ -1,4 +1,4 @@
-import { SpotifyError, refreshAccessToken, type TokenResponse } from './spotify';
+import { SpotifyError, assertSpotifyOpen, refreshAccessToken, type TokenResponse } from './spotify';
 import type { Env, OAuthToken } from './types';
 
 /** Refresh this long before the access token actually expires. */
@@ -84,6 +84,9 @@ export async function getAccessToken(
     await markNeedsReauth(db);
     throw new NeedsReauthError('No refresh token stored; visit /login to authorize.');
   }
+
+  // A token refreshed while Spotify calls are paused could not be used.
+  await assertSpotifyOpen(db);
 
   try {
     const refreshed = await refreshAccessToken(env, stored.refresh_token);

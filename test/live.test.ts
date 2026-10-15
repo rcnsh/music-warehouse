@@ -1,6 +1,6 @@
 import { SELF, env } from 'cloudflare:test';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { jsonResponse, seedAuthorized } from './helpers';
+import { freezeClock, jsonResponse, seedAuthorized } from './helpers';
 
 const BASE = 'https://warehouse.test';
 const ADMIN = { Authorization: 'Bearer test-admin-token' };
@@ -64,11 +64,14 @@ describe('GET /api/now-playing', () => {
   });
 
   it('shares one Spotify call between polls a few seconds apart, but not a failure', async () => {
+    const start = freezeClock('2026-10-16T12:00:00Z');
     await seedAuthorized();
     let status = 429;
     const calls = stubSpotify(() => (status === 429 ? new Response('{}', { status }) : jsonResponse({ is_playing: true, item: { name: 'Kids' } })));
     expect((await SELF.fetch(`${BASE}/api/now-playing`, { headers: READ })).status).toBe(429);
     status = 200;
+    // Past the minute's pause that 429 set.
+    vi.setSystemTime(start + 61_000);
     const first = await SELF.fetch(`${BASE}/api/now-playing`, { headers: READ });
     const second = await SELF.fetch(`${BASE}/api/now-playing`, { headers: ADMIN });
     expect(calls).toHaveLength(2);
@@ -112,7 +115,8 @@ describe('GET /api/recently-played', () => {
 
     const response = await SELF.fetch(`${BASE}/api/recently-played`, { headers: READ });
 
-    expect(calls).toEqual(['/v1/me/player/recently-played?limit=1']);
+    // One page of 50 is fetched and kept; the client gets the first.
+    expect(calls).toEqual(['/v1/me/player/recently-played?limit=50']);
     expect(await response.json()).toEqual({ items });
   });
 
@@ -134,6 +138,37 @@ describe('GET /api/recently-played', () => {
 
     await SELF.fetch(`${BASE}/api/recently-played?limit=50`, { headers: READ });
     expect(calls).toEqual(['/v1/me/player/recently-played?limit=50']);
+  });
+
+  it('serves every limit from one kept page, sliced as Spotify would have answered', async () => {
+    await seedAuthorized();
+    const played = (i: number) => new Date(Date.UTC(2026, 9, 16, 12) - i * 60_000).toISOString();
+    const items = Array.from({ length: 50 }, (_, i) => ({ played_at: played(i), track: { name: `Song ${i}` } }));
+    const page = {
+      items,
+      limit: 50,
+      href: 'https://api.spotify.com/v1/me/player/recently-played?limit=50',
+      next: 'https://api.spotify.com/v1/me/player/recently-played?before=1&limit=50',
+      cursors: { after: String(Date.parse(played(0))), before: String(Date.parse(played(49))) },
+    };
+    const calls = stubSpotify(() => jsonResponse(page));
+
+    const one = await SELF.fetch(`${BASE}/api/recently-played?limit=1`, { headers: READ });
+    expect(one.headers.get('X-Cache')).toBe('miss');
+    expect(await one.json()).toEqual({
+      items: items.slice(0, 1),
+      limit: 1,
+      href: 'https://api.spotify.com/v1/me/player/recently-played?limit=1',
+      next: 'https://api.spotify.com/v1/me/player/recently-played?before=1&limit=1',
+      cursors: { after: page.cursors.after, before: String(Date.parse(played(0))) },
+    });
+
+    const ten = await SELF.fetch(`${BASE}/api/recently-played?limit=10`, { headers: READ });
+    expect(ten.headers.get('X-Cache')).toBe('hit');
+    expect(((await ten.json()) as { items: unknown[] }).items).toEqual(items.slice(0, 10));
+    const all = await SELF.fetch(`${BASE}/api/recently-played?limit=50`, { headers: READ });
+    expect(await all.json()).toEqual(page);
+    expect(calls).toHaveLength(1);
   });
 });
 

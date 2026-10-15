@@ -308,13 +308,15 @@ describe('poll', () => {
     expect(batches).toHaveLength(2); // readState's paired SELECT, plus the write
     // Context naming runs after the write and has its own single UPDATE when a
     // context needed a Spotify lookup (the sample fixture has one, a real
-    // capture may not). Nothing else writes outside the batch.
+    // capture may not), and the Spotify calls are counted in one INSERT at
+    // the end. Nothing else writes outside the batch.
     const writes = calls.filter((call) => call.startsWith('INSERT') || call.startsWith('UPDATE'));
-    expect(writes.filter((call) => call !== 'UPDATE contexts')).toHaveLength(0);
-    expect(writes.length).toBeLessThanOrEqual(1);
+    expect(writes.filter((call) => call !== 'UPDATE contexts')).toEqual(['INSERT INTO']);
+    expect(writes.length).toBeLessThanOrEqual(2);
 
+    // Plus one read of the Spotify pause and that one count.
     const subrequests = calls.length + fetchCalls.length;
-    expect(subrequests).toBeLessThanOrEqual(10);
+    expect(subrequests).toBeLessThanOrEqual(12);
   });
 
   it('never moves the cursor backwards when Spotify returns an older play', async () => {

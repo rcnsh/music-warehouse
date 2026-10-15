@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { LOOKUPS_PER_POLL, lookupPath } from '../src/contexts';
 import { poll } from '../src/ingest';
 import type { RecentlyPlayedItem } from '../src/types';
-import { jsonResponse, seedAuthorized } from './helpers';
+import { freezeClock, jsonResponse, seedAuthorized } from './helpers';
 
 const BASE = 'https://warehouse.test';
 const READ = { Authorization: 'Bearer test-read-token' };
@@ -109,16 +109,19 @@ describe('context names', () => {
     names['/playlists/p0?fields=name'] = 429;
     const lookups = stubSpotify(items, names);
 
+    freezeClock(T0 + DAY);
     await poll(env, T0 + DAY);
     // The first lookup was rate limited, so nothing else was asked this poll.
     expect(lookups).toHaveLength(1);
     expect(Object.values(await contextNames()).filter(Boolean)).toHaveLength(0);
 
+    // The 429 paused Spotify calls for a minute (no Retry-After); after it, ask again.
     names['/playlists/p0?fields=name'] = 'Playlist 0';
     lookups.length = 0;
-    await poll(env, T0 + DAY + 60_000);
+    vi.setSystemTime(T0 + DAY + 61_000);
+    await poll(env, T0 + DAY + 61_000);
     expect(lookups).toHaveLength(LOOKUPS_PER_POLL);
-    await poll(env, T0 + DAY + 120_000);
+    await poll(env, T0 + DAY + 122_000);
     expect(Object.values(await contextNames()).filter(Boolean)).toHaveLength(6);
   });
 

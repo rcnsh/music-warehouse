@@ -2,6 +2,7 @@ import { CONCERT_FAILURES_TO_ALERT, STALL_AFTER_MS } from './alerts';
 import { json } from './api';
 import { concertCheckStatus } from './concerts';
 import { readState } from './db';
+import { spotifyUsage } from './quota';
 import { daysUntilTokenExpiry } from './tokens';
 import type { Env } from './types';
 
@@ -23,9 +24,19 @@ import type { Env } from './types';
  * `concerts` is how the daily Ticketmaster check has been going. It does not
  * affect `ok`, which is about recording plays; `concerts.failing` is the same
  * line the `concert_check_failing` alert draws.
+ *
+ * `spotify` is how much of Spotify's shared development-mode quota this
+ * Worker has spent: requests sent in the last 24 hours by what sent them, how
+ * many were refused with 429, and the pause such a refusal sets (src/quota.ts).
+ * A pause does not change `stalled`, which is about plays, but it is named in
+ * `action_required` as the reason.
  */
 export async function health(env: Env, now: number = Date.now()): Promise<Response> {
-  const [{ sync, token }, concertStatus] = await Promise.all([readState(env.DB), concertCheckStatus(env.DB)]);
+  const [{ sync, token }, concertStatus, spotify] = await Promise.all([
+    readState(env.DB),
+    concertCheckStatus(env.DB),
+    spotifyUsage(env.DB, now),
+  ]);
 
   const [totals, recent] = await env.DB.batch<{ n: number | null }>([
     env.DB.prepare('SELECT SUM(plays) AS n FROM rollup_days'),
@@ -56,7 +67,9 @@ export async function health(env: Env, now: number = Date.now()): Promise<Respon
           ? (minutesSinceSuccess === null
               ? 'No poll has succeeded yet.'
               : `No successful poll for ${minutesSinceSuccess} minutes.`) +
-            ' See last_error, and README "Checking ingestion".'
+            (spotify.paused_until_iso
+              ? ` Spotify calls are paused after a 429 (${spotify.pause_kind}) until ${spotify.paused_until_iso}; polling resumes then.`
+              : ' See last_error, and README "Checking ingestion".')
           : daysUntilExpiry !== null && daysUntilExpiry <= 14
             ? `Refresh token expires in ${daysUntilExpiry} days. Re-authorize soon.`
             : concerts?.failing
@@ -75,5 +88,6 @@ export async function health(env: Env, now: number = Date.now()): Promise<Respon
     last_error_ms: sync.last_error_ms,
     consecutive_failures: sync.consecutive_failures,
     concerts,
+    spotify,
   });
 }
