@@ -157,7 +157,9 @@ describe('READ_TOKEN', () => {
     try {
       const request = new Request(`${BASE}/api/plays`, { headers: bearer('test-read-token') });
       expect(await accessFor(request, env, createExecutionContext())).toBe('read');
-      expect(warn).toHaveBeenCalledWith(expect.stringContaining('READ_TOKEN used: it is deprecated'));
+      expect(warn).toHaveBeenCalledWith(
+        expect.objectContaining({ event: 'read-token-deprecated', message: expect.stringContaining('READ_TOKEN used: it is deprecated') }),
+      );
     } finally {
       warn.mockRestore();
     }

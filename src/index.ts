@@ -104,7 +104,7 @@ async function callback(env: Env, url: URL): Promise<Response> {
   } catch (cause) {
     // The message can hold Spotify's response body: the log gets it, the page
     // does not.
-    console.error('callback', cause instanceof SpotifyError ? cause.message : cause);
+    log('callback-token-exchange-failed', { error: cause instanceof SpotifyError ? cause.message : cause }, 'error');
     return text('Token exchange with Spotify failed; the Worker log has the details. Start again at /login.', 502);
   }
 

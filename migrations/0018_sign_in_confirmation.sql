@@ -1,4 +1,4 @@
--- Migration 0016: a sign-in is confirmed on a warehouse page, in the browser
+-- Migration 0018: a sign-in is confirmed on a warehouse page, in the browser
 -- that started it, and is capped per client.
 --
 -- `client_hash` is a keyed hash of the client's IP address (its /64 for IPv6),

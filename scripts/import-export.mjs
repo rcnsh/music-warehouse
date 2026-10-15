@@ -233,7 +233,7 @@ async function main() {
     `\n\nDone. ${state.totalInserted} play rows inserted in total; ${state.totalDuplicates ?? 0} records were already stored; ` +
       `${state.totalShort ?? 0} skips (under 30 s) dropped.`,
   );
-  console.log('Verify: wrangler d1 execute music_warehouse --remote --command "SELECT source, COUNT(*) FROM plays GROUP BY source;"');
+  console.log('Verify: npm run wrangler -- d1 execute music_warehouse --remote --command "SELECT source, COUNT(*) FROM plays GROUP BY source;"');
 }
 
 await main();

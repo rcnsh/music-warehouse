@@ -20,6 +20,10 @@
 # derived entirely from track_search_text, so the file ends by recreating it
 # and rebuilding it from that table, which makes it restorable as it is.
 #
+# Wrangler runs through scripts/wrangler.mjs, so --remote reaches the database
+# named in wrangler.local.jsonc rather than the template's placeholder id; it
+# refuses --remote when there is no local config.
+#
 # A running export blocks other queries to the database. A poll that lands
 # on it fails and the next one catches up, since the cursor never advanced.
 
@@ -30,6 +34,11 @@ if [[ "${1:-}" == "--local" ]]; then where="--local"; fi
 
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo"
+
+if [[ "$where" == "--remote" && ! -f "$repo/wrangler.local.jsonc" ]]; then
+  echo "backup: no wrangler.local.jsonc, so no database to back up. Copy wrangler.jsonc to it and fill in your own values (see README)." >&2
+  exit 1
+fi
 
 db="${D1_DATABASE:-music_warehouse}"
 dir="${BACKUP_DIR:-$HOME/Backups/music-warehouse}"
@@ -65,6 +74,8 @@ extras_sql="SELECT sql FROM sqlite_master
    AND tbl_name NOT LIKE '\\_cf\\_%' ESCAPE '\\'
  ORDER BY type = 'trigger', name"
 
+wrangler() { node "$repo/scripts/wrangler.mjs" "$@"; }
+
 rows() { # print one column of a `wrangler d1 execute --json` result, one row per line
   node -e 'for (const row of JSON.parse(require("fs").readFileSync(0, "utf8"))[0].results) console.log(Object.values(row)[0])'
 }
@@ -72,17 +83,17 @@ rows() { # print one column of a `wrangler d1 execute --json` result, one row pe
 tables=()
 while IFS= read -r name; do
   [[ -n "$name" ]] && tables+=("--table=$name")
-done < <(npx wrangler d1 execute "$db" "$where" --json --command "$tables_sql" </dev/null | rows)
+done < <(wrangler d1 execute "$db" "$where" --json --command "$tables_sql" </dev/null | rows)
 
 if [[ ${#tables[@]} -eq 0 ]]; then
   echo "backup: found no tables in $db" >&2
   exit 1
 fi
 
-extras="$(npx wrangler d1 execute "$db" "$where" --json --command "$extras_sql" </dev/null |
+extras="$(wrangler d1 execute "$db" "$where" --json --command "$extras_sql" </dev/null |
   node -e 'for (const row of JSON.parse(require("fs").readFileSync(0, "utf8"))[0].results) console.log(row.sql + ";")')"
 
-npx wrangler d1 export "$db" "$where" --output "$partial" "${tables[@]}" </dev/null
+wrangler d1 export "$db" "$where" --output "$partial" "${tables[@]}" </dev/null
 
 # The search index must match migration 0011. It is created after the rows,
 # then rebuilt from track_search_text, which holds everything it indexes.

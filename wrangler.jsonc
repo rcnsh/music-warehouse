@@ -79,6 +79,15 @@
       "triggers": { "crons": [] },
       // vitest.config.ts supplies the rest as bindings.
       "vars": { "SPOTIFY_REDIRECT_URI": "http://127.0.0.1:8787/callback" },
+      // Bindings are not inherited by an environment; the sign-in tests
+      // exercise this limiter.
+      "ratelimits": [
+        {
+          "name": "AUTH_RATE_LIMITER",
+          "namespace_id": "1001",
+          "simple": { "limit": 20, "period": 60 }
+        }
+      ],
       "d1_databases": [
         {
           "binding": "DB",

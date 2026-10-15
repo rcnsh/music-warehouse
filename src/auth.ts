@@ -1,5 +1,6 @@
 import { BadRequest, json } from './api';
 import type { Env } from './types';
+import { log } from './log';
 
 /**
  * Access level of the presented bearer token (R11).
@@ -107,7 +108,7 @@ export async function accessFor(request: Request, env: Env, ctx: ExecutionContex
 
   if (env.ADMIN_TOKEN && (await secretsMatch(presented, env.ADMIN_TOKEN))) return 'admin';
   if (env.READ_TOKEN && (await secretsMatch(presented, env.READ_TOKEN))) {
-    console.warn('READ_TOKEN used: it is deprecated. Sign in, or mint a device token, and unset READ_TOKEN.');
+    log('read-token-deprecated', { message: 'READ_TOKEN used: it is deprecated. Sign in, or mint a device token, and unset READ_TOKEN.' }, 'warn');
     return 'read';
   }
   if (!TOKEN_SHAPE.test(presented)) return null;

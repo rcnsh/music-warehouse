@@ -318,7 +318,7 @@ token is lost.
 
 `READ_TOKEN` is deprecated: one shared secret that never expires and cannot be
 revoked for one reader without breaking the rest. It still works, and every
-use logs `READ_TOKEN used: it is deprecated` (see `npx wrangler tail`), so
+use logs a `read-token-deprecated` warning (see `npx wrangler tail`), so
 you can find what still sends it. Move each of those to a device token, and
 once the warning stops, delete it with `npx wrangler secret delete READ_TOKEN`.
 Don't set it on a new deployment.
@@ -1136,9 +1136,9 @@ history needs a copy of its own. There are two layers.
 minute in the last 30 days on Workers Paid (7 on Free):
 
 ```bash
-npx wrangler d1 time-travel info music_warehouse                       # the current bookmark
-npx wrangler d1 time-travel info music_warehouse --timestamp=2026-10-01T09:00:00Z
-npx wrangler d1 time-travel restore music_warehouse --timestamp=2026-10-01T09:00:00Z
+npm run wrangler -- d1 time-travel info music_warehouse                       # the current bookmark
+npm run wrangler -- d1 time-travel info music_warehouse --timestamp=2026-10-01T09:00:00Z
+npm run wrangler -- d1 time-travel restore music_warehouse --timestamp=2026-10-01T09:00:00Z
 ```
 
 A restore overwrites the database in place and cancels queries in flight. It
@@ -1154,6 +1154,9 @@ cannot recover from a mistake noticed late, or the database being deleted.
 npx wrangler login                          # once
 scripts/backup.sh                           # BACKUP_DIR, BACKUP_KEEP and D1_DATABASE override the defaults
 ```
+
+It runs Wrangler through `scripts/wrangler.mjs`, so it backs up the database
+in `wrangler.local.jsonc`, and refuses to run against `--remote` without one.
 
 `wrangler d1 export` refuses a database holding a virtual table, and the
 search index (migration 0011) is one. So the script exports every real table
@@ -1178,7 +1181,7 @@ npx wrangler d1 execute music_warehouse_restored --remote --file ~/Backups/music
 npx wrangler d1 migrations list music_warehouse_restored --remote   # should have none to apply
 ```
 
-Then put the new `database_name` and `database_id` in `wrangler.jsonc` (and
+Then put the new `database_name` and `database_id` in `wrangler.local.jsonc` (and
 the `migrate:*` scripts in `package.json`), deploy, and check `/health`. The
 export carries `d1_migrations`, so later migrations apply on top as normal.
 Any plays newer than the export that are still in Spotify's last 50 come back
