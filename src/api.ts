@@ -99,7 +99,7 @@ export const likePattern = (term: string) => `%${term.replace(/[\\%_]/g, (c) => 
  * real warehouse: 4 tracks read 649 rows by seek and 36k by walk; 1,612
  * tracks read 8k by seek and 2k by walk.
  */
-const WALK_ABOVE_TRACKS = 500;
+export const WALK_ABOVE_TRACKS = 500;
 
 /** Joined by every play query, for PLAY_COLUMNS' play number and context name. */
 const PLAY_JOINS = `LEFT JOIN play_numbers pn ON pn.played_at_ms = p.played_at_ms AND pn.track_id = p.track_id
