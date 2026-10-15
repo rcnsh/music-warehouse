@@ -138,7 +138,7 @@ export function withArtistList(rows: Record<string, unknown>[]): Record<string, 
  * ignores case and accents. It cannot answer fewer than three characters, so
  * those fall back to LIKE scans of the three name tables (about 11k rows,
  * case-insensitive for ASCII only). Artists are read first there so their
- * tracks come from idx_track_artists_artist rather than a scan of
+ * tracks come from idx_track_artists_artist_pos rather than a scan of
  * track_artists.
  */
 async function matchingTrackIds(env: Env, q: string): Promise<{ ids: string[]; rowsRead: number }> {
