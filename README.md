@@ -467,6 +467,12 @@ it the same way.
 
 ## API reference
 
+> [!TIP]
+> The read API is also described as an OpenAPI 3.1 spec in
+> [`docs/openapi.yaml`](docs/openapi.yaml). Clients can generate types from it,
+> e.g. `npx openapi-typescript docs/openapi.yaml -o api.d.ts`. Its
+> `info.version` goes up with every change to a response's shape.
+
 Every route except `/callback` and `/auth/*` takes `Authorization: Bearer <token>`.
 
 | Token | Reaches |
