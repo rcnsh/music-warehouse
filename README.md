@@ -369,7 +369,10 @@ These read only D1, so they keep working when the Spotify grant has lapsed.
 With `q`, matching names reads about one row per matching track, from a
 trigram index (migration 0011), plus the plays read to fill the page. One- and
 two-character queries can't use the index and scan the name tables instead,
-about 11k rows, matching case-insensitively for ASCII only.
+about 11k rows, matching case-insensitively for ASCII only. The matching
+track ids are cached at the edge for five minutes per query, so the pages
+after the first skip that step (one row read instead). A track stored since
+then shows up at once; a renamed one can take those five minutes.
 
 **`GET /api/top-artists`**: play counts per artist. Params: `from` (default 29
 days ago), `to` (default today), `tz`, `limit` (1 to 500, default 50).
