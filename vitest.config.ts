@@ -1,10 +1,15 @@
 import { readFileSync } from 'node:fs';
-import { cloudflareTest, readD1Migrations } from '@cloudflare/vitest-pool-workers';
+import { cloudflareTest, readD1Migrations } from '@cloudflare/vitest-plugin';
 import { configDefaults, defineConfig } from 'vitest/config';
 
 // Migrations and fixtures are read here, on the Node side, and handed to the
 // test Worker as bindings — tests run inside workerd and have no filesystem.
-const migrations = await readD1Migrations('./migrations');
+// @cloudflare/vitest-plugin keeps the comment lines above a statement as part
+// of it; strip them so tests can pick statements out by their first keyword.
+const migrations = (await readD1Migrations('./migrations')).map((m) => ({
+  ...m,
+  queries: m.queries.map((sql) => sql.replace(/^(?:\s*--[^\n]*\n)+/, '')),
+}));
 
 // Prefer the real Phase 1 capture; fall back to the synthetic sample so the
 // suite runs before anyone has authorized against Spotify.

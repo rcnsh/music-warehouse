@@ -1,4 +1,4 @@
-import type { D1Migration } from '@cloudflare/vitest-pool-workers';
+import type { D1Migration } from '@cloudflare/vitest-plugin';
 import type { Env as WorkerEnv, RecentlyPlayedResponse } from '../src/types';
 
 // `cloudflare:test` types its `env` export as `Cloudflare.Env`. Declare it here
