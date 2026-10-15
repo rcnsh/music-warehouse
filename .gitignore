@@ -13,5 +13,9 @@ fixtures/recently-played.json
 .catalog-state.json
 # Dry-run report: per-day listening counts.
 import-report.json
-# Agent worktrees and local Claude Code state.
-.claude/
+# Agent worktrees and local Claude Code state. Project skills under
+# .claude/skills/ are tracked; everything else there stays local.
+.claude/*
+!.claude/skills/
+# Proof artifacts from the verify-warehouse skill (.claude/skills/verify-warehouse).
+verify-evidence/
