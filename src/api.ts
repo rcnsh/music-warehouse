@@ -57,10 +57,12 @@ export const likePattern = (term: string) => `%${term.replace(/[\\%_]/g, (c) => 
  */
 const WALK_ABOVE_TRACKS = 500;
 
-/** Joined by every play query, for PLAY_COLUMNS' play number. */
-const PLAY_NUMBER_JOIN = 'LEFT JOIN play_numbers pn ON pn.played_at_ms = p.played_at_ms AND pn.track_id = p.track_id';
+/** Joined by every play query, for PLAY_COLUMNS' play number and context name. */
+const PLAY_JOINS = `LEFT JOIN play_numbers pn ON pn.played_at_ms = p.played_at_ms AND pn.track_id = p.track_id
+       LEFT JOIN contexts cx ON cx.uri = p.context_uri`;
 
-const PLAY_COLUMNS = `p.played_at_ms, p.track_id, p.context_uri, p.context_type, p.source, pn.n AS play_number,
+const PLAY_COLUMNS = `p.played_at_ms, p.track_id, p.context_uri, p.context_type, cx.name AS context_name, p.source,
+            pn.n AS play_number,
             t.name AS track_name, t.duration_ms, t.isrc,
             al.name AS album_name, al.image_url,
             (SELECT group_concat(name, ', ')
@@ -216,7 +218,7 @@ export async function recentPlays(env: Env, url: URL): Promise<Response> {
          FROM plays p
          LEFT JOIN tracks t  ON t.track_id = p.track_id
          LEFT JOIN albums al ON al.album_id = t.album_id
-         ${PLAY_NUMBER_JOIN}
+         ${PLAY_JOINS}
         WHERE p.played_at_ms < ? AND p.played_at_ms > ?
         ORDER BY p.played_at_ms DESC
         LIMIT ?`,
@@ -253,7 +255,7 @@ export async function recentPlays(env: Env, url: URL): Promise<Response> {
        JOIN plays p ON p.played_at_ms = page.played_at_ms AND p.track_id = page.track_id
        LEFT JOIN tracks t  ON t.track_id = p.track_id
        LEFT JOIN albums al ON al.album_id = t.album_id
-       ${PLAY_NUMBER_JOIN}
+       ${PLAY_JOINS}
       ORDER BY p.played_at_ms DESC, p.track_id DESC`,
   )
     .bind(JSON.stringify(match.ids), before, after, limit)
