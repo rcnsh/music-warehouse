@@ -10,7 +10,7 @@ import { NeedsReauthError, getAccessToken, persistTokenResponse } from './tokens
 import { readState } from './db';
 import { SnapshotPending } from './snapshots';
 import { isStatName, statRoute } from './stats';
-import { artistRoute, onThisDayRoute, trackRoute } from './history';
+import { artistRoute, onThisDayRoute, topTracksRoute, trackRoute } from './history';
 import { searchRoute } from './search';
 import { warmWrappedPresets, wrappedRangesRoute, wrappedRoute } from './wrapped';
 import type { Env } from './types';
@@ -164,6 +164,7 @@ async function handle(request: Request, env: Env, ctx: ExecutionContext): Promis
             '/health',
             '/api/plays',
             '/api/top-artists',
+            '/api/top-tracks',
             '/api/daily',
             '/api/now-playing',
             '/api/recently-played',
@@ -191,6 +192,8 @@ async function handle(request: Request, env: Env, ctx: ExecutionContext): Promis
         return await recentPlays(env, url);
       case 'GET /api/top-artists':
         return await topArtists(env, url);
+      case 'GET /api/top-tracks':
+        return await topTracksRoute(env, url);
       case 'GET /api/daily':
         return await dailyCounts(env, url);
       case 'GET /api/now-playing':

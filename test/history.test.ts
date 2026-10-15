@@ -266,3 +266,30 @@ describe('/api/on-this-day', () => {
     expect(year!.top_tracks[0]).toMatchObject({ id: 't0', plays: 8 });
   });
 });
+
+describe('/api/top-tracks', () => {
+  it('counts songs in the range, editions folded, most played first', async () => {
+    await seed([
+      ...session(JAN_10, 3, { trackId: 'single', name: 'Hit', artistId: 'real', artistName: 'X' }),
+      ...session(JAN_10 + DAY, 1, { trackId: 'lp', name: 'HIT', artistId: 'name:x', artistName: 'x' }),
+      ...session(JAN_10 + 2 * DAY, 3, { trackId: 'cover', name: 'Hit', artistId: 'other', artistName: 'Y' }),
+      // Outside the range.
+      ...session(JAN_10 + 40 * DAY, 9, { trackId: 'later', artistId: 'z' }),
+    ]);
+    const body = await get<{ from: string; tracks: Array<{ id: string; name: string; artist: string; plays: number }> }>(
+      '/api/top-tracks?from=2024-01-01&to=2024-01-31&tz=UTC',
+    );
+    expect(body.from).toBe('2024-01-01');
+    expect(body.tracks.map(({ id, artist, plays }) => ({ id, artist, plays }))).toEqual([
+      { id: 'single', artist: 'X', plays: 4 },
+      { id: 'cover', artist: 'Y', plays: 3 },
+    ]);
+    const limited = await get<{ tracks: unknown[] }>('/api/top-tracks?from=2024-01-01&to=2024-01-31&tz=UTC&limit=1');
+    expect(limited.tracks).toHaveLength(1);
+  });
+
+  it('needs a token and validates the range', async () => {
+    expect((await SELF.fetch(`${BASE}/api/top-tracks`)).status).toBe(401);
+    expect((await SELF.fetch(`${BASE}/api/top-tracks?from=2024-02-01&to=2024-01-01`, { headers: READ })).status).toBe(400);
+  });
+});
