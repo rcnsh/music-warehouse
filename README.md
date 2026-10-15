@@ -451,7 +451,7 @@ A daily cron (01:23 UTC) refreshes it; `POST /admin/concert-check` runs it
 now. Each artist is matched to a Ticketmaster attraction by exact name
 (ignoring case, accents and `&`) at most 25 a day, and the answer kept, so the
 first few days fill in gradually. An act whose name Ticketmaster spells
-differently is missed rather than guessed at. Events Ticketmaster stops listing
+differently is missed rather than guessed at; [pin it](#admin) instead. Events Ticketmaster stops listing
 (past, cancelled) drop out. Needs `TICKETMASTER_API_KEY`; there are no push
 alerts.
 
@@ -486,6 +486,8 @@ grant has lapsed.
 | `POST /admin/backfill-catalog?after=&limit=&spacingMs=` | One step of `npm run backfill:catalog`. |
 | `POST /admin/alert-check?force=1` | Run the alert sweep now. `force=1` ignores the 24-hour resend window. |
 | `POST /admin/concert-check?spacingMs=` | Run the [concert](#concerts) check now. `spacingMs` (default 250) spaces Ticketmaster calls. |
+| `GET /admin/concert-artists?unmatched=1` | What each top artist matched on Ticketmaster; `unmatched=1` lists only the misses. |
+| `PUT /admin/concert-artists` | Body `{ "name": "Kanye West", "attraction_id": "K8vZ9175Oy7" }` pins a name to an attraction (find ids at <https://developer.ticketmaster.com/api-explorer/>); `"attraction_id": null` blocks a wrong match. Pins are never re-matched. `DELETE` with `{ "name" }` unpins. |
 | `GET /admin/raw?after=` | Spotify's unmodified recently-played payload. Read-only. |
 | `POST /admin/tokens` | Body `{ name, access?, expires_in_days? }`. Mints a [device token](#device-tokens), returned once. |
 | `GET /admin/tokens` | Every device token: `id`, `name`, `access`, `created_ms`, `expires_ms`, `last_used_ms`, `revoked_ms`, `active`. |

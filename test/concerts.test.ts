@@ -164,3 +164,52 @@ describe('concert check', () => {
     expect((await SELF.fetch(`${BASE}/admin/concert-check?spacingMs=0`, { method: 'POST', headers: ADMIN })).status).toBe(200);
   });
 });
+
+describe('concert artist pins', () => {
+  const YE = { id: 'K8vZ9175Oy7', name: 'Ye' };
+  const pin = (body: unknown, method = 'PUT') =>
+    SELF.fetch(`${BASE}/admin/concert-artists`, { method, headers: { ...ADMIN, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+
+  it('pins a renamed act, which the daily check uses and never re-matches', async () => {
+    await seedArtist('Kanye West', 5);
+    // Ticketmaster knows him only as Ye, so the exact-name match misses.
+    stubTicketmaster({ singapore: [event('e1', YE, '2027-04-01')] }, { 'Kanye West': [YE] });
+    expect((await runConcertCheck(env, { now: NOW, spacingMs: 0 })).matched).toBe(0);
+
+    expect((await pin({ name: 'kanye west', attraction_id: YE.id })).status).toBe(200);
+    // Long past the recheck window: a pinned name is still never looked up.
+    vi.unstubAllGlobals();
+    const calls = stubTicketmaster({ singapore: [event('e1', YE, '2027-04-01')] }, {});
+    const result = await runConcertCheck(env, { now: NOW + 200 * DAY, spacingMs: 0 });
+    expect(result).toMatchObject({ matched: 1, looked_up: 0, regions: { singapore: { events: 1 } } });
+    expect(calls.some((url) => url.pathname.endsWith('/attractions.json'))).toBe(false);
+    const body = (await (await SELF.fetch(`${BASE}/api/concerts`, { headers: READ })).json()) as { concerts: Array<{ artists: string }> };
+    // Billed under the name you listen to.
+    expect(body.concerts.map((c) => c.artists)).toEqual(['Kanye West']);
+  });
+
+  it('blocks a wrong match with null, lists pins first, and unpins', async () => {
+    await seedArtist('Collage', 3);
+    expect((await pin({ name: 'Collage', attraction_id: null })).status).toBe(200);
+    stubTicketmaster({}, { Collage: [{ id: 'WRONG', name: 'Collage' }] });
+    expect((await runConcertCheck(env, { now: NOW, spacingMs: 0 })).matched).toBe(0);
+
+    const listed = (await (await SELF.fetch(`${BASE}/admin/concert-artists?unmatched=1`, { headers: ADMIN })).json()) as {
+      artists: Array<{ name: string; attraction_id: string | null; pinned: boolean }>;
+    };
+    expect(listed.artists).toEqual([expect.objectContaining({ name: 'Collage', attraction_id: null, pinned: true })]);
+
+    expect(await (await pin({ name: 'collage' }, 'DELETE')).json()).toEqual({ name: 'collage', unpinned: true });
+    // Unpinned, the next check matches it again.
+    expect((await runConcertCheck(env, { now: NOW + DAY, spacingMs: 0 })).matched).toBe(1);
+  });
+
+  it('validates and is admin-only', async () => {
+    expect((await pin({ attraction_id: 'x' })).status).toBe(400);
+    expect((await pin({ name: 'X', attraction_id: 'bad id!' })).status).toBe(400);
+    expect((await pin({ name: 'X', attraction_id: 7 })).status).toBe(400);
+    const read = await SELF.fetch(`${BASE}/admin/concert-artists`, { method: 'PUT', headers: READ, body: '{}' });
+    expect(read.status).toBe(401);
+    expect((await SELF.fetch(`${BASE}/admin/concert-artists`, { headers: READ })).status).toBe(401);
+  });
+});

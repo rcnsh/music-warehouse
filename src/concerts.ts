@@ -126,15 +126,16 @@ async function topArtists(env: Env, now: number): Promise<Array<{ key: string; n
 /** Match names not yet matched, or matched too long ago; returns attraction id to artist name. */
 async function resolveArtists(env: Env, tm: Ticketmaster, artists: Array<{ key: string; name: string }>, now: number) {
   const { results: known } = await env.DB.prepare(
-    'SELECT name_key, attraction_id, checked_ms FROM concert_artists WHERE name_key IN (SELECT value FROM json_each(?))',
+    'SELECT name_key, attraction_id, checked_ms, pinned FROM concert_artists WHERE name_key IN (SELECT value FROM json_each(?))',
   )
     .bind(JSON.stringify(artists.map((a) => a.key)))
-    .all<{ name_key: string; attraction_id: string | null; checked_ms: number }>();
+    .all<{ name_key: string; attraction_id: string | null; checked_ms: number; pinned: number }>();
   const byKey = new Map(known.map((row) => [row.name_key, row]));
 
   const due = artists.filter(({ key }) => {
     const row = byKey.get(key);
     if (!row) return true;
+    if (row.pinned) return false;
     return now - row.checked_ms > (row.attraction_id ? RECHECK_MATCHED_MS : RECHECK_UNMATCHED_MS);
   });
 
@@ -150,11 +151,12 @@ async function resolveArtists(env: Env, tm: Ticketmaster, artists: Array<{ key: 
       break;
     }
     lookedUp++;
-    byKey.set(artist.key, { name_key: artist.key, attraction_id: match?.id ?? null, checked_ms: now });
+    byKey.set(artist.key, { name_key: artist.key, attraction_id: match?.id ?? null, checked_ms: now, pinned: 0 });
     writes.push(
       env.DB.prepare(
         `INSERT INTO concert_artists (name_key, name, attraction_id, checked_ms) VALUES (?, ?, ?, ?)
-         ON CONFLICT (name_key) DO UPDATE SET name = excluded.name, attraction_id = excluded.attraction_id, checked_ms = excluded.checked_ms`,
+         ON CONFLICT (name_key) DO UPDATE SET name = excluded.name, attraction_id = excluded.attraction_id, checked_ms = excluded.checked_ms
+         WHERE concert_artists.pinned = 0`,
       ).bind(artist.key, artist.name, match?.id ?? null, now),
     );
   }
@@ -287,6 +289,58 @@ export async function concertsRoute(env: Env, url: URL): Promise<Response> {
     concerts: (concerts!.results as Array<Record<string, unknown> & { first_seen_ms: number }>).map(({ first_seen_ms, ...rest }) => ({
       ...rest,
       first_seen: new Date(first_seen_ms).toISOString(),
+    })),
+  });
+}
+
+/**
+ * PUT /admin/concert-artists  { "name": "Kanye West", "attraction_id": "K8vZ9175Oy7" | null }
+ *
+ * Pin a name to a Ticketmaster attraction when the exact-name match can't find
+ * it (an act that renamed), or to null to block a wrong match. The next check
+ * uses it; nothing re-matches a pinned name. DELETE with the same name unpins.
+ */
+export async function pinConcertArtistRoute(env: Env, request: Request): Promise<Response> {
+  let body: { name?: unknown; attraction_id?: unknown };
+  try {
+    body = (await request.json()) as typeof body;
+  } catch {
+    throw new BadRequest('Body must be JSON: { "name": "...", "attraction_id": "..." | null }');
+  }
+  const name = typeof body.name === 'string' ? body.name.trim() : '';
+  if (!name || name.length > 200) throw new BadRequest('name is required');
+  if (request.method === 'DELETE') {
+    const result = await env.DB.prepare('DELETE FROM concert_artists WHERE name_key = lower(?) AND pinned = 1').bind(name).run();
+    return json({ name, unpinned: (result.meta.changes ?? 0) > 0 });
+  }
+  const id = body.attraction_id;
+  if (id !== null && (typeof id !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(id))) {
+    throw new BadRequest('attraction_id must be a Ticketmaster attraction id, or null to block the name');
+  }
+  await env.DB.prepare(
+    `INSERT INTO concert_artists (name_key, name, attraction_id, checked_ms, pinned) VALUES (lower(?1), ?1, ?2, ?3, 1)
+     ON CONFLICT (name_key) DO UPDATE SET name = excluded.name, attraction_id = excluded.attraction_id,
+       checked_ms = excluded.checked_ms, pinned = 1`,
+  )
+    .bind(name, id, Date.now())
+    .run();
+  return json({ name, attraction_id: id, pinned: true });
+}
+
+/** GET /admin/concert-artists?unmatched=1 — what each name matched, pins first. */
+export async function concertArtistsRoute(env: Env, url: URL): Promise<Response> {
+  const unmatched = url.searchParams.get('unmatched') === '1';
+  const { results } = await env.DB.prepare(
+    `SELECT name, attraction_id, pinned = 1 AS pinned, checked_ms FROM concert_artists
+      WHERE ?1 = 0 OR attraction_id IS NULL ORDER BY pinned DESC, lower(name)`,
+  )
+    .bind(unmatched ? 1 : 0)
+    .all<{ name: string; attraction_id: string | null; pinned: number; checked_ms: number }>();
+  return json({
+    artists: results.map(({ checked_ms, pinned, ...row }) => ({
+      ...row,
+      pinned: pinned === 1,
+      checked: new Date(checked_ms).toISOString(),
     })),
   });
 }
