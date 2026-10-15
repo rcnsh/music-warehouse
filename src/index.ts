@@ -8,10 +8,8 @@ import { alertCheckRoute, runPollCron } from './alerts';
 import { nowPlaying, recentlyPlayed, topMusic } from './live';
 import { SpotifyError, type TokenResponse, authorizeUrl, exchangeCode, fetchRecentlyPlayed } from './spotify';
 import { NeedsReauthError, getAccessToken, persistTokenResponse } from './tokens';
-import { readState, reconcileNameKeyedArtists } from './db';
+import { dailyTrackSweep, readState } from './db';
 import { EraConfigError } from './eras';
-import { syncSearchIndex } from './search-index';
-import { syncAllSongs } from './play-numbers';
 import { ensureRollup } from './rollup';
 import { accessFor, clientKey, createTokenRoute, listTokensRoute, listedOrigins, revokeTokenRoute } from './auth';
 import { SnapshotPending } from './snapshots';
@@ -387,14 +385,11 @@ const worker = {
       // race it and push the same alert twice.
       //
       // Polls only reconcile, index and key songs for what they touched; this
-      // catches the rest. The index and song keys follow the reconcile so they
-      // see merged artists.
+      // catches the rest.
       ctx.waitUntil(
-        env.DB.batch([...reconcileNameKeyedArtists(env.DB), syncSearchIndex(env.DB), ...syncAllSongs(env.DB)]).catch(
-          (error) => {
-            log('daily-sync-failed', { step: 'artist-reconcile, search-index or song sync', error }, 'error');
-          },
-        ),
+        env.DB.batch(dailyTrackSweep(env.DB)).catch((error) => {
+          log('daily-sync-failed', { step: 'artist-reconcile, search-index or song sync', error }, 'error');
+        }),
       );
       // Writes out the rollup zone's offsets a day further, or rebuilds the
       // rollup when its zone has changed.

@@ -1,5 +1,6 @@
 import { songTitleSql } from './song-title';
 import { PRIMARY_ARTIST_SQL } from './stats/sql';
+import { type TrackScope, trackScope } from './search-index';
 
 /**
  * Upkeep for play numbers (migration 0012): which play of its song each play
@@ -18,10 +19,11 @@ import { PRIMARY_ARTIST_SQL } from './stats/sql';
  * index seek per song plus the new plays; an import of older plays renumbers
  * the rest of each song it lands in. Keys change when a track's title or
  * primary artist does, which the daily artist reconcile can do to tracks a
- * write never names, so the daily cron rekeys every track (about 25k rows,
- * writing only what changed). The same sweep moves tracks onto a new key
- * when the key itself changes, as it did when edition tags began to be
- * taken off (migration 0012 keyed on the bare title).
+ * write never names, so the daily cron rekeys the tracks marked changed
+ * since its last run (migration 0020), writing only what changed. When the
+ * key itself changes, as it did when edition tags began to be taken off, a
+ * migration rekeys every track once (0016_song_edition_tags, generated from
+ * syncAllSongs).
  */
 
 /** The song key of track `t`. */
@@ -32,17 +34,17 @@ const UPSERT = `ON CONFLICT(played_at_ms, track_id) DO UPDATE SET song = exclude
      WHERE play_numbers.song IS NOT excluded.song OR play_numbers.n IS NOT excluded.n`;
 
 /** Record each track's current key, keeping the old one when it changes. */
-function rekey(db: D1Database, trackIds?: string[]): D1PreparedStatement {
-  // Always a WHERE: without one SQLite reads ON CONFLICT as a join's ON.
-  const scope = trackIds ? 'WHERE t.track_id IN (SELECT value FROM json_each(?1))' : 'WHERE true';
-  const statement = db.prepare(
-    `INSERT INTO track_songs (track_id, song)
-     SELECT t.track_id, ${songKey('t')} FROM tracks t ${scope}
-     ON CONFLICT(track_id) DO UPDATE
-        SET song = excluded.song, previous = COALESCE(track_songs.previous, track_songs.song), dirty = 1
-      WHERE track_songs.song IS NOT excluded.song`,
+function rekey(db: D1Database, tracks?: TrackScope): D1PreparedStatement {
+  const scope = trackScope(tracks);
+  return scope.bind(
+    db.prepare(
+      `INSERT INTO track_songs (track_id, song)
+       SELECT t.track_id, ${songKey('t')} FROM tracks t ${scope.where}
+       ON CONFLICT(track_id) DO UPDATE
+          SET song = excluded.song, previous = COALESCE(track_songs.previous, track_songs.song), dirty = 1
+        WHERE track_songs.song IS NOT excluded.song`,
+    ),
   );
-  return trackIds ? statement.bind(JSON.stringify(trackIds)) : statement;
 }
 
 /** Renumber from scratch every song a rekey moved a track into or out of, then clear the marks. */
@@ -121,7 +123,12 @@ export function renumberSongsOf(db: D1Database, trackIds: string[]): D1PreparedS
   ];
 }
 
-/** The daily sweep: rekey every track and renumber any song that changed. */
+/** Rekey every track and renumber any song that changed. */
 export function syncAllSongs(db: D1Database): D1PreparedStatement[] {
   return [rekey(db), ...renumberRekeyed(db)];
+}
+
+/** Rekey the tracks marked in track_changes (migration 0017) and renumber any song that changed. */
+export function syncChangedSongs(db: D1Database): D1PreparedStatement[] {
+  return [rekey(db, 'changed'), ...renumberRekeyed(db)];
 }
