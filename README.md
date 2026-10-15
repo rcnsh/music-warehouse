@@ -178,8 +178,17 @@ after 90 days and show `created_via: "spotify"` in the list.
 `$WORKER_URL/auth/login?name=laptop`, approve, and copy the token from the
 page. It is shown once.
 
-**From an app** on an origin listed in `CORS_ORIGINS`, it works like OAuth
-with PKCE ([RFC 7636](https://www.rfc-editor.org/rfc/rfc7636)):
+**From an app**, it works like OAuth with PKCE
+([RFC 7636](https://www.rfc-editor.org/rfc/rfc7636)). `return_to` can be:
+
+| Kind | `return_to` | Exchange |
+|---|---|---|
+| Web app | A URL on an origin listed in `CORS_ORIGINS` | From that origin, in the browser. |
+| Desktop app or CLI | `http://127.0.0.1:<any port>/…` or `http://[::1]:<any port>/…`, where the app listens | From the app; no `Origin`. |
+| Mobile app | `<scheme>://…`, with the scheme listed in `SIGN_IN_SCHEMES` | From the app; no `Origin`. |
+
+`localhost` is refused; use the IP literal
+([RFC 8252](https://www.rfc-editor.org/rfc/rfc8252#section-8.3)).
 
 1. Generate a random `code_verifier` (43 to 128 characters of
    `A-Z a-z 0-9 - . _ ~`) and keep it, e.g. in `sessionStorage`.
@@ -188,8 +197,7 @@ with PKCE ([RFC 7636](https://www.rfc-editor.org/rfc/rfc7636)):
    `/auth/login?name=<device>&return_to=<url on your origin>&code_challenge=<challenge>`.
 3. Spotify sends it back to `return_to` with `?code=…`, or with `?error=`:
    `access_denied`, `not_owner` or `unavailable`.
-4. Within 60 seconds, from that same origin,
-   `POST /auth/token` with `{ "code": "…", "code_verifier": "…" }`. The
+4. Within 60 seconds, `POST /auth/token` with `{ "code": "…", "code_verifier": "…" }`. The
    response is the minted token, as from `POST /admin/tokens`.
 
 A code works once, even if the exchange fails, and only alongside the verifier
@@ -274,6 +282,7 @@ locally. `npx wrangler secret list` shows what is set.
 | `CORS_ORIGINS` | no | Comma-separated browser origins (or `*`) allowed to call `/api/*`, e.g. `https://wrapped.example.com`. Unset sends no CORS headers. |
 | `ALERT_WEBHOOK_URL` | no | Where alerts are POSTed. See [Alerting](#alerting). |
 | `ALERT_MENTION` | no | Prefix for every alert, e.g. a Discord `<@id>`. |
+| `SIGN_IN_SCHEMES` | no | Comma-separated custom URL schemes a mobile app may [sign in](#signing-in-with-spotify) to, e.g. `app.remastered`. |
 | `MOVED_AT` | no | ISO instant the second era starts. See [`src/eras.ts`](src/eras.ts). |
 | `SPOTIFY_REDIRECT_URI` | yes | A var in `wrangler.jsonc`, not a secret. |
 

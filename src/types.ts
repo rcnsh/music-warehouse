@@ -36,6 +36,11 @@ export interface Env {
    * The bearer token is still required; this only lets a browser carry it.
    */
   CORS_ORIGINS?: string;
+  /**
+   * Optional comma-separated custom URL schemes a mobile app may use as a
+   * sign-in `return_to`, e.g. `app.remastered`. Loopback HTTP needs no entry.
+   */
+  SIGN_IN_SCHEMES?: string;
 }
 
 /**
