@@ -1,10 +1,15 @@
 import { readFileSync } from 'node:fs';
-import { cloudflareTest, readD1Migrations } from '@cloudflare/vitest-pool-workers';
-import { defineConfig } from 'vitest/config';
+import { cloudflareTest, readD1Migrations } from '@cloudflare/vitest-plugin';
+import { configDefaults, defineConfig } from 'vitest/config';
 
 // Migrations and fixtures are read here, on the Node side, and handed to the
 // test Worker as bindings — tests run inside workerd and have no filesystem.
-const migrations = await readD1Migrations('./migrations');
+// @cloudflare/vitest-plugin keeps the comment lines above a statement as part
+// of it; strip them so tests can pick statements out by their first keyword.
+const migrations = (await readD1Migrations('./migrations')).map((m) => ({
+  ...m,
+  queries: m.queries.map((sql) => sql.replace(/^(?:\s*--[^\n]*\n)+/, '')),
+}));
 
 // Prefer the real Phase 1 capture; fall back to the synthetic sample so the
 // suite runs before anyone has authorized against Spotify.
@@ -22,7 +27,10 @@ function loadFixture(): Record<string, unknown> {
 export default defineConfig({
   plugins: [
     cloudflareTest({
-      wrangler: { configPath: './wrangler.jsonc' },
+      // The "test" environment makes Wrangler load .dev.vars.test (dummy
+      // values, committed) in place of .dev.vars, so real secrets stay out of
+      // tests and CI needs no .dev.vars.
+      wrangler: { configPath: './wrangler.jsonc', environment: 'test' },
       miniflare: {
         bindings: {
           TEST_MIGRATIONS: migrations,
@@ -55,5 +63,8 @@ export default defineConfig({
   ],
   test: {
     setupFiles: ['./test/setup.ts'],
+    // Agent worktrees under .claude/ hold whole copies of the repo; without
+    // this their tests run too, doubling the suite.
+    exclude: [...configDefaults.exclude, '.claude/**', 'node_modules/**'],
   },
 });

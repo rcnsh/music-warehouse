@@ -4,6 +4,7 @@ import { readState } from './db';
 import { SpotifyError, authorizeUrl, exchangeCode, spotifyGet } from './spotify';
 import { NeedsReauthError, getAccessToken } from './tokens';
 import type { Env } from './types';
+import { log } from './log';
 
 /**
  * Sign in with Spotify, to mint a read device token without copying one.
@@ -172,7 +173,7 @@ export async function signInCallback(env: Env, url: URL): Promise<Response> {
     owner = await ownerId(env);
   } catch (error) {
     if (!(error instanceof SpotifyError || error instanceof NeedsReauthError)) throw error;
-    console.error('sign-in', error.message);
+    log('sign-in-error', { message: error.message }, 'error');
     return fail('unavailable', 'Could not confirm your Spotify account. Try again later.', 502);
   }
 

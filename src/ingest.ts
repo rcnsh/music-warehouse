@@ -4,6 +4,7 @@ import { nameContexts } from './contexts';
 import { SpotifyError, fetchRecentlyPlayed } from './spotify';
 import { NeedsReauthError, getAccessToken } from './tokens';
 import type { Env, RecentlyPlayedResponse } from './types';
+import { log } from './log';
 
 export interface PollResult {
   ok: boolean;
@@ -46,7 +47,7 @@ async function nameContextsSafely(db: D1Database, accessToken: string, now: numb
   try {
     return await nameContexts(db, accessToken, now);
   } catch (error) {
-    console.error('context naming failed', describe(error));
+    log('context-naming-failed', { message: describe(error) }, 'error');
     return 0;
   }
 }

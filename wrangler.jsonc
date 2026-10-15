@@ -50,5 +50,24 @@
     // to a specific chat service, so it is set as a secret instead:
     //   npx wrangler secret put ALERT_MENTION
     // See README, "Alerting".
+  },
+
+  // Used only by the test pool (vitest.config.ts), so Wrangler reads the
+  // dummy .dev.vars.test rather than a developer's real .dev.vars. Never
+  // deployed: the all-zero id makes `wrangler deploy --env test` fail.
+  "env": {
+    "test": {
+      "routes": [],
+      "triggers": { "crons": [] },
+      // vitest.config.ts supplies the rest as bindings.
+      "vars": { "SPOTIFY_REDIRECT_URI": "http://127.0.0.1:8787/callback" },
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "music_warehouse_test",
+          "database_id": "00000000-0000-0000-0000-000000000000"
+        }
+      ]
+    }
   }
 }
