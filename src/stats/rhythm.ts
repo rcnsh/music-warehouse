@@ -134,13 +134,15 @@ export function streaksFrom(
 export async function computeRhythm(db: D1Database, now: number, eras: readonly Era[]): Promise<Rhythm> {
   const cutoff = startOfLocalWeek(eras, now);
   const { local, era } = localTimeSql(eras);
-  // One pass over the plays primary key. Both zones only ever shift by whole
-  // hours, so bucketing by UTC hour first loses nothing.
+  // One pass over the plays primary key, counted per UTC quarter hour before
+  // shifting to local time. Every zone's offset since Spotify began is a whole
+  // number of quarter hours (India's +5:30, Nepal's +5:45), so no quarter hour
+  // straddles a local hour; bucketing by UTC hour would split India's at :30.
   const { results } = await db
     .prepare(
       `WITH h AS (
-         SELECT played_at_ms / 3600000 * 3600 AS s, COUNT(*) AS n
-           FROM plays WHERE played_at_ms >= ?1 AND played_at_ms < ?2 GROUP BY played_at_ms / 3600000
+         SELECT played_at_ms / 900000 * 900 AS s, COUNT(*) AS n
+           FROM plays WHERE played_at_ms >= ?1 AND played_at_ms < ?2 GROUP BY played_at_ms / 900000
        ),
        loc AS (
          SELECT n, ${era} AS era, ${local} AS ls
