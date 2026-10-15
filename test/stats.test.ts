@@ -1,11 +1,12 @@
 import { SELF, env } from 'cloudflare:test';
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import { type Era, buildEras, localTimeSql, parseEras, startOfLocalToday, startOfLocalWeek } from '../src/eras';
 import { freshForSeconds, statKey } from '../src/stats';
 import { streaksFrom } from '../src/stats/rhythm';
 import { totalVariation } from '../src/stats/drift';
 import { localDayKey } from '../src/tz';
 import { edgeRequest } from '../src/snapshots';
+import { freezeClock } from './helpers';
 
 const BASE = 'https://warehouse.test';
 const READ = { Authorization: 'Bearer test-read-token' };
@@ -215,13 +216,22 @@ describe('top over time', () => {
 });
 
 describe('on repeat', () => {
+  // On repeat counts whole local days up to the midnight that started today.
+  // Plays seeded relative to `now` straddle that midnight for part of each day
+  // (late evening in Singapore), so they are placed at local noon instead, and
+  // the clock is held so the route sees the same today.
+  let localNoon: (daysAgo: number) => number;
+  beforeEach(() => {
+    const midnight = startOfLocalToday(ERAS, freezeClock(Date.now()));
+    localNoon = (daysAgo) => midnight - daysAgo * DAY + 12 * 3_600_000;
+  });
+
   it('lists a song played across several days, not one looped evening', async () => {
-    const now = Date.now();
     await seed([
-      ...session('spread', now - 1 * DAY, 2),
-      ...session('spread', now - 4 * DAY, 2),
-      ...session('spread', now - 8 * DAY, 2),
-      ...session('loop', now - 2 * DAY, 12),
+      ...session('spread', localNoon(1), 2),
+      ...session('spread', localNoon(4), 2),
+      ...session('spread', localNoon(8), 2),
+      ...session('loop', localNoon(2), 12),
     ]);
 
     const body = (await (await stat('on-repeat')).json()) as { tracks: Array<{ track_id: string; days: number; plays: number; daily: number[] }> };
@@ -233,11 +243,10 @@ describe('on repeat', () => {
   });
 
   it('ignores plays too short to be listens', async () => {
-    const now = Date.now();
     // Ten-second gaps: every play after the first ended seconds after the last.
     const skips: Play[] = [];
     for (const day of [1, 3, 5]) {
-      for (let i = 0; i < 4; i++) skips.push({ ms: now - day * DAY + i * 10_000, trackId: 'skipped' });
+      for (let i = 0; i < 4; i++) skips.push({ ms: localNoon(day) + i * 10_000, trackId: 'skipped' });
     }
     await seed(skips);
 
@@ -300,7 +309,7 @@ describe('artist drift', () => {
   it('compares whole months and leaves the move month out of both sides', async () => {
     const move = new Date(MOVE_MS);
     const moveMonth = move.getUTCFullYear() * 12 + move.getUTCMonth();
-    const now = new Date();
+    const now = new Date(freezeClock(Date.now()));
     const n = now.getUTCFullYear() * 12 + now.getUTCMonth() - moveMonth - 1;
     const key = (index: number) => `${Math.floor(index / 12)}-${String((index % 12) + 1).padStart(2, '0')}`;
     await seed([...session('nc', MOVE_MS - 40 * DAY, 3), ...session('sg', MOVE_MS + 40 * DAY, 3)]);

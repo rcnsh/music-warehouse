@@ -46,6 +46,9 @@ export default defineConfig({
           CORS_ORIGINS: 'https://wrapped.test, https://other.test/',
           TICKETMASTER_API_KEY: 'test-tm-key',
           SIGN_IN_SCHEMES: 'app.test',
+          // Set TEST_NOW (any Date.parse-able instant) to run the whole suite
+          // with the clock frozen there, to check no test depends on when it runs.
+          TEST_NOW: process.env.TEST_NOW ?? '',
         },
       },
     }),

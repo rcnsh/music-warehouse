@@ -80,9 +80,11 @@ describe('poll', () => {
     expect(result.cursor_ms).toBe(newest);
 
     await poll(env);
+    // Context lookups may sit between the two, depending on what the fixture
+    // was played from; only the recently-played calls matter here.
+    const reads = calls.filter((call) => call.startsWith('recently-played'));
     // First ever call omits `after` entirely rather than sending after=0.
-    expect(calls[0]).toBe('recently-played');
-    expect(calls[1]).toBe(`recently-played?after=${newest}`);
+    expect(reads).toEqual(['recently-played', `recently-played?after=${newest}`]);
   });
 
   it('treats an empty window as success without moving the cursor', async () => {
@@ -256,7 +258,12 @@ describe('poll', () => {
     // One batch for the write path — not one call per row.
     const batches = calls.filter((call) => call.startsWith('batch('));
     expect(batches).toHaveLength(2); // readState's paired SELECT, plus the write
-    expect(calls.filter((call) => call.startsWith('INSERT') || call.startsWith('UPDATE'))).toHaveLength(0);
+    // Context naming runs after the write and has its own single UPDATE when a
+    // context needed a Spotify lookup (the sample fixture has one, a real
+    // capture may not). Nothing else writes outside the batch.
+    const writes = calls.filter((call) => call.startsWith('INSERT') || call.startsWith('UPDATE'));
+    expect(writes.filter((call) => call !== 'UPDATE contexts')).toHaveLength(0);
+    expect(writes.length).toBeLessThanOrEqual(1);
 
     const subrequests = calls.length + fetchCalls.length;
     expect(subrequests).toBeLessThanOrEqual(10);

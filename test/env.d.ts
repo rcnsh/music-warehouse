@@ -8,6 +8,7 @@ declare global {
     interface Env extends WorkerEnv {
       TEST_MIGRATIONS: D1Migration[];
       TEST_FIXTURE: RecentlyPlayedResponse;
+      TEST_NOW: string;
     }
   }
 }

@@ -1,6 +1,8 @@
 import { SELF, createExecutionContext, env, waitOnExecutionContext } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
-import { buildEras, parseEras } from '../src/eras';
+import { buildEras, eraAt, parseEras } from '../src/eras';
+import { localDayKey, startOfLocalDayUtcMs } from '../src/tz';
+import { freezeClock } from './helpers';
 import { edgeRequest } from '../src/snapshots';
 import { listeningAge, warmWrappedPresets, wrappedKey, wrappedPresets, type Wrapped, type WrappedPreset } from '../src/wrapped';
 
@@ -90,8 +92,15 @@ describe('wrapped: access', () => {
   });
 
   it('rejects a range that has not ended', async () => {
-    const today = new Date().toISOString().slice(0, 10);
+    // "Today" is the local date in the era in force now, as the route works it
+    // out, not the UTC date: they differ for eight hours a day in Singapore.
+    // The clock is held so the route and the test agree on what now is.
+    const now = freezeClock(Date.now());
+    const zone = eraAt(ERAS, now).timeZone;
+    const today = localDayKey(now, zone);
+    const yesterday = localDayKey(startOfLocalDayUtcMs(today, zone) - 1, zone);
     expect((await wrapped('2024-03-01', today)).status).toBe(400);
+    expect((await wrapped('2024-03-01', yesterday)).status).toBe(200);
   });
 });
 
