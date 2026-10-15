@@ -93,7 +93,7 @@ them, so check this table first.
 - A Spotify account with **Premium**. A development-mode Spotify app only works
   for an owner with Premium; without it, only the export import works.
 - A Cloudflare account. The free Workers and D1 plans are enough.
-- Node.js 20 or later.
+- Node.js 22 or later (Wrangler requires it). `.nvmrc` pins the version CI uses.
 
 ## Quick start
 
