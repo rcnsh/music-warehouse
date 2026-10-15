@@ -91,6 +91,7 @@ describe('concert check', () => {
         date: '2027-02-12',
         time: '20:00',
         artists: 'Kendrick Lamar',
+        artist_list: [{ id: 'kendricklamar', name: 'Kendrick Lamar' }],
         name: 'Kendrick Lamar Live',
         venue: 'National Stadium',
         city: 'Singapore',
@@ -100,6 +101,57 @@ describe('concert check', () => {
       },
       expect.objectContaining({ region: 'london', date: '2027-03-01', city: 'London' }),
     ]);
+  });
+
+  it('lists each billed artist whole, with our id, or null for a name only Ticketmaster knows', async () => {
+    await seedArtist('Tyler, The Creator', 5);
+    // Export-era plays carry only a placeholder; the real id wins when both exist.
+    await env.DB.batch([
+      env.DB.prepare("INSERT INTO artists (artist_id, name) VALUES ('name:tyler, the creator', 'Tyler, The Creator')"),
+      env.DB.prepare("INSERT INTO tracks (track_id, name, first_seen_ms) VALUES ('t-old', 'Old', ?)").bind(NOW),
+      env.DB.prepare("INSERT INTO track_artists (track_id, artist_id, position) VALUES ('t-old', 'name:tyler, the creator', 0)"),
+      env.DB.prepare("INSERT INTO plays (played_at_ms, track_id, source) VALUES (?, 't-old', 'import')").bind(NOW - 2 * DAY),
+    ]);
+    await seedArtist('Placeholder Only', 2);
+    await env.DB.batch([
+      env.DB.prepare("UPDATE artists SET artist_id = 'name:placeholder only' WHERE artist_id = 'placeholderonly'"),
+      env.DB.prepare("UPDATE track_artists SET artist_id = 'name:placeholder only' WHERE artist_id = 'placeholderonly'"),
+    ]);
+    const tyler = { id: 'T1', name: 'Tyler, The Creator' };
+    const placeholder = { id: 'P1', name: 'Placeholder Only' };
+    const support = { id: 'S1', name: 'Support Act' };
+    const both = event('e1', tyler, '2027-02-12');
+    both._embedded.attractions = [tyler, support, placeholder];
+    const theirs = event('e2', support, '2027-02-13');
+    stubTicketmaster({ singapore: [both, theirs] }, { 'Tyler, The Creator': [tyler], 'Placeholder Only': [placeholder] });
+
+    await runConcertCheck(env, { now: NOW, spacingMs: 0 });
+    const body = (await (await SELF.fetch(`${BASE}/api/concerts?region=singapore`, { headers: READ })).json()) as {
+      concerts: Array<{ artists: string; artist_list: Array<{ id: string | null; name: string }> | null }>;
+    };
+    expect(body.concerts.map(({ artists, artist_list }) => ({ artists, artist_list }))).toEqual([
+      {
+        artists: 'Tyler, The Creator, Placeholder Only',
+        artist_list: [
+          { id: 'tylerthecreator', name: 'Tyler, The Creator' },
+          { id: 'name:placeholder only', name: 'Placeholder Only' },
+        ],
+      },
+      { artists: 'Support Act', artist_list: [{ id: null, name: 'Support Act' }] },
+    ]);
+  });
+
+  it('gives a null artist_list for a row stored before the list was', async () => {
+    await env.DB.prepare(
+      `INSERT INTO concerts (event_id, region, artists, name, first_seen_ms, last_seen_ms)
+       VALUES ('old', 'singapore', 'Someone', 'Someone Live', ?, ?)`,
+    )
+      .bind(NOW, NOW)
+      .run();
+    const body = (await (await SELF.fetch(`${BASE}/api/concerts`, { headers: READ })).json()) as {
+      concerts: Array<{ artists: string; artist_list: unknown }>;
+    };
+    expect(body.concerts).toEqual([expect.objectContaining({ artists: 'Someone', artist_list: null })]);
   });
 
   it('remembers matches, keeps first_seen, and drops events no longer listed', async () => {
