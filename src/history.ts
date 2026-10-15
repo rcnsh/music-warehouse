@@ -70,7 +70,7 @@ function metaSql(tracksCte: string): string {
      WHERE t.track_id IN (SELECT track_id FROM ts)`;
 }
 
-function textParam(url: URL, name: string): string | null {
+export function textParam(url: URL, name: string): string | null {
   const value = url.searchParams.get(name)?.trim() ?? '';
   if (value.length > 200) throw new BadRequest(`${name} is too long`);
   return value === '' ? null : value;
@@ -152,7 +152,7 @@ function countBy(plays: PlayRow[]): Map<string, number> {
   return counts;
 }
 
-function respond(body: unknown, results: D1Result[]): Response {
+export function respond(body: unknown, results: D1Result[]): Response {
   // Cost goes in a header rather than the body, so the body is exactly the
   // documented shape.
   const rowsRead = results.reduce((sum, result) => sum + (result.meta?.rows_read ?? 0), 0);

@@ -11,6 +11,7 @@ import { readState } from './db';
 import { SnapshotPending } from './snapshots';
 import { isStatName, statRoute } from './stats';
 import { artistRoute, onThisDayRoute, trackRoute } from './history';
+import { searchRoute } from './search';
 import { warmWrappedPresets, wrappedRangesRoute, wrappedRoute } from './wrapped';
 import type { Env } from './types';
 
@@ -173,6 +174,7 @@ async function handle(request: Request, env: Env, ctx: ExecutionContext): Promis
             '/api/artist',
             '/api/track',
             '/api/on-this-day',
+            '/api/search',
             '/admin/poll',
             '/admin/alert-check',
             '/admin/import',
@@ -207,6 +209,8 @@ async function handle(request: Request, env: Env, ctx: ExecutionContext): Promis
         return await trackRoute(env, url);
       case 'GET /api/on-this-day':
         return await onThisDayRoute(env, url);
+      case 'GET /api/search':
+        return await searchRoute(env, url);
       case 'POST /admin/poll':
         return json(await poll(env));
       case 'POST /admin/alert-check':
