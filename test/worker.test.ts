@@ -1,8 +1,9 @@
 import { SELF, env } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
 import { normalizeExport } from '../src/import';
+import { ensureRollup } from '../src/rollup';
 import { syncSearchIndex } from '../src/search-index';
-import { seedAuthorized } from './helpers';
+import { seedAuthorized, testEnv } from './helpers';
 
 const BASE = 'https://warehouse.test';
 const AUTH = { Authorization: 'Bearer test-admin-token' };
@@ -139,6 +140,44 @@ describe('/health (R6)', () => {
     expect(body.days_until_token_expiry as number).toBeGreaterThanOrEqual(172);
     expect(body.days_until_token_expiry as number).toBeLessThan(183);
     expect(body.needs_reauth).toBe(false);
+    expect(body.stalled).toBe(false);
+    expect(body.ok).toBe(true);
+    expect(body.action_required).toBeNull();
+  });
+
+  it('is not ok once polling has stalled for three hours', async () => {
+    const now = Date.now();
+    await seedAuthorized({ authorizedAtMs: now - 10 * 86_400_000 });
+    await env.DB.prepare('UPDATE sync_state SET last_success_ms = ? WHERE id = 1').bind(now - 181 * 60_000).run();
+
+    const body = (await (await get('/health')).json()) as Record<string, unknown>;
+
+    expect(body.stalled).toBe(true);
+    expect(body.ok).toBe(false);
+    expect(String(body.action_required)).toMatch(/No successful poll for 18\d minutes/);
+  });
+
+  it('counts total plays from the rollup, in any rollup zone', async () => {
+    const now = Date.now();
+    await seedAuthorized();
+    await env.DB.prepare('UPDATE sync_state SET last_success_ms = ? WHERE id = 1').bind(now).run();
+    await seedPlays([
+      { ms: Date.parse('2026-03-29T00:30:00Z'), trackId: 't1' },
+      { ms: Date.parse('2026-03-29T01:30:00Z'), trackId: 't2' },
+      { ms: Date.parse('2025-12-31T23:59:00Z'), trackId: 't3' },
+    ]);
+    // A rebuild for another zone moves plays between days but keeps the sum.
+    await ensureRollup(testEnv({ TIMEZONE: 'Europe/London', ERAS: undefined }), { rebuild: true });
+
+    const body = (await (await get('/health')).json()) as Record<string, unknown>;
+    const counted = await env.DB.prepare('SELECT COUNT(*) AS n FROM plays').first<{ n: number }>();
+    expect(body.total_plays).toBe(3);
+    expect(body.total_plays).toBe(counted!.n);
+  });
+
+  it('reports zero plays on an empty warehouse, not null', async () => {
+    const body = (await (await get('/health')).json()) as Record<string, unknown>;
+    expect(body.total_plays).toBe(0);
   });
 
   it('states needs_reauth explicitly, with an action to take (R5)', async () => {

@@ -267,13 +267,12 @@ recomputed only after a new play or when the hour turns.
   not documented. Do not present counts as exhaustive.
 - **Downtime is data loss.** Nothing recovers plays that aged out of the
   50-item window during an outage. Tighten the cron to `*/15 * * * *` if gaps
-  appear.
+  appear. The alert check runs after every poll and `HEARTBEAT_URL` covers the
+  Worker itself stopping, so an outage is noticed within hours, not days.
 - **Local files and podcasts are not stored.** They have no Spotify track id.
   The poll counts them as `skipped`.
 - **Two plays sharing a `played_at` and `track_id` collapse to one row.** They
   are indistinguishable under the primary key.
-- **`/health` counts the whole table.** `total_plays` is a `COUNT(*)`, so do
-  not poll it in a loop.
 
 ## Verified against the live API
 
