@@ -255,7 +255,7 @@ async function handle(request: Request, env: Env, ctx: ExecutionContext): Promis
       case 'GET /api/on-this-day':
         return await onThisDayRoute(env, url);
       case 'GET /api/home':
-        return await homeRoute(env, url);
+        return await homeRoute(env, ctx, url);
       case 'GET /api/concerts':
         return await concertsRoute(env, url);
       case 'GET /api/search':

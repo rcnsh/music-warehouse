@@ -1,6 +1,7 @@
 import { timeZoneParam } from './api';
 import { respond } from './history';
-import { localDayKey, offsetMsAt } from './tz';
+import { SnapshotPending, snapshot } from './snapshots';
+import { type LocalCalendar, localCalendar, localDayKey, offsetMsAt } from './tz';
 import type { Env } from './types';
 
 /**
@@ -32,8 +33,11 @@ import type { Env } from './types';
  * jump back in, which is plain recency.
  *
  * Cost: the last year's plays read one at a time (about three rows each with the
- * track and its primary artist) and older ones aggregated in SQL. The body is
- * held at the edge until the newest play, the local hour or the day changes.
+ * track and its primary artist). Older ones are aggregated in SQL once a UTC
+ * day and kept in stats_snapshots, since nothing but an import of old plays
+ * changes them; the detailed year starts at a UTC midnight, so it runs a year
+ * and up to a day. The body is held at the edge for the local hour, so a play
+ * can take up to an hour to show: every poll would otherwise start a new key.
  */
 
 const DAY_MS = 86_400_000;
@@ -128,14 +132,10 @@ export function hourDistance(a: number, b: number): number {
 
 const closeness = (a: number, b: number, sigma: number) => Math.exp(-(hourDistance(a, b) ** 2) / (2 * sigma * sigma));
 
-/** Local time of day (fractional hours) and whether it's a weekend, offsets looked up once per UTC hour. */
-function clock(timeZone: string) {
-  const offsets = new Map<number, number>();
+/** Local time of day (fractional hours) and whether it's a weekend, from the zone's offsets over [fromMs, toMs). */
+function clock(calendar: LocalCalendar) {
   return (utcMs: number) => {
-    const bucket = Math.floor(utcMs / HOUR_MS);
-    let offset = offsets.get(bucket);
-    if (offset === undefined) offsets.set(bucket, (offset = offsetMsAt(utcMs, timeZone)));
-    const local = utcMs + offset;
+    const local = utcMs + calendar.offsetAt(utcMs);
     const day = new Date(local).getUTCDay();
     return { hour: (((local % DAY_MS) + DAY_MS) % DAY_MS) / HOUR_MS, weekend: day === 0 || day === 6 };
   };
@@ -175,7 +175,9 @@ function pick(scored: Array<Ranked & { score: number }>, limit: number, capArtis
 
 /** The four rows from the last year's plays (oldest first) and older contexts, as of [now] in [timeZone]. */
 export function rankHome(plays: HomePlay[], older: OlderContext[], now: number, timeZone: string): HomeRanking {
-  const at = clock(timeZone);
+  // One lookup of the zone's offsets for the whole year, rather than Intl per session.
+  const calendar = localCalendar(timeZone, Math.min(plays[0]?.ms ?? now, now), now + 1);
+  const at = clock(calendar);
   const today = at(now);
   const all = sessions(plays);
 
@@ -206,7 +208,7 @@ export function rankHome(plays: HomePlay[], older: OlderContext[], now: number, 
     acc.frecency += weight(s) * decay(age, SHORTCUT_HALF_LIFE_MS) * timeOfDay * (when.weekend === today.weekend ? SAME_DAY_TYPE_BOOST : 1);
     if (hourDistance(when.hour, today.hour) <= AROUND_WINDOW_H) {
       acc.around += weight(s) * closeness(when.hour, today.hour, AROUND_SIGMA) * decay(age, AROUND_HALF_LIFE_MS);
-      acc.aroundDays.add(localDayKey(s.startMs, timeZone));
+      acc.aroundDays.add(calendar.dayOf(s.startMs));
     }
     if (age < REDISCOVER_QUIET_MS) acc.recent = true;
     else acc.pastDays.add(Math.floor(s.startMs / DAY_MS));
@@ -252,26 +254,26 @@ interface Meta {
 
 const TYPE = /^spotify:(album|playlist|artist):/;
 
-/** GET /api/home?tz= */
-export async function homeRoute(env: Env, url: URL): Promise<Response> {
-  const timeZone = timeZoneParam(url, env);
-  const now = Date.now();
-  const latest = await env.DB.prepare('SELECT MAX(played_at_ms) AS ms FROM plays').first<{ ms: number | null }>();
-  const hour = Math.floor(((now + offsetMsAt(now, timeZone)) % DAY_MS) / HOUR_MS);
-  const key = new Request(
-    `${CACHE_ORIGIN}/v${VERSION}/${encodeURIComponent(timeZone)}/${localDayKey(now, timeZone)}/${hour}/${latest?.ms ?? 0}`,
-  );
-  const cache = await caches.open('home');
-  const hit = await cache.match(key);
-  if (hit) return new Response(hit.body, { headers: { ...Object.fromEntries(hit.headers), 'Cache-Control': 'no-store', 'X-Cache': 'hit' } });
+/** Where the detailed year begins: the UTC midnight at or before a year ago, so it moves once a day. */
+export const detailFromMs = (now: number) => Math.floor((now - DETAIL_MS) / DAY_MS) * DAY_MS;
 
-  const [recent, older] = await env.DB.batch([
-    env.DB.prepare(
-      `SELECT p.played_at_ms AS ms, ${KEY_SQL} AS key, ${LEAD_SQL} AS artist
-         FROM plays p LEFT JOIN tracks t ON t.track_id = p.track_id
-        WHERE p.played_at_ms >= ? AND p.played_at_ms <= ?
-        ORDER BY p.played_at_ms`,
-    ).bind(now - DETAIL_MS, now),
+/** The stats_snapshots key of the contexts played before `fromMs`. */
+export const olderKey = (fromMs: number) => `home-older:v1:${fromMs}`;
+
+/** The edge key of the body for this zone, local day and hour. */
+export function homeCacheKey(timeZone: string, now: number): Request {
+  const local = now + offsetMsAt(now, timeZone);
+  const hour = Math.floor((((local % DAY_MS) + DAY_MS) % DAY_MS) / HOUR_MS);
+  return new Request(`${CACHE_ORIGIN}/v${VERSION}/${encodeURIComponent(timeZone)}/${localDayKey(now, timeZone)}/${hour}`);
+}
+
+/**
+ * Contexts played on two or more UTC days before `fromMs`, as [key, days,
+ * last_ms, artist] rows. A whole-history scan, so it runs once per `fromMs`
+ * and the result is kept; it also drops the keys of earlier days.
+ */
+async function olderContexts(env: Env, fromMs: number): Promise<Array<[string, number, number, string | null]>> {
+  const [result] = await env.DB.batch([
     env.DB.prepare(
       `SELECT key, COUNT(DISTINCT day) AS days, MAX(ms) AS last_ms, MAX(artist) AS artist
          FROM (SELECT p.played_at_ms AS ms, p.played_at_ms / ${DAY_MS} AS day, ${KEY_SQL} AS key, ${LEAD_SQL} AS artist
@@ -279,9 +281,48 @@ export async function homeRoute(env: Env, url: URL): Promise<Response> {
                 WHERE p.played_at_ms < ?)
         WHERE key IS NOT NULL
         GROUP BY key HAVING COUNT(DISTINCT day) >= 2`,
-    ).bind(now - DETAIL_MS),
+    ).bind(fromMs),
+    env.DB.prepare("DELETE FROM stats_snapshots WHERE key GLOB 'home-older:v1:*' AND key < ?").bind(olderKey(fromMs)),
   ]);
-  const ranking = rankHome(recent!.results as unknown as HomePlay[], older!.results as unknown as OlderContext[], now, timeZone);
+  return (result!.results as unknown as OlderContext[]).map((o) => [o.key, o.days, o.last_ms, o.artist]);
+}
+
+/** GET /api/home?tz= */
+export async function homeRoute(env: Env, ctx: ExecutionContext, url: URL): Promise<Response> {
+  const timeZone = timeZoneParam(url, env);
+  const now = Date.now();
+  const key = homeCacheKey(timeZone, now);
+  const cache = await caches.open('home');
+  const hit = await cache.match(key);
+  if (hit) {
+    const response = new Response(hit.body, hit);
+    response.headers.set('Cache-Control', 'no-store');
+    response.headers.set('X-Cache', 'hit');
+    return response;
+  }
+
+  const fromMs = detailFromMs(now);
+  const [recent, older] = await Promise.all([
+    env.DB.prepare(
+      `SELECT p.played_at_ms AS ms, ${KEY_SQL} AS key, ${LEAD_SQL} AS artist
+         FROM plays p LEFT JOIN tracks t ON t.track_id = p.track_id
+        WHERE p.played_at_ms >= ? AND p.played_at_ms <= ?
+        ORDER BY p.played_at_ms`,
+    )
+      .bind(fromMs, now)
+      .all(),
+    // Fresh for a day, though the key changes each UTC day anyway: only an
+    // import of old plays makes a stored one wrong, for at most that long.
+    snapshot(env.DB, ctx, olderKey(fromMs), 86_400, () => olderContexts(env, fromMs)).catch(async (error) => {
+      // Another request is computing today's: count here too rather than fail the home screen.
+      if (!(error instanceof SnapshotPending)) throw error;
+      return { body: JSON.stringify(await olderContexts(env, fromMs)) };
+    }),
+  ]);
+  const olderRows = (JSON.parse(older.body) as Array<[string, number, number, string | null]>).map(
+    ([key, days, last_ms, artist]): OlderContext => ({ key, days, last_ms, artist }),
+  );
+  const ranking = rankHome(recent.results as unknown as HomePlay[], olderRows, now, timeZone);
 
   const rows = [ranking.shortcuts, ranking.jumpBackIn, ranking.aroundNow, ranking.rediscover];
   const uris = [...new Set(rows.flat().map((r) => r.key))];
@@ -321,9 +362,11 @@ export async function homeRoute(env: Env, url: URL): Promise<Response> {
       around_now: ranking.aroundNow.map(item),
       rediscover: ranking.rediscover.map(item),
     },
-    [recent!, older!, meta!, names!],
+    [recent, meta!, names!],
   );
   const stored = response.clone();
-  await cache.put(key, new Response(stored.body, { headers: { ...Object.fromEntries(stored.headers), 'Cache-Control': `max-age=${EDGE_TTL_SECONDS}` } }));
+  // set, not a spread over the lowercase copy, which kept both headers: "no-store, max-age=…" is never cached.
+  stored.headers.set('Cache-Control', `max-age=${EDGE_TTL_SECONDS}`);
+  await cache.put(key, stored);
   return response;
 }
