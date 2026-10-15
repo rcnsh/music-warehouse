@@ -492,10 +492,10 @@ describe('export import (R10)', () => {
     const body = (await (await importRecords([
       record('2026-09-08T12:00:01Z', 'polled'),
       record('2026-09-08T12:30:00Z', 'polled'),
-    ])).json()) as { inserted: number; matched_polled: number; duplicates: number };
+    ])).json()) as { inserted: number; duplicates: number };
 
     // The first is the polled listen; the second is half an hour later, so a new one.
-    expect(body).toMatchObject({ inserted: 1, matched_polled: 1, duplicates: 0 });
+    expect(body).toMatchObject({ inserted: 1, duplicates: 1 });
     const stored = await env.DB.prepare("SELECT played_at_ms, source FROM plays WHERE track_id = 'polled' ORDER BY 1").all();
     expect(stored.results).toEqual([
       { played_at_ms: Date.parse('2026-09-08T12:00:00.735Z'), source: 'api' },
@@ -503,12 +503,17 @@ describe('export import (R10)', () => {
     ]);
   });
 
-  it('never window-matches one export play against another', async () => {
-    await importRecords([record('2024-05-01T10:00:00Z', 'skipped-twice')]);
-    const body = (await (await importRecords([record('2024-05-01T10:00:04Z', 'skipped-twice')])).json()) as {
+  it('matches export plays against each other by the same window', async () => {
+    // One rule for both sources: within 5 s of a stored play of the track is
+    // that play, whoever stored it; further apart is another play.
+    await importRecords([record('2024-05-01T10:00:00Z', 'exported')]);
+    const near = (await (await importRecords([record('2024-05-01T10:00:04Z', 'exported')])).json()) as {
       inserted: number;
+      duplicates: number;
     };
-    expect(body.inserted).toBe(1);
+    expect(near).toMatchObject({ inserted: 0, duplicates: 1 });
+    const far = (await (await importRecords([record('2024-05-01T10:03:30Z', 'exported')])).json()) as { inserted: number };
+    expect(far.inserted).toBe(1);
   });
 
   it('turns window matching off with match_window_s=0', async () => {
@@ -531,12 +536,12 @@ describe('export import (R10)', () => {
     expect(body).toEqual({
       dry_run: true,
       received: 3,
-      duplicates: 0,
-      matched_polled: 1,
+      duplicates: 1,
       skipped: 1,
+      short: 0,
       new: 1,
       new_plays_ms: [Date.parse('2024-01-01T09:00:00Z')],
-      polled_offsets_ms: [-265],
+      duplicate_offsets_ms: [-265],
     });
     const after = await env.DB.prepare('SELECT COUNT(*) n FROM plays').first<{ n: number }>();
     expect(after!.n).toBe(before!.n);
