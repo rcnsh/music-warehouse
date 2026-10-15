@@ -16,6 +16,7 @@ import { SnapshotPending } from './snapshots';
 import { isStatName, statRoute } from './stats';
 import { artistRoute, onThisDayRoute, topTracksRoute, trackRoute } from './history';
 import { searchRoute } from './search';
+import { playsCsvRoute } from './export';
 import {
   RegionConfigError,
   concertArtistsRoute,
@@ -168,6 +169,7 @@ async function handle(request: Request, env: Env, ctx: ExecutionContext): Promis
             '/auth/token',
             '/health',
             '/api/plays',
+            '/api/plays.csv',
             '/api/top-artists',
             '/api/top-tracks',
             '/api/daily',
@@ -199,6 +201,8 @@ async function handle(request: Request, env: Env, ctx: ExecutionContext): Promis
         return await health(env);
       case 'GET /api/plays':
         return await recentPlays(env, url);
+      case 'GET /api/plays.csv':
+        return await playsCsvRoute(env, url);
       case 'GET /api/top-artists':
         return await topArtists(env, url);
       case 'GET /api/top-tracks':

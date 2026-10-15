@@ -412,6 +412,25 @@ track ids are cached at the edge for five minutes per query, so the pages
 after the first skip that step (one row read instead). A track stored since
 then shows up at once; a renamed one can take those five minutes.
 
+**`GET /api/plays.csv`**: the same plays as one CSV download, newest first,
+for a spreadsheet or a backup. Takes `/api/plays`' filters (`q`, `track_id`,
+`artist_id`, `artist_name`, `before`, `after`) and a local-date range: `from`
+and `to` with `tz`, as `/api/daily` takes them. Give neither for the whole
+history; with only one, the other takes `/api/daily`'s default. No `limit`:
+it streams every matching play, 2,000 per D1 query, so the Worker holds one
+page at a time. One query per page means the Workers Paid plan (1,000 queries
+a request) reaches two million plays, the Free plan (50) 100,000.
+
+```
+played_at,track,artists,album,track_id,context_uri,context_name,source
+2026-10-15T09:50:02.000Z,Shelter,"Porter Robinson, Madeon",Shelter,4cOdK2wGLETKBW3PvgPWqT,spotify:playlist:…,"Mix, Vol. 1",api
+```
+
+Quoting follows RFC 4180 and lines end in CRLF. `played_at` is UTC; `artists`
+lists every credited artist. A bad parameter is a `400` before anything
+streams. It reads about seven rows per play (the joins to names), so a whole
+history of 76k plays is about 680k rows.
+
 **`GET /api/top-artists`**: play counts per artist. Params: `from` (default 29
 days ago), `to` (default today), `tz`, `limit` (1 to 500, default 50).
 Returns `{ from, to, tz, artists: [{ artist_id, name, plays }] }`.
