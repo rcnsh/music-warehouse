@@ -131,10 +131,23 @@ describe('history routes: caching', () => {
     expect(second.headers.get('X-Cache')).toBe('hit');
     expect(second.headers.get('Cache-Control')).toBe('private, max-age=60');
     expect(await second.text()).toBe(body);
+    // A hit reports what it read itself, the cache check: a handful of rows.
+    const hitRows = Number(second.headers.get('X-Rows-Read'));
+    expect(hitRows).toBeGreaterThan(0);
+    expect(hitRows).toBeLessThan(10);
 
     await seed([{ ms: JAN_10 + 3 * DAY, trackId: 't1', artistId: 'por', artistName: 'Porter Robinson' }]);
     const third = await SELF.fetch(`${BASE}${path}`, { headers: READ });
     expect(third.headers.get('X-Cache')).toBeNull();
+  });
+
+  it('keys every parameter, so group_by gets its own answer', async () => {
+    await seed(session(JAN_10, 3, { trackId: 't1', artistId: 'por', artistName: 'Porter Robinson' }));
+    const path = '/api/daily?from=2024-01-01&to=2024-01-31&tz=Asia/Singapore';
+    await SELF.fetch(`${BASE}${path}`, { headers: READ });
+    const weekly = await SELF.fetch(`${BASE}${path}&group_by=week`, { headers: READ });
+    expect(weekly.headers.get('X-Cache')).toBeNull();
+    expect(((await weekly.json()) as { group_by: string }).group_by).toBe('week');
   });
 
   it('keeps no errors, and adds CORS headers to a kept answer per request', async () => {

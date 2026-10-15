@@ -215,16 +215,21 @@ const CLOCK_BUCKET_MS = 15 * 60_000;
  * of older plays changes neither newest, so it can take up to
  * HISTORY_EDGE_TTL_SECONDS to show.
  *
+ * X-Rows-Read on a hit is the key lookup's reads; on a miss, the route's,
+ * as in its `_meta.rows_read` (the lookup's few rows are not added).
+ *
  * The routes answer the same whatever token asked (this is one listener's
  * history, and the token was checked before this), so the key holds no
  * token; only successful answers are kept. The CORS headers are added after,
  * per request, so a kept answer carries none.
  */
 export async function cachedHistory(env: Env, url: URL, route: () => Promise<Response>): Promise<Response> {
-  const state = await env.DB.prepare(
+  const stateResult = await env.DB.prepare(
     `SELECT (SELECT MAX(played_at_ms) FROM plays) AS play, (SELECT MAX(id) FROM track_search_text) AS track,
             (SELECT time_zone || ':' || usable || ':' || horizon_ms FROM rollup_state WHERE id = 1) AS rollup`,
-  ).first<{ play: number | null; track: number | null; rollup: string | null }>();
+  ).all<{ play: number | null; track: number | null; rollup: string | null }>();
+  const state = stateResult.results[0];
+  const stateRowsRead = stateResult.meta?.rows_read ?? 0;
   const query = [...url.searchParams].sort(([a, x], [b, y]) => (a < b ? -1 : a > b ? 1 : x < y ? -1 : x > y ? 1 : 0));
   const version = [state?.play ?? 0, state?.track ?? 0, encodeURIComponent(state?.rollup ?? ''), Math.floor(Date.now() / CLOCK_BUCKET_MS)];
   const key = new Request(`${HISTORY_CACHE_ORIGIN}/v1/${version.join('/')}${url.pathname}?${new URLSearchParams(query)}`);
@@ -239,7 +244,13 @@ export async function cachedHistory(env: Env, url: URL, route: () => Promise<Res
   if (response.status !== 200) return response;
   const out = new Response(response.body, response);
   out.headers.set('Cache-Control', `private, max-age=${HISTORY_CLIENT_MAX_AGE}`);
-  if (hit) out.headers.set('X-Cache', 'hit');
+  // A kept answer reports what this request read, the key lookup, rather than
+  // what computing it read once (still in the body's `_meta.rows_read`). A
+  // miss reports the route's reads, matching `_meta`.
+  if (hit) {
+    out.headers.set('X-Rows-Read', String(stateRowsRead));
+    out.headers.set('X-Cache', 'hit');
+  }
   return out;
 }
 

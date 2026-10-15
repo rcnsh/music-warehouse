@@ -536,8 +536,9 @@ also put it in the body's `_meta.rows_read`.
 `/api/artist`, `/api/track`, `/api/top-artists`, `/api/top-tracks`,
 `/api/daily` and `/api/on-this-day` are kept in the Cache API until a new
 play or track arrives (three rows read to check), and sent with
-`Cache-Control: private, max-age=60`; a kept answer has `X-Cache: hit`, and
-reports the rows its first computation read. An import of older plays can
+`Cache-Control: private, max-age=60`; a kept answer has `X-Cache: hit`, and its
+`X-Rows-Read` is the rows the check read, while the body's `_meta.rows_read`
+stays what its first computation read. A fresh answer's header matches `_meta`. An import of older plays can
 take up to ten minutes to show there. `/api/now-playing` shares one Spotify
 call across requests for 10 seconds.
 

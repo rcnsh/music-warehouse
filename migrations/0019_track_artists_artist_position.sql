@@ -1,4 +1,4 @@
--- Migration 0016: index an artist's credits by position, with the track.
+-- Migration 0019: index an artist's credits by position, with the track.
 --
 -- /api/artist, /api/plays?artist_id=, /api/daily?artist_id= and /api/search
 -- find an artist's tracks by its primary credits (position 0). Through

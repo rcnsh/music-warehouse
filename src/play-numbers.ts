@@ -128,7 +128,7 @@ export function syncAllSongs(db: D1Database): D1PreparedStatement[] {
   return [rekey(db), ...renumberRekeyed(db)];
 }
 
-/** Rekey the tracks marked in track_changes (migration 0017) and renumber any song that changed. */
+/** Rekey the tracks marked in track_changes (migration 0020) and renumber any song that changed. */
 export function syncChangedSongs(db: D1Database): D1PreparedStatement[] {
   return [rekey(db, 'changed'), ...renumberRekeyed(db)];
 }

@@ -120,7 +120,7 @@ export function reconcileNameKeyedArtists(db: D1Database): D1PreparedStatement[]
 /**
  * The daily catch-all after the writes' own upkeep: reconcile every
  * name-keyed artist, then sync the search text and song keys of the tracks
- * marked changed since the last run (migration 0017), which include those
+ * marked changed since the last run (migration 0020), which include those
  * the reconcile just touched, and clear the marks. The syncs follow the
  * reconcile so they see merged artists. One batch, so a mark is cleared only
  * with its track synced.

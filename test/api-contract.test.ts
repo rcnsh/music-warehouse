@@ -215,8 +215,11 @@ describe('query cost', () => {
       const response = await fetchApi(path);
       expect(response.headers.get('X-Rows-Read'), path).toMatch(/^\d+$/);
     }
-    for (const path of ['/api/plays', '/api/daily', '/api/top-artists']) {
+    // The first loop's answers are kept (cachedHistory), and a kept answer's
+    // header is the cache check's reads, so ask with a new query each time.
+    for (const path of ['/api/plays?limit=5', '/api/daily?tz=UTC', '/api/top-artists?tz=UTC']) {
       const response = await fetchApi(path);
+      expect(response.headers.get('X-Cache'), path).toBeNull();
       const body = (await response.json()) as { _meta: { rows_read: number } };
       expect(String(body._meta.rows_read), path).toBe(response.headers.get('X-Rows-Read'));
     }

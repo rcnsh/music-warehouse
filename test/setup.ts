@@ -49,6 +49,8 @@ beforeEach(async () => {
     env.DB.prepare('DELETE FROM track_songs'),
     env.DB.prepare('DELETE FROM play_numbers'),
     env.DB.prepare('DELETE FROM contexts'),
+    // Deleting tracks leaves their change marks (migration 0020) behind.
+    env.DB.prepare('DELETE FROM track_changes'),
     // The plays' delete trigger has emptied the rollup; put back the
     // migration's UTC state, which a test may have rebuilt for another zone.
     env.DB.prepare('DELETE FROM rollup_days'),

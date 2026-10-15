@@ -1,4 +1,4 @@
--- Migration 0017: mark the tracks whose search text or song key may change.
+-- Migration 0020: mark the tracks whose search text or song key may change.
 --
 -- The daily cron used to rebuild every track's search text (migration 0011)
 -- and song key (0012) to catch what the writes themselves miss, such as

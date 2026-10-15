@@ -186,7 +186,7 @@ the tracks it wrote, renumbers whole any song a key change touched (the old
 key waits in `previous` until then), and numbers its own plays from the last
 correct number before the earliest of them, which for a poll is one index seek
 per song. The daily cron rekeys, and re-indexes for search, the tracks marked
-in `track_changes` since its last run (migration 0017: triggers mark a track
+in `track_changes` since its last run (migration 0020: triggers mark a track
 when it is stored or its name, album or credits change), for changes no write
 names, such as the artist reconcile repointing a credit or an album backfill.
 It used to rekey every track (about 31k rows read, writing nothing unless a

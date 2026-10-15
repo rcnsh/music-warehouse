@@ -18,7 +18,7 @@ export const searchText = (t: string) =>
 
 /**
  * Which tracks an upkeep statement covers: these ids, those marked in
- * track_changes since the last daily sweep (migration 0017), or every track.
+ * track_changes since the last daily sweep (migration 0020), or every track.
  */
 export type TrackScope = string[] | 'changed' | undefined;
 
