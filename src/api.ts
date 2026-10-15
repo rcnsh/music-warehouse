@@ -137,16 +137,23 @@ export async function recentPlays(env: Env, url: URL): Promise<Response> {
   // The ids travel as one JSON parameter, since D1 allows only 100 bound
   // parameters. `+p.track_id` stops SQLite using idx_plays_track, which
   // leaves the primary key to walk plays newest first.
+  //
+  // The page's keys are chosen first and joined to names after: seeking a
+  // popular artist's tracks finds thousands of plays, and joining names
+  // before the sort read every one of them (25k rows for "porter", now 4k).
+  // Ties on played_at_ms break by track_id, the primary key's own order.
   const trackTerm = match.ids.length > WALK_ABOVE_TRACKS ? '+p.track_id' : 'p.track_id';
   const query = await env.DB.prepare(
     `SELECT ${PLAY_COLUMNS}
-       FROM plays p
+       FROM (SELECT p.played_at_ms, p.track_id FROM plays p
+              WHERE ${trackTerm} IN (SELECT value FROM json_each(?))
+                AND p.played_at_ms < ? AND p.played_at_ms > ?
+              ORDER BY p.played_at_ms DESC, p.track_id DESC
+              LIMIT ?) page
+       JOIN plays p ON p.played_at_ms = page.played_at_ms AND p.track_id = page.track_id
        LEFT JOIN tracks t  ON t.track_id = p.track_id
        LEFT JOIN albums al ON al.album_id = t.album_id
-      WHERE ${trackTerm} IN (SELECT value FROM json_each(?))
-        AND p.played_at_ms < ? AND p.played_at_ms > ?
-      ORDER BY p.played_at_ms DESC
-      LIMIT ?`,
+      ORDER BY p.played_at_ms DESC, p.track_id DESC`,
   )
     .bind(JSON.stringify(match.ids), before, after, limit)
     .all();
