@@ -36,6 +36,7 @@ beforeEach(async () => {
     env.DB.prepare('DELETE FROM track_search_text'),
     env.DB.prepare('DELETE FROM track_songs'),
     env.DB.prepare('DELETE FROM play_numbers'),
+    env.DB.prepare('DELETE FROM contexts'),
     // Search matches are cached under the newest index row id. Without this
     // row ids restart at 1 in every test, and one test's cached matches
     // would answer the next's. Its empty text never matches anything.

@@ -1,5 +1,6 @@
 import { chunkSize, readState, writeStatements } from './db';
 import { normalize } from './normalize';
+import { nameContexts } from './contexts';
 import { SpotifyError, fetchRecentlyPlayed } from './spotify';
 import { NeedsReauthError, getAccessToken } from './tokens';
 import type { Env, RecentlyPlayedResponse } from './types';
@@ -12,6 +13,8 @@ export interface PollResult {
   inserted: number;
   /** Items dropped for having no Spotify track id. */
   skipped: number;
+  /** Contexts given a name (or a settled refusal) this run. */
+  contexts_named?: number;
   cursor_ms: number;
   needs_reauth: boolean;
   error?: string;
@@ -38,20 +41,32 @@ async function recordFailure(db: D1Database, message: string, now: number): Prom
     .run();
 }
 
+/** Context names are a nicety: a failure there must never fail the poll. */
+async function nameContextsSafely(db: D1Database, accessToken: string, now: number): Promise<number> {
+  try {
+    return await nameContexts(db, accessToken, now);
+  } catch (error) {
+    console.error('context naming failed', describe(error));
+    return 0;
+  }
+}
+
 /**
  * One poll cycle: read state, get a live access token, fetch everything after
  * the cursor, and write it in a single batch.
  *
- * Subrequest budget (R12, ceiling 10): 1 read + at most 4 for token work +
- * at most 2 recently-played fetches + 1 write batch = 8 in the worst case.
+ * Subrequest budget (R12, ceiling 50): 1 read + at most 4 for token work +
+ * at most 2 recently-played fetches + 1 write batch = 8, then context naming:
+ * 1 read + LOOKUPS_PER_POLL (3) Spotify calls + 1 write = 13 in the worst case.
  */
 export async function poll(env: Env, now: number = Date.now()): Promise<PollResult> {
   const db = env.DB;
   const { sync, token } = await readState(db);
 
   let payload: RecentlyPlayedResponse;
+  let accessToken: string;
   try {
-    const accessToken = await getAccessToken(db, env, token, now);
+    accessToken = await getAccessToken(db, env, token, now);
 
     try {
       payload = await fetchRecentlyPlayed(accessToken, sync.cursor_ms);
@@ -59,8 +74,8 @@ export async function poll(env: Env, now: number = Date.now()): Promise<PollResu
       if (!(error instanceof SpotifyError) || error.kind !== 'unauthorized') throw error;
       // A 401 on the data call despite a token we believed was live. Force one
       // refresh and retry exactly once; a second 401 aborts the run.
-      const refreshed = await getAccessToken(db, env, { ...token, access_token: null, access_expires_ms: null }, now);
-      payload = await fetchRecentlyPlayed(refreshed, sync.cursor_ms);
+      accessToken = await getAccessToken(db, env, { ...token, access_token: null, access_expires_ms: null }, now);
+      payload = await fetchRecentlyPlayed(accessToken, sync.cursor_ms);
     }
   } catch (error) {
     const message = describe(error);
@@ -96,10 +111,11 @@ export async function poll(env: Env, now: number = Date.now()): Promise<PollResu
       skipped: rows.skipped,
       cursor_ms: sync.cursor_ms,
       needs_reauth: false,
+      contexts_named: await nameContextsSafely(db, accessToken, now),
     };
   }
 
-  const inserts = writeStatements(db, rows);
+  const inserts = writeStatements(db, rows, now);
   // The play inserts lead the batch; count them so meta.changes can be summed
   // over exactly those statements. `plays` has 5 columns.
   const playStatementCount = Math.ceil(rows.plays.length / chunkSize(5));
@@ -129,6 +145,7 @@ export async function poll(env: Env, now: number = Date.now()): Promise<PollResu
       skipped: rows.skipped,
       cursor_ms: Math.max(sync.cursor_ms, rows.maxPlayedAtMs),
       needs_reauth: false,
+      contexts_named: await nameContextsSafely(db, accessToken, now),
     };
   } catch (error) {
     // The batch is a transaction: either every row landed or none did, and the

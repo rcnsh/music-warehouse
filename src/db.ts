@@ -1,3 +1,4 @@
+import { insertContexts } from './contexts';
 import { songStatements } from './play-numbers';
 import { syncSearchIndex } from './search-index';
 import type { NormalizedRows, OAuthToken, SyncState } from './types';
@@ -194,7 +195,7 @@ export async function readState(db: D1Database): Promise<{ sync: SyncState; toke
  * means a row is rewritten only when the payload fills a hole in it, keeping
  * steady-state row writes at zero.
  */
-export function writeStatements(db: D1Database, rows: NormalizedRows): D1PreparedStatement[] {
+export function writeStatements(db: D1Database, rows: NormalizedRows, now = Date.now()): D1PreparedStatement[] {
   return [
     ...buildInserts(db, 'plays', ['played_at_ms', 'track_id', 'context_uri', 'context_type', 'source'],
       rows.plays.map((play) => ({ ...play, source: 'api' }))),
@@ -223,6 +224,8 @@ export function writeStatements(db: D1Database, rows: NormalizedRows): D1Prepare
     ...buildInserts(db, 'artists', ['artist_id', 'name'], rows.artists),
     ...buildInserts(db, 'track_artists', ['track_id', 'artist_id', 'position'], rows.trackArtists),
     ...buildInserts(db, 'albums', ['album_id', 'name', 'release_date', 'image_url'], rows.albums),
+    // After the albums and artists, which name those contexts.
+    ...insertContexts(db, rows.plays, now),
 
     // Runs last, after the real artists and links are in place: a poll that
     // teaches us an artist's real id retires every name-keyed row for it.

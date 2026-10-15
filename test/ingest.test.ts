@@ -28,6 +28,11 @@ function stubFetch(handlers: {
       if (!handlers.token) throw new Error('Unexpected token request');
       return handlers.token();
     }
+    // Context names are looked up after the write; they have their own tests.
+    if (!url.pathname.endsWith('/me/player/recently-played')) {
+      calls.push('lookup');
+      return new Response('{}', { status: 404 });
+    }
     calls.push(`recently-played${url.searchParams.has('after') ? `?after=${url.searchParams.get('after')}` : ''}`);
     if (!handlers.recentlyPlayed) throw new Error('Unexpected recently-played request');
     return handlers.recentlyPlayed(url);
