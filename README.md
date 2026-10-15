@@ -53,8 +53,9 @@ There is no UI; the [clients](#clients) are separate repos.
   lists, so clients need no Spotify credentials of their own.
 - **Finds concerts.** Optionally, a daily Ticketmaster check for upcoming gigs by
   the artists you play most.
-- **Looks after itself.** `/health` reports whether ingestion is working, and a
-  daily sweep can push alerts to Discord, Slack or ntfy.
+- **Looks after itself.** `/health` reports whether ingestion is working, each
+  poll can push alerts to Discord, Slack or ntfy, and an optional heartbeat
+  lets an outside monitor notice if the Worker stops altogether.
 - **Hands out scoped tokens.** Per-device read or admin tokens, minted by the
   admin or by signing in with the Spotify account that owns the warehouse.
 
@@ -459,6 +460,7 @@ locally. `npx wrangler secret list` shows what is set.
 | `CORS_ORIGINS` | no | Comma-separated browser origins (or `*`) allowed to call `/api/*`, e.g. `https://wrapped.example.com`. Unset sends no CORS headers. |
 | `ALERT_WEBHOOK_URL` | no | Where alerts are POSTed. See [Alerting](#alerting). |
 | `ALERT_MENTION` | no | Prefix for every alert, e.g. a Discord `<@id>`. |
+| `HEARTBEAT_URL` | no | A dead-man's switch, e.g. a [healthchecks.io](https://healthchecks.io) ping URL, fetched after every successful poll. See [Heartbeat](#heartbeat). |
 | `SIGN_IN_SCHEMES` | no | Comma-separated custom URL schemes a mobile app may [sign in](#signing-in-with-spotify) to, e.g. `app.remastered`. |
 | `TICKETMASTER_API_KEY` | no | A Ticketmaster Discovery API consumer key, from <https://developer.ticketmaster.com>, for [concerts](#concerts). The consumer secret isn't needed. Unset turns the concert check off. |
 | `TIMEZONE` | no | IANA timezone the stats read local time in, when `ERAS` is unset. Default `UTC`. Also the zone of the [play-count rollup](#the-play-count-rollup); with only `ERAS` set, the rollup uses the latest era's zone. |
@@ -471,8 +473,8 @@ The crons are in `wrangler.jsonc`:
 
 | Schedule (UTC) | Does |
 |---|---|
-| `*/30 * * * *` | Polls Spotify for new plays, exactly as `POST /admin/poll` does. |
-| `0 9 * * *` | The [alert](#alerting) sweep; the daily artist reconcile, search index and song sync; brings the [play-count rollup](#the-play-count-rollup) up to date; computes one Wrapped preset. |
+| `*/30 * * * *` | Polls Spotify for new plays, exactly as `POST /admin/poll` does, then pings the [heartbeat](#heartbeat) if the poll succeeded and runs the [alert](#alerting) check. |
+| `0 9 * * *` | The daily artist reconcile, search index and song sync; brings the [play-count rollup](#the-play-count-rollup) up to date; computes one Wrapped preset. |
 | `23 1 * * *` | The [concert](#concerts) check, in its own invocation so it gets a full subrequest budget. |
 
 Polling every 30 minutes is 48 requests a day; tighten it to `*/15` if plays
@@ -935,15 +937,23 @@ These take no token.
 curl -H "Authorization: Bearer $ADMIN_TOKEN" "$WORKER_URL/health"
 ```
 
-`ok` is `true` while a Spotify grant is stored and still accepted;
-`minutes_since_last_success` says whether polling is keeping up. It also
-reports `action_required`, `total_plays`, `plays_last_24h`,
+`ok` is `true` while a Spotify grant is stored and still accepted and a poll
+has succeeded in the last 3 hours (`minutes_since_last_success` under 180, the
+same line as the `ingestion_stalled` alert); `stalled` says when it hasn't.
+`action_required` names what to do whenever `ok` is false, and warns 14 days
+before the grant expires. It also reports `total_plays`, `plays_last_24h`,
 `days_until_token_expiry`, `cursor_iso`, `last_error` and
 `consecutive_failures`.
 
+`total_plays` is summed from the [play-count rollup](#the-play-count-rollup),
+one row per day, rather than counted play by play, so a call reads a few
+thousand rows rather than every play. Its triggers count each play on exactly
+one day whatever the zone, so the total is exact.
+
 ### Alerting
 
-The daily cron POSTs JSON to `ALERT_WEBHOOK_URL` when something needs you. The
+After every poll the cron POSTs JSON to `ALERT_WEBHOOK_URL` when something
+needs you, so a stall is reported within half an hour of crossing 3 hours. The
 body carries the message under `content` (Discord), `text` (Slack) and
 `message`, plus `title`, `severity` and `key`, so a Discord or Slack webhook
 URL, or `https://ntfy.sh/<topic>`, works as-is. Without `ALERT_WEBHOOK_URL`,
@@ -959,6 +969,26 @@ conditions are logged but never pushed.
 The first two suppress the others. A firing condition is re-sent at most once a
 day, and alerts again immediately if it clears and comes back. Test it with
 `POST /admin/alert-check?force=1`.
+
+### Heartbeat
+
+Alerts come from the Worker, so they cannot report the Worker itself being
+down, its crons stopping, or D1 refusing every query. For that, set
+`HEARTBEAT_URL` to a dead-man's switch: the cron GETs it (5-second timeout)
+after every successful poll, and the service alerts you when the pings stop.
+A failed ping is logged, never retried, and never fails the poll.
+
+With [healthchecks.io](https://healthchecks.io) (free for a few checks), make a
+check with a period of 30 minutes and a grace of about 3 hours, so it alerts at
+the same point as `ingestion_stalled`, then:
+
+```bash
+npx wrangler secret put HEARTBEAT_URL      # https://hc-ping.com/<uuid>
+```
+
+Any service that alerts on a missing GET works, e.g. Better Stack or Cronitor
+heartbeats. A failed poll sends no ping, so a grant Spotify rejects shows up
+there too, alongside the `needs_reauth` alert.
 
 ### Checking ingestion
 
@@ -976,7 +1006,92 @@ Play a few songs, wait for the next half hour, and look for them in
 npm test && npm run typecheck && npx wrangler deploy
 ```
 
-Apply any new migration with `npm run migrate:remote` first.
+Apply any new migration with `npm run migrate:remote` first: the code that
+needs a new table or column must not go live before it exists, and every
+migration so far only adds, so the old code keeps working against the new
+schema in between. Note the time before applying one (`date -u +%s`), in case
+it has to be undone.
+
+To roll back a bad deploy:
+
+```bash
+npx wrangler deployments list              # the versions recently deployed
+npx wrangler rollback                      # back to the previous version
+npx wrangler rollback <version-id>         # or to a particular one
+```
+
+`wrangler secret put` makes a version too, so check the list before taking
+"the previous version" on trust; a version carries the secrets it was made
+with. A rollback never touches D1, so it does not undo a migration, and D1 has
+no down migrations. Undo one of these ways:
+
+- **Write a new migration that reverses it**, e.g. drops the new table. Best
+  when it only added things, as all of them have so far: nothing else is lost.
+- **Restore the database with Time Travel** to the time noted before applying
+  it (see below). Exact, but it also discards every play stored since; the
+  next poll recovers those still in Spotify's last 50.
+
+Either way, roll the code back to a version that matches the schema.
+
+### Backups and recovery
+
+D1 holds the only copy of every play older than Spotify's last 50, so the
+history needs a copy of its own. There are two layers.
+
+**Time Travel** is always on and free. D1 can restore the database to any
+minute in the last 30 days on Workers Paid (7 on Free):
+
+```bash
+npx wrangler d1 time-travel info music_warehouse                       # the current bookmark
+npx wrangler d1 time-travel info music_warehouse --timestamp=2026-10-01T09:00:00Z
+npx wrangler d1 time-travel restore music_warehouse --timestamp=2026-10-01T09:00:00Z
+```
+
+A restore overwrites the database in place and cancels queries in flight. It
+prints the bookmark from just before, so `time-travel restore
+--bookmark=<that>` undoes it. Nothing older than the window survives, so it
+cannot recover from a mistake noticed late, or the database being deleted.
+
+**Exports** cover that. `scripts/backup.sh` writes the whole database to
+`~/Backups/music-warehouse/music_warehouse-<UTC time>.sql` and keeps the newest
+12:
+
+```bash
+npx wrangler login                          # once
+scripts/backup.sh                           # BACKUP_DIR, BACKUP_KEEP and D1_DATABASE override the defaults
+```
+
+`wrangler d1 export` refuses a database holding a virtual table, and the
+search index (migration 0011) is one. So the script exports every real table
+by name, adds the indexes and triggers an export by table leaves out, and ends
+the file by recreating the search index and rebuilding it from
+`track_search_text`. The file restores as it is. An export blocks other
+queries while it runs (seconds at this size); a poll caught by it fails and
+the next one catches up.
+
+To run it every Sunday on a Mac, edit the paths in
+[`scripts/music-warehouse-backup.plist`](scripts/music-warehouse-backup.plist)
+and load it with launchd, as its comment shows. Copy the backups somewhere off
+the Mac as well, e.g. a synced folder; they hold your Spotify refresh token,
+so keep them private (the script makes them mode 600).
+
+To restore an export, load it into an empty database and point the Worker at
+it:
+
+```bash
+npx wrangler d1 create music_warehouse_restored
+npx wrangler d1 execute music_warehouse_restored --remote --file ~/Backups/music-warehouse/music_warehouse-<time>.sql
+npx wrangler d1 migrations list music_warehouse_restored --remote   # should have none to apply
+```
+
+Then put the new `database_name` and `database_id` in `wrangler.jsonc` (and
+the `migrate:*` scripts in `package.json`), deploy, and check `/health`. The
+export carries `d1_migrations`, so later migrations apply on top as normal.
+Any plays newer than the export that are still in Spotify's last 50 come back
+on the next poll; older ones can be re-imported from a Spotify export
+([Importing your history](#importing-your-history)). Restoring into the
+existing database instead would fail on tables that already exist; drop them
+first, or use Time Travel if the moment you want is inside its window.
 
 ## Development
 

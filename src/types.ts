@@ -11,10 +11,17 @@ export interface Env {
    */
   READ_TOKEN?: string;
   /**
-   * Where the daily alert cron POSTs when something needs a human. Optional:
+   * Where the alert check POSTs when something needs a human. Optional:
    * unset means conditions are logged but never pushed anywhere.
    */
   ALERT_WEBHOOK_URL?: string;
+  /**
+   * Optional dead-man's switch, e.g. a healthchecks.io ping URL, fetched with
+   * a GET after every successful poll. An outside service alerts when the
+   * pings stop, which covers the Worker or its crons being down, where
+   * ALERT_WEBHOOK_URL cannot.
+   */
+  HEARTBEAT_URL?: string;
   /**
    * Optional prefix for every alert body, for whatever syntax the receiver
    * uses to notify a human — a Discord `<@id>`, a Slack `<@U…>`, an ntfy tag.
