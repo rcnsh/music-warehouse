@@ -190,7 +190,7 @@ export function respond(body: unknown, results: D1Result[]): Response {
 
 /** GET /api/artist?id=&name=&tz= */
 export async function artistRoute(env: Env, url: URL): Promise<Response> {
-  const timeZone = timeZoneParam(url);
+  const timeZone = timeZoneParam(url, env);
   const id = textParam(url, 'id');
   const name = textParam(url, 'name');
   if (!id && !name) throw new BadRequest('id or name is required');
@@ -224,7 +224,7 @@ export async function artistRoute(env: Env, url: URL): Promise<Response> {
 
 /** GET /api/track?id=&tz= */
 export async function trackRoute(env: Env, url: URL): Promise<Response> {
-  const timeZone = timeZoneParam(url);
+  const timeZone = timeZoneParam(url, env);
   const id = textParam(url, 'id');
   if (!id) throw new BadRequest('id is required');
 
@@ -256,7 +256,7 @@ export async function trackRoute(env: Env, url: URL): Promise<Response> {
 
 /** GET /api/on-this-day?date=&tz= */
 export async function onThisDayRoute(env: Env, url: URL): Promise<Response> {
-  const timeZone = timeZoneParam(url);
+  const timeZone = timeZoneParam(url, env);
   const date = url.searchParams.get('date') ?? localDayKey(Date.now(), timeZone);
   if (!isRealDay(date)) throw new BadRequest('date must be a real YYYY-MM-DD date');
 
@@ -268,9 +268,12 @@ export async function onThisDayRoute(env: Env, url: URL): Promise<Response> {
   }
   if (ranges.length === 0) return respond({ date, years: [] }, []);
 
-  // Each range is one seek on the plays primary key.
+  // Each range is one seek on the plays primary key. The ranges travel as one
+  // JSON parameter: three bound per year would pass D1's 100 from 2042.
   const result = await env.DB.prepare(
-    `WITH r(y, a, b) AS (VALUES ${ranges.map(() => '(?, ?, ?)').join(', ')}),
+    `WITH r(y, a, b) AS (
+       SELECT value ->> 0, value ->> 1, value ->> 2 FROM json_each(?)
+     ),
      c AS (
        SELECT r.y, p.track_id, COUNT(*) AS plays
          FROM r JOIN plays p ON p.played_at_ms >= r.a AND p.played_at_ms < r.b
@@ -279,7 +282,7 @@ export async function onThisDayRoute(env: Env, url: URL): Promise<Response> {
      SELECT c.y, c.track_id, c.plays, t.name, ${PRIMARY_ARTIST_SQL('c.track_id')} AS artist, al.image_url AS image
        FROM c LEFT JOIN tracks t ON t.track_id = c.track_id LEFT JOIN albums al ON al.album_id = t.album_id`,
   )
-    .bind(...ranges.flat())
+    .bind(JSON.stringify(ranges))
     .all<MetaRow & { y: number; plays: number; name: string | null }>();
 
   const years = new Map<number, typeof result.results>();
@@ -313,7 +316,7 @@ export async function onThisDayRoute(env: Env, url: URL): Promise<Response> {
  * editions folded as /api/on-this-day does (same title, same primary artist).
  */
 export async function topTracksRoute(env: Env, url: URL): Promise<Response> {
-  const timeZone = timeZoneParam(url);
+  const timeZone = timeZoneParam(url, env);
   const { fromMs, toMs, from, to } = dateRange(url, timeZone);
   const limit = intParam(url, 'limit', 50, 1, 500);
 

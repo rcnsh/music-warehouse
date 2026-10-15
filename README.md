@@ -82,7 +82,7 @@ Each reads the [API](#api-reference) with a read token, which it gets by
 |---|---|---|
 | [music-warehouse-gui](https://github.com/rcnsh/music-warehouse-gui) | Native macOS app (Rust, GPUI): history, search, stats, artist and song pages | Nearly all of `/api/*` |
 | [music-warehouse-mcp](https://github.com/rcnsh/music-warehouse-mcp) | MCP server, so an AI agent can query your history | Nearly all of `/api/*` |
-| [music-warehouse-spicetify](https://github.com/rcnsh/music-warehouse-spicetify) | Spicetify custom app: stats inside the Spotify client | `/api/plays`, `/api/home`, `/api/stats/*`, `/api/top-*`, `/api/wrapped`, `/api/concerts`, `/api/track`, `/api/artist`, `/api/on-this-day` |
+| [music-warehouse-spicetify](https://github.com/rcnsh/music-warehouse-spicetify) | Spicetify custom app: stats inside the Spotify client | `/api/plays`, `/api/home`, `/api/stats/*`, `/api/top-*`, `/api/wrapped`, `/api/wrapped/ranges`, `/api/concerts`, `/api/track`, `/api/artist`, `/api/on-this-day` |
 | [music-warehouse-wrapped](https://github.com/rcnsh/music-warehouse-wrapped) | Wrapped-style stories in the browser, exportable as video | `/api/wrapped`, `/api/wrapped/ranges`, `/api/top` |
 
 Browser clients (Spicetify, Wrapped) need their origin in
@@ -488,8 +488,9 @@ per million) and never stops answering. On the Free plan D1 stops answering
 for the rest of the UTC day, ingestion included, once 5 million rows have been
 read or 100,000 written. The Worker still runs on Free: stats are cached so
 their cost doesn't grow with traffic, and the concert check fits Free's 50
-subrequests. `_meta.rows_read` and the `X-Rows-Read` header report what each
-request read.
+subrequests. Every route that reads stored plays reports the D1 rows it read
+in an `X-Rows-Read` header; `/api/plays`, `/api/daily` and `/api/top-artists`
+also put it in the body's `_meta.rows_read`.
 
 ### The play-count rollup
 
@@ -532,14 +533,27 @@ Responses are JSON. Errors are `{ "error": "..." }` with:
 | `429` | Spotify rate limit or quota (live routes), or `Too many sign-ins in progress` from `/auth/login`. |
 | `500` | `Worker misconfigured: …` when a setting such as `ERAS` or `CONCERT_REGIONS` is malformed (the message names the setting, never its value); otherwise `Internal error`. |
 | `502` | Any other Spotify failure (live routes). |
-| `503` | A stat or Wrapped range is being computed (retry after `Retry-After`), or `needs_reauth: true`. |
+| `503` | Either a stat or Wrapped range is still being computed, or (live routes only) the Spotify grant has lapsed. See below. |
 
 Spotify failures (`429`, `502`) also carry `retry_after_seconds` when Spotify
 gave one.
 
-Dates are `YYYY-MM-DD` local calendar days and `tz` is an IANA zone (default
-`UTC`). Ranges are inclusive and at most 3,660 days. Timestamps in responses
-are UTC.
+The two `503`s need different handling:
+
+| | Still computing | Grant lapsed |
+|---|---|---|
+| Routes | `/api/stats/*`, `/api/wrapped` | `/api/now-playing`, `/api/recently-played`, `/api/top` |
+| Headers | `Retry-After: <seconds>` | none |
+| Body | `{ "error": "..." }` | `{ "error": "Spotify connection needs re-authorization.", "needs_reauth": true }` |
+| What to do | Retry after `Retry-After` seconds. | Don't retry: the owner must [re-authorize](#authorizing). Stored-data routes keep working. |
+
+Tell them apart by `needs_reauth` in the body (or a `Retry-After` header).
+
+Dates are `YYYY-MM-DD` local calendar days; a date that doesn't exist
+(`2026-02-30`) is a `400`. `tz` is an IANA zone, by default the warehouse's
+own: `TIMEZONE`, else the latest era's zone, else `UTC` (the response's `tz`
+says which). Ranges are inclusive and at most 3,660 local calendar days.
+Timestamps in responses are UTC.
 
 ### Endpoints at a glance
 
@@ -549,7 +563,7 @@ are UTC.
 | `GET` | [`/api/plays.csv`](#stored-plays) | The same plays as one CSV download. |
 | `GET` | [`/api/top-artists`](#stored-plays) | Play counts per artist over a date range. |
 | `GET` | [`/api/top-tracks`](#stored-plays) | Play counts per song over a date range. |
-| `GET` | [`/api/daily`](#stored-plays) | Plays per local day, optionally for one song or artist. |
+| `GET` | [`/api/daily`](#stored-plays) | Plays per local day, week or month, optionally for one song or artist. |
 | `GET` | [`/api/artist`](#history) | One artist's whole history. |
 | `GET` | [`/api/track`](#history) | One song's whole history, editions folded. |
 | `GET` | [`/api/on-this-day`](#history) | Top songs on this date in earlier years. |
@@ -574,12 +588,19 @@ These read only D1, so they keep working when the Spotify grant has lapsed.
 | Param | Default | |
 |---|---|---|
 | `limit` | `50` | 1 to 500. |
-| `before` | none | Only plays before this epoch-ms. Pass the last `played_at_ms` to page. |
+| `before` | none | The previous page's `next_before`, to page; or an epoch-ms, for plays strictly before that millisecond. |
 | `after` | none | Only plays after this epoch-ms. |
 | `q` | none | Only plays whose track, album or any artist name contains this, ignoring case and accents (at most 200 characters). Pages with `before` like the unfiltered list, and the response echoes `q`. |
 | `track_id` | none | Only plays of this song: every edition, folded as `/api/track` folds them (same title and primary artist). Any edition's id works. |
 | `artist_id` | none | Only plays credited to this artist as `/api/artist` credits them: primary artist only, export `name:` placeholders with the same name included. |
 | `artist_name` | none | The artist by name, as `/api/artist`'s `name`: a fallback for an artist the warehouse has no id for (`/api/search` gives `id: null`). |
+
+To page, pass each response's `next_before` back as `before` (URL-encoded)
+until it is `null`. It is an opaque cursor that resumes after exactly the last
+play returned, ordered by time and then track id, so plays sharing a
+millisecond (about 1.7k in imported history) are neither skipped nor repeated.
+Passing the last `played_at_ms` still works, but skips any plays that share
+its millisecond and didn't fit on the page.
 
 The filters combine (each narrows the last) and work with `before`, `after`
 and `limit`. Each one given is echoed at the top level of the response, as
@@ -589,6 +610,7 @@ and `limit`. Each one given is echoed at the top level of the response, as
 GET /api/plays?artist_id=4NJhFmfw43RLBLjQvxDuRS&q=shelter&limit=1
 { "q": "shelter", "artist_id": "4NJhFmfw43RLBLjQvxDuRS",
   "plays": [ { "played_at_ms": 1760521802000, "track_id": "…", "track_name": "Shelter", "…": "…" } ],
+  "next_before": "1760521802000.4cOdK2wGLETKBW3PvgPWqT",
   "_meta": { "rows_read": 1507, "duration_ms": 18.4 } }
 ```
 
@@ -604,6 +626,7 @@ walking everyone's.
                "context_name": "Morning Mix", "source": "api", "play_number": 96, "first_play": false,
                "artist_list": [ { "id": "3dz0NnIZhtKKeXZxLOxCam", "name": "Porter Robinson" },
                                 { "id": "5LhTec3c7dcqBvpLRWbMcf", "name": "Madeon" } ] } ],
+  "next_before": "1760521802000.4cOdK2wGLETKBW3PvgPWqT",
   "_meta": { "rows_read": 50, "duration_ms": 1.2 } }
 ```
 
@@ -652,7 +675,8 @@ then shows up at once; a renamed one can take those five minutes.
 
 **`GET /api/plays.csv`**: the same plays as one CSV download, newest first,
 for a spreadsheet or a backup. Takes `/api/plays`' filters (`q`, `track_id`,
-`artist_id`, `artist_name`, `before`, `after`) and a local-date range: `from`
+`artist_id`, `artist_name`, `before` as an epoch-ms or a `next_before` cursor,
+`after`) and a local-date range: `from`
 and `to` with `tz`, as `/api/daily` takes them. Give neither for the whole
 history; with only one, the other takes `/api/daily`'s default. No `limit`:
 it streams every matching play, 2,000 per D1 query, so the Worker holds one
@@ -671,7 +695,13 @@ history of 76k plays is about 680k rows.
 
 **`GET /api/top-artists`**: play counts per artist. Params: `from` (default 29
 days ago), `to` (default today), `tz`, `limit` (1 to 500, default 50).
-Returns `{ from, to, tz, artists: [{ artist_id, name, plays }], _meta }`.
+
+```json
+GET /api/top-artists?from=2026-10-01&to=2026-10-14&tz=Europe/London&limit=1
+{ "from": "2026-10-01", "to": "2026-10-14", "tz": "Europe/London",
+  "artists": [ { "artist_id": "3dz0NnIZhtKKeXZxLOxCam", "name": "Porter Robinson", "plays": 41 } ],
+  "_meta": { "rows_read": 1212, "duration_ms": 3.4 } }
+```
 
 **`GET /api/top-tracks`**: play counts per song, editions folded (same title
 and primary artist). Same params as `/api/top-artists`. Returns
@@ -682,7 +712,11 @@ most-played edition's. It has no `_meta`: the rows it read are in the
 **`GET /api/daily`**: plays per local day, quiet days as `0`. Params: `from`,
 `to`, `tz`, as above, and `track_id`, `artist_id` and `artist_name` as on
 `/api/plays`, for one song's or one artist's daily chart. A filter given is
-echoed. Filtered, it reads about one row per play of that song or artist in
+echoed. `group_by=week` sums the days into `weeks` (`{ week, plays }`, local
+weeks from Monday, each labelled with its Monday, which may fall before
+`from`) and `group_by=month` into `months` (`{ month: "YYYY-MM", plays }`);
+either replaces `days` and echoes `group_by`. The default, `day`, leaves the
+body as below. Filtered, it reads about one row per play of that song or artist in
 the range rather than one per play of anything (a year of one artist: 1.9k
 rows rather than 15k).
 
@@ -889,8 +923,11 @@ grant has lapsed.
 | Route | |
 |---|---|
 | `GET /api/now-playing` | `{ item }`, Spotify's currently-playing; `item` is `null` when idle. |
-| `GET /api/recently-played?limit=` | Spotify's recently-played, newest first. `limit` 1 to 50, default 1; any other value falls back to the default rather than a `400`. Includes plays not yet ingested. |
-| `GET /api/top?range=&limit=&type=` | `{ tracks, artists }` from Spotify's top lists. `range` is `short_term`, `medium_term` or `long_term` (default); `limit` 1 to 50, default 12; a bad `range` or `limit` falls back to its default rather than a `400`; `type=tracks` or `type=artists` fetches only one (the other is `null`). |
+| `GET /api/recently-played?limit=` | Spotify's recently-played, newest first. `limit` 1 to 50, default 1. Includes plays not yet ingested. |
+| `GET /api/top?range=&limit=&type=` | `{ tracks, artists }` from Spotify's top lists. `range` is `short_term`, `medium_term` or `long_term` (default); `limit` 1 to 50, default 12; `type=tracks` or `type=artists` fetches only one (the other is `null`). |
+
+A bad `limit`, `range` or `type` is a `400`, as on the other routes, checked
+before Spotify is asked.
 
 ### Sign-in and authorization
 

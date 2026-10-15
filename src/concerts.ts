@@ -343,7 +343,7 @@ export async function concertsRoute(env: Env, url: URL): Promise<Response> {
   let sinceMs = 0;
   if (since !== null) {
     try {
-      sinceMs = startOfLocalDayUtcMs(since, timeZoneParam(url));
+      sinceMs = startOfLocalDayUtcMs(since, timeZoneParam(url, env));
     } catch (error) {
       if (error instanceof BadRequest) throw error;
       throw new BadRequest('since must be a YYYY-MM-DD date');

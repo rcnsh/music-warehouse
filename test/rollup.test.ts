@@ -189,10 +189,10 @@ describe('the play-count rollup', () => {
   it('stops answering once its offsets have run out, or for another zone', async () => {
     await seedCatalog();
     await insertPlays(playsFor('UTC', 9));
-    const query = '/api/daily?from=2018-01-01&to=2018-12-31';
+    const query = '/api/daily?from=2018-01-01&to=2018-12-31&tz=UTC';
     const rollup = async (q: string) => (await SELF.fetch(`${BASE}${q}`, { headers: READ })).headers.get('X-Rollup');
     expect(await rollup(query)).toBe('1');
-    expect(await rollup(`${query}&tz=Europe/London`)).toBeNull();
+    expect(await rollup(query.replace('UTC', 'Europe/London'))).toBeNull();
     await env.DB.prepare('UPDATE rollup_state SET horizon_ms = ?').bind(Date.now() - 1).run();
     expect(await rollup(query)).toBeNull();
   });

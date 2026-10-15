@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: music-warehouse read API
-  version: 1.0.0
+  version: 1.1.0
   license:
     name: MIT
     identifier: MIT
@@ -18,7 +18,7 @@ info:
     **Scope.** Only the routes clients call: `/api/*` and the sign-in pair
     `/auth/login` and `/auth/token`. Left out on purpose: `GET /`, `/login`,
     `/callback`, `/auth/callback` (Spotify's redirect target, described under
-    `/auth/login`), `/health`, `/api/plays.csv` and every `/admin/*` route.
+    `/auth/login`), `/health` and every `/admin/*` route.
 
     **Auth.** Every route here except `/auth/*` needs `Authorization: Bearer <token>`.
     A missing or unknown token is `401`. Tokens have one of two access levels:
@@ -33,9 +33,15 @@ info:
     `X-Stats-Source`, `X-Stats-Computed-At`, `WWW-Authenticate`.
 
     **Conventions.** Dates are `YYYY-MM-DD` local calendar days in `tz`, an
-    IANA zone that defaults to `UTC`. Date ranges are inclusive and at most
-    3,660 days. Timestamps are UTC: ISO 8601 strings or epoch milliseconds
-    (`*_ms`). Errors are `{ "error": "..." }`; an unknown route is
+    IANA zone that defaults to the warehouse's own: its `TIMEZONE` setting,
+    else the latest era's zone, else `UTC`. A date that does not exist
+    (`2026-02-30`) is a `400`. Date ranges are inclusive and at most 3,660
+    local calendar days. Timestamps are UTC: ISO 8601 strings or epoch
+    milliseconds (`*_ms`).
+
+    **Query cost.** Every route that reads stored plays sends `X-Rows-Read`,
+    the D1 rows read to answer. `/api/plays`, `/api/daily` and
+    `/api/top-artists` also carry it in the body's `_meta.rows_read`. Errors are `{ "error": "..." }`; an unknown route is
     `404 { "error": "Not found" }`, an unexpected failure
     `500 { "error": "Internal error" }`, and a bad deployment setting
     (`ERAS`, `CONCERT_REGIONS`) `500 { "error": "Worker misconfigured: ..." }`.
@@ -70,16 +76,17 @@ paths:
       operationId: getPlays
       summary: Plays, newest first
       description: |
-        Page with `before`: pass the last row's `played_at_ms`. Filters combine,
-        each narrowing the last, and each one given is echoed at the top level.
+        Page by passing the response's `next_before` back as `before`, until
+        `next_before` is `null`. Plays are ordered by time and then track id,
+        and the cursor resumes after exactly the last row returned, so plays
+        that share a millisecond (common in imported history) are never
+        skipped. Filters combine, each narrowing the last, and each one given
+        is echoed at the top level.
       parameters:
         - name: limit
           in: query
           schema: { type: integer, minimum: 1, maximum: 500, default: 50 }
-        - name: before
-          in: query
-          description: Only plays strictly before this epoch-ms.
-          schema: { type: integer, minimum: 0, maximum: 9007199254740991 }
+        - $ref: '#/components/parameters/Before'
         - name: after
           in: query
           description: Only plays strictly after this epoch-ms.
@@ -91,19 +98,67 @@ paths:
       responses:
         '200':
           description: One page of plays.
+          headers:
+            X-Rows-Read: { $ref: '#/components/headers/X-Rows-Read' }
           content:
             application/json:
               schema:
                 allOf:
                   - $ref: '#/components/schemas/PlayFilterEcho'
                   - type: object
-                    required: [plays, _meta]
+                    required: [plays, next_before, _meta]
                     properties:
                       q: { type: string }
                       plays:
                         type: array
                         items: { $ref: '#/components/schemas/Play' }
+                      next_before:
+                        description: Pass as `before` for the next, older page; `null` when there are no more plays.
+                        type: [string, 'null']
+                        examples: ['1760521802000.4cOdK2wGLETKBW3PvgPWqT']
                       _meta: { $ref: '#/components/schemas/QueryMeta' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500': { $ref: '#/components/responses/ServerError' }
+
+  /api/plays.csv:
+    get:
+      tags: [Stored plays]
+      operationId: getPlaysCsv
+      summary: The plays /api/plays lists, as one CSV download
+      description: |
+        Every matching play, newest first, streamed 2,000 per D1 query. No
+        `limit` and no paging: one response holds them all (up to two million
+        plays on Workers Paid, 100,000 on Free). Without `from` or `to`, the
+        whole history; with either, a local-date range in `tz` (the other
+        defaults as on `/api/daily`). Every parameter is checked before the
+        first byte, so a bad one is a `400`, not a broken download. RFC 4180
+        quoting, CRLF line ends, `played_at` in UTC.
+      parameters:
+        - $ref: '#/components/parameters/Before'
+        - name: after
+          in: query
+          description: Only plays strictly after this epoch-ms.
+          schema: { type: integer, minimum: -1, maximum: 9007199254740991, default: -1 }
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+        - $ref: '#/components/parameters/Tz'
+        - $ref: '#/components/parameters/Q'
+        - $ref: '#/components/parameters/TrackIdFilter'
+        - $ref: '#/components/parameters/ArtistIdFilter'
+        - $ref: '#/components/parameters/ArtistNameFilter'
+      responses:
+        '200':
+          description: The CSV, with a header row.
+          headers:
+            Content-Disposition:
+              schema: { type: string, const: 'attachment; filename="plays.csv"' }
+          content:
+            text/csv:
+              schema: { type: string }
+              example: |
+                played_at,track,artists,album,track_id,context_uri,context_name,source
+                2026-10-15T09:50:02.000Z,Shelter,"Porter Robinson, Madeon",Shelter,4cOdK2wGLETKBW3PvgPWqT,spotify:playlist:…,"Mix, Vol. 1",api
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '500': { $ref: '#/components/responses/ServerError' }
@@ -112,8 +167,12 @@ paths:
     get:
       tags: [Stored plays]
       operationId: getDaily
-      summary: Plays per local day
-      description: Every day in the range is listed, quiet days as `0`. Filters given are echoed. `q` is not accepted here.
+      summary: Plays per local day, week or month
+      description: |
+        Every day in the range is listed, quiet days as `0`. Filters given are
+        echoed. `q` is not accepted here. With `group_by=week` or `month` the
+        days are summed into `weeks` or `months` instead of `days`, and
+        `group_by` is echoed; with the default `day` the body is unchanged.
       parameters:
         - $ref: '#/components/parameters/From'
         - $ref: '#/components/parameters/To'
@@ -121,11 +180,20 @@ paths:
         - $ref: '#/components/parameters/TrackIdFilter'
         - $ref: '#/components/parameters/ArtistIdFilter'
         - $ref: '#/components/parameters/ArtistNameFilter'
+        - name: group_by
+          in: query
+          description: |
+            `week` sums local days into weeks starting Monday, each labelled
+            with its Monday (which may fall before `from`); `month` into local
+            months. Partial weeks and months at the ends hold only the days in
+            the range.
+          schema: { type: string, enum: [day, week, month], default: day }
       responses:
         '200':
-          description: Daily counts, oldest first.
+          description: Counts, oldest first.
           headers:
             X-Rollup: { $ref: '#/components/headers/X-Rollup' }
+            X-Rows-Read: { $ref: '#/components/headers/X-Rows-Read' }
           content:
             application/json:
               schema:
@@ -133,17 +201,48 @@ paths:
                   - $ref: '#/components/schemas/DateRangeEcho'
                   - $ref: '#/components/schemas/PlayFilterEcho'
                   - type: object
-                    required: [days, _meta]
+                    required: [_meta]
                     properties:
-                      days:
-                        type: array
-                        items:
-                          type: object
-                          required: [day, plays]
-                          properties:
-                            day: { $ref: '#/components/schemas/LocalDate' }
-                            plays: { type: integer }
                       _meta: { $ref: '#/components/schemas/QueryMeta' }
+                  - oneOf:
+                      - type: object
+                        description: '`group_by=day`, the default.'
+                        required: [days]
+                        properties:
+                          days:
+                            type: array
+                            items:
+                              type: object
+                              required: [day, plays]
+                              properties:
+                                day: { $ref: '#/components/schemas/LocalDate' }
+                                plays: { type: integer }
+                      - type: object
+                        required: [group_by, weeks]
+                        properties:
+                          group_by: { type: string, const: week }
+                          weeks:
+                            type: array
+                            items:
+                              type: object
+                              required: [week, plays]
+                              properties:
+                                week:
+                                  $ref: '#/components/schemas/LocalDate'
+                                  description: The Monday the week starts on.
+                                plays: { type: integer }
+                      - type: object
+                        required: [group_by, months]
+                        properties:
+                          group_by: { type: string, const: month }
+                          months:
+                            type: array
+                            items:
+                              type: object
+                              required: [month, plays]
+                              properties:
+                                month: { $ref: '#/components/schemas/Month' }
+                                plays: { type: integer }
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '500': { $ref: '#/components/responses/ServerError' }
@@ -164,6 +263,7 @@ paths:
           description: Artists, most played first.
           headers:
             X-Rollup: { $ref: '#/components/headers/X-Rollup' }
+            X-Rows-Read: { $ref: '#/components/headers/X-Rows-Read' }
           content:
             application/json:
               schema:
@@ -697,7 +797,7 @@ paths:
       parameters:
         - name: limit
           in: query
-          description: 1 to 50. Anything else silently becomes 1, not a `400`.
+          description: 1 to 50. Anything else is a `400`.
           schema: { type: integer, minimum: 1, maximum: 50, default: 1 }
       responses:
         '200':
@@ -708,6 +808,7 @@ paths:
                 oneOf:
                   - $ref: '#/components/schemas/SpotifyPayload'
                   - type: 'null'
+        '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '429': { $ref: '#/components/responses/SpotifyRateLimited' }
         '500': { $ref: '#/components/responses/ServerError' }
@@ -722,7 +823,7 @@ paths:
       description: |
         Passed through, except that each top track's `album` is relabelled with
         the edition actually played most, when the warehouse knows one.
-        Invalid `range` or `limit` silently fall back to their defaults.
+        An invalid `range`, `limit` or `type` is a `400`.
       parameters:
         - name: range
           in: query
@@ -732,7 +833,7 @@ paths:
           schema: { type: integer, minimum: 1, maximum: 50, default: 12 }
         - name: type
           in: query
-          description: Fetch only one list; the other is null. Any other value fetches both.
+          description: Fetch only one list; the other is null. Omit to fetch both.
           schema: { type: string, enum: [tracks, artists] }
       responses:
         '200':
@@ -755,6 +856,7 @@ paths:
                     oneOf:
                       - $ref: '#/components/schemas/SpotifyPayload'
                       - type: 'null'
+        '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '429': { $ref: '#/components/responses/SpotifyRateLimited' }
         '500': { $ref: '#/components/responses/ServerError' }
@@ -872,8 +974,23 @@ components:
     Tz:
       name: tz
       in: query
-      description: IANA timezone for local days.
-      schema: { type: string, default: UTC, examples: [Europe/London] }
+      description: |
+        IANA timezone for local days. Defaults to the warehouse's own zone
+        (`TIMEZONE`, else the latest era's, else `UTC`); the response's `tz`
+        says which was used.
+      schema: { type: string, examples: [Europe/London] }
+    Before:
+      name: before
+      in: query
+      description: |
+        A `next_before` cursor from `/api/plays`, to resume after exactly the
+        last play of that page; or an epoch-ms integer, for plays strictly
+        before that millisecond. Treat the cursor as opaque.
+      schema:
+        oneOf:
+          - type: string
+            pattern: '^\d{1,16}\..+$'
+          - { type: integer, minimum: 0, maximum: 9007199254740991 }
     From:
       name: from
       in: query
@@ -947,7 +1064,11 @@ components:
         application/json:
           schema: { $ref: '#/components/schemas/Error' }
     StatsPending:
-      description: The body has never been computed and another request is computing it (or backing off from a failed compute).
+      description: |
+        The body has never been computed and another request is computing it
+        (or backing off from a failed compute). Tell it from `NeedsReauth` by
+        the `Retry-After` header and the absence of `needs_reauth`: retry after
+        that many seconds.
       headers:
         Retry-After: { $ref: '#/components/headers/Retry-After' }
       content:
@@ -963,7 +1084,10 @@ components:
         application/json:
           schema: { $ref: '#/components/schemas/OnRepeat' }
     NeedsReauth:
-      description: The stored Spotify grant has lapsed; only the owner re-authorizing fixes it.
+      description: |
+        The stored Spotify grant has lapsed; only the owner re-authorizing
+        fixes it, so retrying does not help. The body has `needs_reauth: true`
+        and there is no `Retry-After`. Only the Live routes return it.
       content:
         application/json:
           schema: { $ref: '#/components/schemas/NeedsReauthError' }

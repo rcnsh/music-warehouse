@@ -110,3 +110,8 @@ export function isRealDay(day: string): boolean {
   const ms = Date.parse(`${day}T00:00:00Z`);
   return Number.isFinite(ms) && new Date(ms).toISOString().startsWith(day);
 }
+
+/** Calendar days from `from` to `to` ('YYYY-MM-DD'), both counted: 1 for the same day. */
+export function calendarDaysInclusive(from: string, to: string): number {
+  return Math.round((Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / 86_400_000) + 1;
+}

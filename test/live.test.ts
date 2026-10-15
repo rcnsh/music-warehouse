@@ -102,12 +102,24 @@ describe('GET /api/recently-played', () => {
     expect(await response.json()).toEqual({ items });
   });
 
-  it('clamps an out-of-range limit back to the default', async () => {
+  it('rejects a bad limit with 400, as the stored-data routes do, without asking Spotify', async () => {
     await seedAuthorized();
     const calls = stubSpotify(() => jsonResponse({ items: [] }));
 
-    await SELF.fetch(`${BASE}/api/recently-played?limit=500`, { headers: READ });
-    expect(calls).toEqual(['/v1/me/player/recently-played?limit=1']);
+    for (const limit of ['500', '0', 'abc', '2.5']) {
+      const response = await SELF.fetch(`${BASE}/api/recently-played?limit=${limit}`, { headers: READ });
+      expect(response.status).toBe(400);
+      expect(((await response.json()) as { error: string }).error).toMatch(/limit/);
+    }
+    expect(calls).toEqual([]);
+  });
+
+  it('passes a valid limit through', async () => {
+    await seedAuthorized();
+    const calls = stubSpotify(() => jsonResponse({ items: [] }));
+
+    await SELF.fetch(`${BASE}/api/recently-played?limit=50`, { headers: READ });
+    expect(calls).toEqual(['/v1/me/player/recently-played?limit=50']);
   });
 });
 
@@ -149,12 +161,30 @@ describe('GET /api/top', () => {
     expect(calls).toEqual(['/v1/me/top/artists?time_range=medium_term&limit=50']);
   });
 
-  it('falls back to long_term and a limit of 12 for junk input', async () => {
+  it('defaults to long_term and a limit of 12', async () => {
     await seedAuthorized();
     const calls = stubSpotify(() => jsonResponse({ items: [] }));
 
-    await SELF.fetch(`${BASE}/api/top?range=last_tuesday&limit=9999`, { headers: READ });
+    await SELF.fetch(`${BASE}/api/top`, { headers: READ });
+    expect(calls.length).toBe(2);
     expect(calls.every((call) => call.includes('time_range=long_term&limit=12'))).toBe(true);
+  });
+
+  it('rejects a bad range, limit or type with 400 without asking Spotify', async () => {
+    await seedAuthorized();
+    const calls = stubSpotify(() => jsonResponse({ items: [] }));
+
+    for (const [query, field] of [
+      ['range=last_tuesday', /range/],
+      ['limit=9999', /limit/],
+      ['limit=x', /limit/],
+      ['type=albums', /type/],
+    ] as const) {
+      const response = await SELF.fetch(`${BASE}/api/top?${query}`, { headers: READ });
+      expect(response.status).toBe(400);
+      expect(((await response.json()) as { error: string }).error).toMatch(field);
+    }
+    expect(calls).toEqual([]);
   });
 });
 

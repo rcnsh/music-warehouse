@@ -1,4 +1,4 @@
-import { dateRange, filterTrackIds, intParam, playFilterParams, selectPlays, timeZoneParam } from './api';
+import { beforeParam, dateRange, filterTrackIds, intParam, playFilterParams, selectPlays, timeZoneParam } from './api';
 import type { Env } from './types';
 
 /**
@@ -36,20 +36,20 @@ interface Row {
 export async function playsCsvRoute(env: Env, url: URL): Promise<Response> {
   // Everything is validated before the first byte, so a bad parameter is
   // still a 400 rather than a broken download.
-  const before = intParam(url, 'before', Number.MAX_SAFE_INTEGER, 0, Number.MAX_SAFE_INTEGER);
+  // `before` takes /api/plays' next_before cursor as well as epoch-ms.
+  let upper = beforeParam(url);
   const after = intParam(url, 'after', -1, -1, Number.MAX_SAFE_INTEGER);
   const filter = playFilterParams(url, { q: true });
-  let upper = before;
   let lower = after;
   // Without from or to, the whole history; with either, a local-date range.
   if (url.searchParams.has('from') || url.searchParams.has('to')) {
-    const { fromMs, toMs } = dateRange(url, timeZoneParam(url));
-    upper = Math.min(upper, toMs);
+    const { fromMs, toMs } = dateRange(url, timeZoneParam(url, env));
+    if (toMs <= upper[0]) upper = [toMs, ''];
     lower = Math.max(lower, fromMs - 1);
   }
   const { ids } = await filterTrackIds(env, filter);
 
-  let cursor: [number, string] = [upper, ''];
+  let cursor = upper;
   let done = ids?.length === 0;
   const encoder = new TextEncoder();
   const body = new ReadableStream<Uint8Array>({

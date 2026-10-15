@@ -87,24 +87,30 @@ export function parseEras(raw: string | undefined, timeZone: string | undefined)
 /**
  * Transitions of `timeZone` in [fromMs, toMs) as [instant, offset after] pairs.
  * Offsets are sampled every 12 hours (no zone changes twice in that time) and
- * each change is narrowed to the minute.
+ * each change is found to the second, as zoneOffsets does: that is as fine as
+ * Intl resolves an instant, and the SQL compares whole seconds. Narrowing to
+ * the minute left up to a minute after each change on the old offset.
+ * Sampling is in whole seconds, since offsetMsAt of a mid-second instant is
+ * off by its milliseconds.
  */
 function transitions(timeZone: string, fromMs: number, toMs: number): Array<[number, number]> {
+  const offsetAt = (seconds: number) => offsetMsAt(seconds * 1000, timeZone);
   const out: Array<[number, number]> = [];
-  let at = fromMs;
-  let offset = offsetMsAt(at, timeZone);
-  while (at < toMs) {
-    const next = Math.min(at + 12 * HOUR_MS, toMs);
-    const nextOffset = offsetMsAt(next, timeZone);
+  const end = Math.ceil(toMs / 1000);
+  let at = Math.floor(fromMs / 1000);
+  let offset = offsetAt(at);
+  while (at < end) {
+    const next = Math.min(at + (12 * HOUR_MS) / 1000, end);
+    const nextOffset = offsetAt(next);
     if (nextOffset !== offset) {
       let lo = at;
       let hi = next;
-      while (hi - lo > 60_000) {
+      while (hi - lo > 1) {
         const mid = lo + Math.floor((hi - lo) / 2);
-        if (offsetMsAt(mid, timeZone) === offset) lo = mid;
+        if (offsetAt(mid) === offset) lo = mid;
         else hi = mid;
       }
-      out.push([hi, nextOffset]);
+      out.push([hi * 1000, nextOffset]);
       offset = nextOffset;
     }
     at = next;

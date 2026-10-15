@@ -1,4 +1,4 @@
-import { json } from './api';
+import { BadRequest, intParam, json } from './api';
 import { readState } from './db';
 import { spotifyGet } from './spotify';
 import { getAccessToken } from './tokens';
@@ -36,8 +36,8 @@ export async function nowPlaying(env: Env): Promise<Response> {
 
 /** `GET /api/recently-played?limit=` → Spotify's recently-played payload, newest first. */
 export async function recentlyPlayed(env: Env, url: URL): Promise<Response> {
-  const requested = Number(url.searchParams.get('limit') ?? 1);
-  const limit = Number.isInteger(requested) && requested >= 1 && requested <= 50 ? requested : 1;
+  // Checked before the token, so a bad parameter is a 400 even with the grant lapsed.
+  const limit = intParam(url, 'limit', 1, 1, 50);
 
   const accessToken = await accessTokenFor(env);
   return json(await spotifyGet(accessToken, `/me/player/recently-played?limit=${limit}`));
@@ -49,15 +49,11 @@ export async function recentlyPlayed(env: Env, url: URL): Promise<Response> {
  * null: artists alone skip the edition relabel, the only D1 read here.
  */
 export async function topMusic(env: Env, url: URL): Promise<Response> {
-  const requested = url.searchParams.get('range');
-  const range = requested && TOP_RANGES.has(requested) ? requested : 'long_term';
-
-  const requestedLimit = Number(url.searchParams.get('limit') ?? 12);
-  const limit = Number.isInteger(requestedLimit) && requestedLimit >= 1 && requestedLimit <= 50
-    ? requestedLimit
-    : 12;
-
-  const type = url.searchParams.get('type');
+  const range = url.searchParams.get('range') || 'long_term';
+  if (!TOP_RANGES.has(range)) throw new BadRequest('range must be short_term, medium_term or long_term');
+  const limit = intParam(url, 'limit', 12, 1, 50);
+  const type = url.searchParams.get('type') || null;
+  if (type !== null && type !== 'tracks' && type !== 'artists') throw new BadRequest('type must be tracks or artists');
 
   const accessToken = await accessTokenFor(env);
   const [tracks, artists] = await Promise.all([
