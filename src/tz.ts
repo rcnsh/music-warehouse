@@ -64,10 +64,14 @@ export function localDayKey(utcMs: number, timeZone: string): string {
 }
 
 /**
- * UTC milliseconds at local midnight starting `dateStr` ('YYYY-MM-DD').
+ * UTC milliseconds at which local day `dateStr` ('YYYY-MM-DD') begins:
+ * usually its midnight.
  *
  * Resolved by iteration because the offset that applies depends on the instant
- * being computed — one correction pass settles every real DST transition.
+ * being computed — one correction pass settles a DST change at any other hour.
+ * Where a change skips midnight itself (Havana, Santiago and Beirut spring
+ * forward from 00:00 to 01:00), that midnight does not exist and the day
+ * begins at the change, so the first instant of the day is searched for.
  */
 export function startOfLocalDayUtcMs(dateStr: string, timeZone: string): number {
   const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateStr);
@@ -77,7 +81,18 @@ export function startOfLocalDayUtcMs(dateStr: string, timeZone: string): number 
   const naiveUtc = Date.UTC(Number(year), Number(month) - 1, Number(day));
   let guess = naiveUtc - offsetMsAt(naiveUtc, timeZone);
   guess = naiveUtc - offsetMsAt(guess, timeZone);
-  return guess;
+  if (localDayKey(guess, timeZone) === dateStr && localDayKey(guess - 1, timeZone) < dateStr) return guess;
+
+  // The first instant whose local date is `dateStr` or later. No offset
+  // changes by more than a day, so it lies within a day either side.
+  let lo = guess - 86_400_000;
+  let hi = guess + 86_400_000;
+  while (hi - lo > 1) {
+    const mid = lo + Math.floor((hi - lo) / 2);
+    if (localDayKey(mid, timeZone) >= dateStr) hi = mid;
+    else lo = mid;
+  }
+  return hi;
 }
 
 /** Exclusive upper bound: UTC ms at local midnight ending `dateStr`. */

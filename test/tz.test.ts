@@ -35,6 +35,13 @@ describe('timezone bucketing', () => {
     expect(longDay).toBe(25 * HOUR);
   });
 
+  it('begins a day at the clock change where the change skips midnight', () => {
+    // 2018-03-11 in Havana: 00:00 never happens; clocks go from 23:59:59 to 01:00.
+    expect(startOfLocalDayUtcMs('2018-03-11', 'America/Havana')).toBe(Date.parse('2018-03-11T05:00:00Z'));
+    expect(endOfLocalDayUtcMs('2018-03-10', 'America/Havana')).toBe(Date.parse('2018-03-11T05:00:00Z'));
+    expect(endOfLocalDayUtcMs('2018-03-11', 'America/Havana') - startOfLocalDayUtcMs('2018-03-11', 'America/Havana')).toBe(23 * 3_600_000);
+  });
+
   it('rejects a malformed date', () => {
     expect(() => startOfLocalDayUtcMs('08/09/2026', 'UTC')).toThrow(RangeError);
   });
