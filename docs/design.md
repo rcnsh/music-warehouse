@@ -52,8 +52,9 @@ the Worker that id.
 `/api/stats/*` is for a public stats page. It sits behind `READ_TOKEN` like the
 rest of `/api/*`, but every body is built so it could be republished as-is:
 counts, shares, artist and track names, album art, and months. No play rows,
-no `context_uri`, no timestamp finer than a month (`as_of`, the cut-off each
-body was computed up to, is the one exception).
+no `context_uri`, no timestamp finer than a month, with two exceptions:
+`as_of`, the cut-off each body was computed up to, and `on-repeat`'s whole
+local days (below).
 
 Nothing may change from one day to the next in a way that isolates a day.
 Diffing two days of a count that ticks daily reveals one day's listening. So
