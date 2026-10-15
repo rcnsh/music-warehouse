@@ -10,6 +10,7 @@ is one client.
 - [Requirements](#requirements)
 - [Setting it up from scratch](#setting-it-up-from-scratch)
 - [Authorizing](#authorizing)
+- [Device tokens](#device-tokens)
 - [Importing your history](#importing-your-history)
 - [Configuration](#configuration)
 - [API reference](#api-reference)
@@ -137,6 +138,34 @@ does not extend it. When it lapses, polling stops, `/health` reports
 again; the six months restart. Adding a scope to `SCOPE` in `src/spotify.ts`
 also needs a re-authorization.
 
+## Device tokens
+
+Give each device or client its own token rather than copying `ADMIN_TOKEN`
+around. A lost phone then costs one revocation, and a client that only reads
+never holds a credential that can write.
+
+```bash
+curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"name": "iPhone Wrapped"}' "$WORKER_URL/admin/tokens"
+```
+
+The response holds the token, `mw_` and 43 characters. It is shown **once**;
+only a hash is stored.
+
+| Field | Default | |
+|---|---|---|
+| `name` | required | 1 to 64 characters, to recognise it in the list. |
+| `access` | `read` | `read` reaches `/api/*`; `admin` reaches everything. |
+| `expires_in_days` | `90` | 1 to 3660, or `null` for a token that never expires. |
+
+`GET /admin/tokens` lists them with when each was last used (to the hour), and
+`DELETE /admin/tokens?id=tok_…` revokes one immediately. Revoked tokens stay
+in the list.
+
+Keep `ADMIN_TOKEN` in a password manager as the way back in if every device
+token is lost. Once nothing uses `READ_TOKEN`, delete it with
+`npx wrangler secret delete READ_TOKEN`.
+
 ## Importing your history
 
 ### The export
@@ -203,8 +232,8 @@ locally. `npx wrangler secret list` shows what is set.
 |---|---|---|
 | `SPOTIFY_CLIENT_ID` | yes | From the Spotify dashboard. |
 | `SPOTIFY_CLIENT_SECRET` | yes | From the Spotify dashboard. |
-| `ADMIN_TOKEN` | yes | Full access. `openssl rand -hex 32`. |
-| `READ_TOKEN` | no | `/api/*` only. Unset makes `/api/*` admin-only. |
+| `ADMIN_TOKEN` | yes | Full access. `openssl rand -hex 32`. Keep it offline and use [device tokens](#device-tokens) day to day. |
+| `READ_TOKEN` | no | Deprecated: `/api/*` only. Prefer a read [device token](#device-tokens). |
 | `CORS_ORIGINS` | no | Comma-separated browser origins (or `*`) allowed to call `/api/*`, e.g. `https://wrapped.example.com`. Unset sends no CORS headers. |
 | `ALERT_WEBHOOK_URL` | no | Where alerts are POSTed. See [Alerting](#alerting). |
 | `ALERT_MENTION` | no | Prefix for every alert, e.g. a Discord `<@id>`. |
@@ -221,8 +250,8 @@ Every route except `/callback` takes `Authorization: Bearer <token>`.
 
 | Token | Reaches |
 |---|---|
-| `ADMIN_TOKEN` | Everything. |
-| `READ_TOKEN` | `/api/*` only. Wrapped: presets and ranges already computed. |
+| `ADMIN_TOKEN`, or an `admin` [device token](#device-tokens) | Everything. |
+| A `read` device token, or `READ_TOKEN` | `/api/*` only. Wrapped: presets and ranges already computed. |
 
 Responses are JSON. Errors are `{ "error": "..." }` with:
 
@@ -384,6 +413,9 @@ grant has lapsed.
 | `POST /admin/backfill-catalog?after=&limit=&spacingMs=` | One step of `npm run backfill:catalog`. |
 | `POST /admin/alert-check?force=1` | Run the alert sweep now. `force=1` ignores the 24-hour resend window. |
 | `GET /admin/raw?after=` | Spotify's unmodified recently-played payload. Read-only. |
+| `POST /admin/tokens` | Body `{ name, access?, expires_in_days? }`. Mints a [device token](#device-tokens), returned once. |
+| `GET /admin/tokens` | Every device token: `id`, `name`, `access`, `created_ms`, `expires_ms`, `last_used_ms`, `revoked_ms`, `active`. |
+| `DELETE /admin/tokens?id=` | Revokes a device token. |
 
 ## Operations
 
