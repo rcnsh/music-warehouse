@@ -398,7 +398,9 @@ export async function topTracksRoute(env: Env, url: URL): Promise<Response> {
     (cte) =>
       `WITH ${cte},
        -- A track the song sweep hasn't keyed yet stands alone, as songKey() keys a track with no artist.
-       e AS (SELECT COALESCE(ts.song, char(30) || c.track_id) AS song, c.track_id, c.plays
+       -- MATERIALIZED: e is read twice, and inlined it re-ran c for every top song
+       -- (5M rows read for 2.5 months in production; 11k materialized).
+       e AS MATERIALIZED (SELECT COALESCE(ts.song, char(30) || c.track_id) AS song, c.track_id, c.plays
                FROM c LEFT JOIN track_songs ts ON ts.track_id = c.track_id),
        top AS (SELECT song FROM e GROUP BY song ORDER BY SUM(plays) DESC, song LIMIT ?)
        SELECT e.song, e.track_id, e.plays, t.name, ${PRIMARY_ARTIST_SQL('e.track_id')} AS artist, al.image_url AS image
