@@ -1,5 +1,6 @@
 import { SELF, env } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
+import { syncSearchIndex } from '../src/search-index';
 
 const BASE = 'https://warehouse.test';
 const READ = { Authorization: 'Bearer test-read-token' };
@@ -38,7 +39,8 @@ async function seed(tracks: Array<Play & { count: number }>) {
       statements.push(env.DB.prepare('INSERT INTO plays (played_at_ms, track_id, source) VALUES (?, ?, ?)').bind(ms, track.trackId, 'api'));
     }
   }
-  await env.DB.batch(statements);
+  // Writes keep the trigram index in step, as polls and imports do.
+  await env.DB.batch([...statements, syncSearchIndex(env.DB)]);
 }
 
 interface SearchBody {
@@ -107,6 +109,28 @@ describe('/api/search', () => {
     ]);
     expect((await search('q=100%25')).tracks.map((t) => t.id)).toEqual(['a']);
     expect((await search('q=_')).tracks).toEqual([]);
+  });
+
+  it('finds one- and two-character names, which the trigram index cannot', async () => {
+    await seed([
+      { trackId: 'a', name: 'One', artistId: 'u2', artistName: 'U2', count: 2 },
+      { trackId: 'b', name: 'X', artistId: 'y', artistName: 'Someone', count: 1 },
+    ]);
+    expect((await search('q=u2')).artists).toEqual([{ id: 'u2', name: 'U2', plays: 2 }]);
+    expect((await search('q=x')).tracks.map((t) => t.id)).toEqual(['b']);
+  });
+
+  it('matches names, not the album or other credits the index also holds', async () => {
+    await seed([{ trackId: 'a', name: 'Song', artistId: 'x', artistName: 'Porter Robinson', count: 2 }]);
+    await env.DB.batch([
+      env.DB.prepare("INSERT INTO albums (album_id, name) VALUES ('al', 'Porter Album')"),
+      env.DB.prepare("UPDATE tracks SET album_id = 'al' WHERE track_id = 'a'"),
+      syncSearchIndex(env.DB),
+    ]);
+    const body = await search('q=porter');
+    expect(body.artists).toEqual([{ id: 'x', name: 'Porter Robinson', plays: 2 }]);
+    expect(body.tracks).toEqual([]);
+    expect((await search('q=song&artist=porter')).tracks).toEqual([{ id: 'a', name: 'Song', artist: 'Porter Robinson', plays: 2 }]);
   });
 
   it('answers no matches with empty lists', async () => {
