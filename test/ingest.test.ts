@@ -70,7 +70,7 @@ describe('poll', () => {
     expect(duplicates.results).toHaveLength(0);
   });
 
-  it('advances the cursor to the newest play, and sends it as `after` next time', async () => {
+  it('advances the cursor to the newest play, and reads the newest window each time', async () => {
     await seedAuthorized();
     const fixture = loadFixture();
     const calls = stubFetch({ recentlyPlayed: () => jsonResponse(fixture) });
@@ -83,8 +83,56 @@ describe('poll', () => {
     // Context lookups may sit between the two, depending on what the fixture
     // was played from; only the recently-played calls matter here.
     const reads = calls.filter((call) => call.startsWith('recently-played'));
-    // First ever call omits `after` entirely rather than sending after=0.
-    expect(reads).toEqual(['recently-played', `recently-played?after=${newest}`]);
+    // Never after=0; and the window reaches the cursor, so no second request.
+    expect(reads).toEqual(['recently-played', 'recently-played']);
+  });
+
+  it('stores a play Spotify lists late, under a time before the cursor', async () => {
+    await seedAuthorized();
+    const item = (at: string, id: string) => ({ played_at: at, track: { id, name: id } });
+    stubFetch({ recentlyPlayed: () => jsonResponse({ items: [item('2026-09-08T12:00:00Z', 'a'), item('2026-09-08T11:00:00Z', 'b')] }) });
+    await poll(env);
+    const cursor = (await syncState())!.cursor_ms;
+    expect(cursor).toBe(Date.parse('2026-09-08T12:00:00Z'));
+
+    // An offline play from 11:30 syncs after the 12:00 play was stored.
+    vi.unstubAllGlobals();
+    const calls = stubFetch({
+      recentlyPlayed: () =>
+        jsonResponse({
+          items: [item('2026-09-08T13:00:00Z', 'c'), item('2026-09-08T12:00:00Z', 'a'), item('2026-09-08T11:30:00Z', 'offline'), item('2026-09-08T11:00:00Z', 'b')],
+        }),
+    });
+    const result = await poll(env);
+    expect(result.inserted).toBe(2);
+    expect(calls.filter((call) => call !== 'lookup')).toEqual(['recently-played']);
+    expect(await countPlays()).toBe(4);
+    expect((await syncState())!.cursor_ms).toBe(Date.parse('2026-09-08T13:00:00Z'));
+  });
+
+  it('asks for the plays after the cursor too when the newest window does not reach it', async () => {
+    await seedAuthorized();
+    const item = (at: string, id: string) => ({ played_at: at, track: { id, name: id } });
+    stubFetch({ recentlyPlayed: () => jsonResponse({ items: [item('2026-09-08T10:00:00Z', 'a')] }) });
+    await poll(env);
+    const cursor = Date.parse('2026-09-08T10:00:00Z');
+
+    vi.unstubAllGlobals();
+    // The newest window starts at 14:00; the plays after the cursor reach 12:00.
+    const calls = stubFetch({
+      recentlyPlayed: (url) =>
+        jsonResponse({
+          items: url.searchParams.has('after')
+            ? [item('2026-09-08T12:00:00Z', 'c'), item('2026-09-08T11:00:00Z', 'b')]
+            : [item('2026-09-08T15:00:00Z', 'e'), item('2026-09-08T14:00:00Z', 'd')],
+        }),
+    });
+    const result = await poll(env);
+    expect(calls.filter((call) => call !== 'lookup')).toEqual(['recently-played', `recently-played?after=${cursor}`]);
+    expect(result.inserted).toBe(4);
+    // Only as far as the plays after the cursor are known to be complete.
+    expect(result.cursor_ms).toBe(Date.parse('2026-09-08T12:00:00Z'));
+    expect((await syncState())!.cursor_ms).toBe(Date.parse('2026-09-08T12:00:00Z'));
   });
 
   it('treats an empty window as success without moving the cursor', async () => {
@@ -231,7 +279,7 @@ describe('poll', () => {
 
     const result = await poll(env);
     expect(result.ok).toBe(true);
-    expect(calls).toEqual(['recently-played', 'token', 'recently-played']);
+    expect(calls.filter((call) => call !== 'lookup')).toEqual(['recently-played', 'token', 'recently-played']);
   });
 
   it('aborts after a second 401', async () => {
