@@ -10,6 +10,7 @@ import { NeedsReauthError, getAccessToken, persistTokenResponse } from './tokens
 import { readState, reconcileNameKeyedArtists } from './db';
 import { EraConfigError } from './eras';
 import { syncSearchIndex } from './search-index';
+import { syncAllSongs } from './play-numbers';
 import { accessFor, createTokenRoute, listTokensRoute, listedOrigins, revokeTokenRoute } from './auth';
 import { SnapshotPending } from './snapshots';
 import { isStatName, statRoute } from './stats';
@@ -347,12 +348,15 @@ const worker = {
             console.error('alert-check failed', error);
           }),
       );
-      // Polls only reconcile and index what they touched; this catches the
-      // rest. The index sync runs after the reconcile so it sees merged artists.
+      // Polls only reconcile, index and key songs for what they touched; this
+      // catches the rest. The index and song keys follow the reconcile so they
+      // see merged artists.
       ctx.waitUntil(
-        env.DB.batch([...reconcileNameKeyedArtists(env.DB), syncSearchIndex(env.DB)]).catch((error) => {
-          console.error('artist-reconcile or search-index sync failed', error);
-        }),
+        env.DB.batch([...reconcileNameKeyedArtists(env.DB), syncSearchIndex(env.DB), ...syncAllSongs(env.DB)]).catch(
+          (error) => {
+            console.error('artist-reconcile, search-index or song sync failed', error);
+          },
+        ),
       );
       ctx.waitUntil(
         warmWrappedPresets(env, ctx)

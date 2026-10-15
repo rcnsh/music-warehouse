@@ -165,6 +165,19 @@ asked for.
 Wrapped's estimate, so a skip is a play worth no minutes. `months` runs from
 the first month with a play to the last, quiet months as zero.
 
+**Play numbers.** Counting a play's predecessors on read costs a row per
+earlier play of its song: 26k to 38k rows for a page of 50 with editions
+folded (411 to 6.4k even per track id), against about 100 for the page. So
+`play_numbers` (migration 0012) stores each play's number, and
+`track_songs` the song key each track was numbered under. Every write rekeys
+the tracks it wrote, renumbers whole any song a key change touched (the old
+key waits in `previous` until then), and numbers its own plays from the last
+correct number before the earliest of them, which for a poll is one index seek
+per song. The daily cron rekeys every track (about 31k rows read, writing
+nothing unless a key changed) for changes no write names, such as the artist
+reconcile repointing a credit. Nothing deletes plays, so numbers only ever
+need renumbering forwards.
+
 Each is index seeks only: an artist or song reads about two rows per play of it
 (the play, and the play before it for the minutes estimate), and on this day
 one range per year. The artist name match needs migration 0006.
