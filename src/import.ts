@@ -1,5 +1,5 @@
 import { json } from './api';
-import { NAME_KEY_PREFIX, buildInserts, reconcileNameKeyedArtists } from './db';
+import { NAME_KEY_PREFIX, buildInserts, countStoredPlays, reconcileNameKeyedArtists } from './db';
 import { songStatements } from './play-numbers';
 import { syncSearchIndex } from './search-index';
 import type { Env } from './types';
@@ -128,6 +128,9 @@ export async function importChunk(env: Env, request: Request): Promise<Response>
   const trackStatements = buildInserts(env.DB, 'tracks', ['track_id', 'name', 'first_seen_ms'], rows.tracks);
 
   const results = await env.DB.batch([
+    // normalizeExport keeps one row per key, so the ones not already stored
+    // are the ones this batch inserts.
+    countStoredPlays(env.DB, rows.plays),
     ...playStatements,
     ...trackStatements,
     ...buildInserts(env.DB, 'artists', ['artist_id', 'name'], rows.artists),
@@ -139,8 +142,7 @@ export async function importChunk(env: Env, request: Request): Promise<Response>
     ...songStatements(env.DB, rows.tracks.map((track) => track.track_id), rows.plays),
   ]);
 
-  let inserted = 0;
-  for (let i = 0; i < playStatements.length; i++) inserted += results[i]?.meta?.changes ?? 0;
+  const inserted = rows.plays.length - ((results[0]?.results[0] as { n: number } | undefined)?.n ?? 0);
   const rowsWritten = results.reduce((total, result) => total + (result.meta?.rows_written ?? 0), 0);
 
   return json({

@@ -34,7 +34,8 @@ CORS_ORIGINS=
 SIGN_IN_SCHEMES=
 
 # Optional. The timezone listening stats read local time in, when ERAS is
-# unset. An IANA name such as Europe/Berlin. Default UTC.
+# unset. An IANA name such as Europe/Berlin. Default UTC. Also the zone the
+# play-count rollup is built in (the latest era's zone when only ERAS is set).
 TIMEZONE=
 
 # Optional. Periods you lived in different timezones, as a JSON list; each

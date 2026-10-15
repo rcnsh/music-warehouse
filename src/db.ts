@@ -24,7 +24,7 @@ export function buildInserts<T extends Record<string, unknown>>(
   table: string,
   columns: string[],
   rows: T[],
-  options: { verb?: 'INSERT' | 'INSERT OR IGNORE'; conflictClause?: string } = {},
+  options: { verb?: 'INSERT' | 'INSERT OR IGNORE' | 'INSERT OR REPLACE'; conflictClause?: string } = {},
 ): D1PreparedStatement[] {
   if (rows.length === 0) return [];
 
@@ -163,6 +163,20 @@ export function reconcileArtistsInPoll(db: D1Database, rows: NormalizedRows): D1
       )
       .bind(names),
   ];
+}
+
+/**
+ * How many of `plays` are already stored, for leading a write batch. The
+ * batch is one transaction, so what it inserts is the rest. meta.changes
+ * can't say: D1 counts the rollup triggers' writes in it too.
+ */
+export function countStoredPlays(db: D1Database, plays: Array<{ played_at_ms: number; track_id: string }>): D1PreparedStatement {
+  return db
+    .prepare(
+      `SELECT COUNT(*) AS n FROM json_each(?) j
+         JOIN plays p ON p.played_at_ms = json_extract(j.value, '$[0]') AND p.track_id = json_extract(j.value, '$[1]')`,
+    )
+    .bind(JSON.stringify(plays.map((play) => [play.played_at_ms, play.track_id])));
 }
 
 /** Read both singleton rows in one round trip (one subrequest). */

@@ -182,6 +182,29 @@ Each is index seeks only: an artist or song reads about two rows per play of it
 (the play, and the play before it for the minutes estimate), and on this day
 one range per year. The artist name match needs migration 0006.
 
+**The play-count rollup.** `/api/daily` read one row per play and the top
+routes counted every play: a year cost 15k and about 40k rows. Migration
+0014 keeps counts per local day and per local month and track. Triggers on
+`plays` maintain them, so every way a play arrives or leaves (polls, imports of
+older history, a manual `DELETE`) keeps them right without each write path
+remembering to. SQL has no zone database, so `rollup_offsets` lists the
+zone's offset from each transition, found to the second as Intl resolves
+time, and the trigger looks up the one in force.
+
+The rollup must answer exactly as counting plays does, so it is only read
+where its buckets provably hold the request's plays: the request's `tz` is
+the rollup's, each boundary used is exactly where its local day begins (not
+so on a day whose midnight a DST change skips), and the zone's dates never run
+backwards. The top routes take whole months from it and count the plays in
+the partial months either side; `/api/daily` takes every day. Tests compare
+both paths across eight zones, DST changes, partial months, out-of-order
+inserts and deletes.
+
+The offsets are written out two years ahead. The daily cron extends them, and
+rebuilds every count when the configured zone or its rules change. If the cron
+stops for two years, reads stop trusting the rollup rather than misplace a
+play.
+
 ## Known limitations
 
 - **Export-era artists are keyed by name, not id.** The export carries names
