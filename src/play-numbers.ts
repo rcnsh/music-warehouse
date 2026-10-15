@@ -103,6 +103,19 @@ export function songStatements(
   ];
 }
 
+/**
+ * Renumber whole every song these tracks are in, for after plays are removed:
+ * every later play of the song moves down. Delete the removed plays' own
+ * play_numbers rows first, since this only rewrites plays that remain.
+ */
+export function renumberSongsOf(db: D1Database, trackIds: string[]): D1PreparedStatement[] {
+  if (trackIds.length === 0) return [];
+  return [
+    db.prepare('UPDATE track_songs SET dirty = 1 WHERE track_id IN (SELECT value FROM json_each(?1))').bind(JSON.stringify(trackIds)),
+    ...renumberRekeyed(db),
+  ];
+}
+
 /** The daily sweep: rekey every track and renumber any song that changed. */
 export function syncAllSongs(db: D1Database): D1PreparedStatement[] {
   return [rekey(db), ...renumberRekeyed(db)];

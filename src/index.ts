@@ -2,6 +2,7 @@ import { BadRequest, dailyCounts, json, recentPlays, topArtists } from './api';
 import { backfillAlbums, backfillFromCatalog } from './albums';
 import { health } from './health';
 import { importChunk } from './import';
+import { cleanupOverlapsRoute, cleanupShortGapsRoute, cleanupSkipsRoute } from './cleanup';
 import { poll } from './ingest';
 import { alertCheckRoute, runAlertCheck } from './alerts';
 import { nowPlaying, recentlyPlayed, topMusic } from './live';
@@ -193,6 +194,7 @@ async function handle(request: Request, env: Env, ctx: ExecutionContext): Promis
             '/admin/concert-check',
             '/admin/concert-artists',
             '/admin/import',
+            '/admin/cleanup/{overlaps,skips,short-gaps}',
             '/admin/backfill-albums',
             '/admin/backfill-catalog',
             '/admin/raw',
@@ -249,6 +251,12 @@ async function handle(request: Request, env: Env, ctx: ExecutionContext): Promis
         return await alertCheckRoute(env, url);
       case 'POST /admin/import':
         return await importChunk(env, request);
+      case 'POST /admin/cleanup/overlaps':
+        return await cleanupOverlapsRoute(env, url);
+      case 'POST /admin/cleanup/skips':
+        return await cleanupSkipsRoute(env, request, url);
+      case 'POST /admin/cleanup/short-gaps':
+        return await cleanupShortGapsRoute(env, url);
       case 'POST /admin/backfill-albums':
         return await backfillAlbums(env, request);
       case 'POST /admin/backfill-catalog':

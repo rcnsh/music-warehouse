@@ -364,7 +364,7 @@ npm run import -- --dir "export/Spotify Extended Streaming History" --url "$WORK
 | `--dailyRowLimit` | `90000` | Stop after writing this many rows in a UTC day. |
 | `--state` | `.import-state.json` | Where progress is saved. |
 | `--delayMs` | `250` | Pause between chunks. |
-| `--matchWindow` | `600` | Seconds within which an export record and a polled play of the same track count as one listen. `0` turns it off. |
+| `--matchWindow` | `5` | Seconds within which an export record and a stored play of the same track count as one play. `0` matches exact timestamps only. |
 | `--dryRun` | off | Write nothing; report where the export would add plays. |
 | `--tz` | this machine's zone | Zone for the dry run's months and days. |
 | `--report` | `import-report.json` | Where the dry run writes per-day counts. |
@@ -373,15 +373,28 @@ On the Free plan D1 allows 100,000 row writes a day, index writes included, so
 the script stops at 90,000 and a long history takes several days. Re-run it
 after 00:00 UTC and it continues from `.import-state.json`. Workers Paid has no
 daily cap (50 million writes a month are included), so there pass a larger
-`--dailyRowLimit` to import in one run. Re-running is always safe: plays
-already stored are ignored, not duplicated. Podcasts and local files are
-skipped.
+`--dailyRowLimit` to import in one run. Re-running is always safe: a record
+is ignored when a play of the same track is already stored within 5 seconds
+of it, which also catches the poller's copy of the same play (the export
+rounds times down to the second, the API keeps milliseconds). Skips, records
+with `ms_played` under 30 seconds, are dropped, as are podcasts and local
+files. An import clears the cached stats and Wrapped bodies, which recompute
+on their next request.
 
-A later export overlaps what the poller already caught, and the two never share
-a timestamp: polls keep milliseconds and the export's `ts` is whole seconds. So
-an export record is also left out when a polled play of the same track lies
-within `--matchWindow` seconds of it. Export records are never window-matched
-against each other, since the export records every listen, skips included.
+Histories imported before skips were dropped can be cleaned with
+`npm run clean:export`. It reports by default; `--apply` removes:
+
+```bash
+npm run clean:export -- skips --dir "export/Spotify Extended Streaming History" --url "$WORKER_URL"
+npm run clean:export -- short-gaps --url "$WORKER_URL"   # without the files: a heuristic
+npm run clean:export -- overlaps --url "$WORKER_URL"     # export copies of polled plays
+```
+
+`skips` is exact: the files name each skip. `short-gaps` removes export plays
+that ended under 30 seconds after the play before, which never removes a play
+that counted but misses a skip that followed a pause. Every removal repairs the
+rollup and play numbers and clears the cached bodies.
+
 
 #### Finding gaps first
 
@@ -393,11 +406,11 @@ budget) and prints how many plays each month would gain, with per-day counts in
 npm run import -- --dryRun --dir "export/Spotify Extended Streaming History" --url "$WORKER_URL"
 ```
 
-It also prints how far apart matched polled and export timestamps were. The
-same listen should land at a steady offset; matches spread across the window
-mean it is wide enough to catch a repeat of the track, so narrow
-`--matchWindow` before the real run. New plays in months the poller covered
-may be skips under 30 seconds, which it rarely sees.
+It also prints how far apart matched stored and export timestamps were. The
+same play should land at a steady offset well inside the 5-second window
+(`--matchWindow`). If many new plays fall in months the poller already covered,
+compare with a dry run at a wider `--matchWindow` before the real run; two
+genuine plays of a track end at least 30 seconds apart, so keep it under that.
 
 ### Album art
 
@@ -898,7 +911,10 @@ These take no token.
 | `GET /login` | `302` to Spotify's consent page. Use `npm run authorize`. |
 | `GET /health` | Whether ingestion is working. See [Health](#health). |
 | `POST /admin/poll` | Poll now, exactly as the cron does. |
-| `POST /admin/import` | Body: an array of export records, or `{ "records": [...] }`. Returns `{ inserted, duplicates, matched_polled, skipped }`. `match_window_s` (default 600, 0 to 3600) sets how close a polled play of the same track must be to count as the same listen. `dry_run=1` writes nothing and returns `new_plays_ms` and `polled_offsets_ms` instead. Use `npm run import`. |
+| `POST /admin/import` | Body: an array of export records, or `{ "records": [...] }`. Returns `{ inserted, duplicates, skipped, short }`. `match_window_s` (default 5, 0 to 30) sets how close a stored play of the same track must be to count as the same play. `dry_run=1` writes nothing and returns `new`, `new_plays_ms` and `duplicate_offsets_ms` instead. Use `npm run import`. |
+| `POST /admin/cleanup/skips?apply=1` | Body: export records, as for `/admin/import`. Removes the stored export plays they show to be skips. Use `npm run clean:export`. |
+| `POST /admin/cleanup/short-gaps?apply=1&before=&before_track=&limit=` | One page of export plays that ended under 30 s after the play before, newest first. |
+| `POST /admin/cleanup/overlaps?apply=1&after=&after_track=&limit=` | One page of export plays within 5 s of a polled play of the same track; `gaps` buckets every pair within 30 s. |
 | `POST /admin/backfill-albums?source=&range=&offset=&pages=` | One step of `npm run backfill:albums`. |
 | `POST /admin/backfill-catalog?after=&limit=&spacingMs=` | One step of `npm run backfill:catalog`. |
 | `POST /admin/alert-check?force=1` | Run the alert sweep now. `force=1` ignores the 24-hour resend window. |

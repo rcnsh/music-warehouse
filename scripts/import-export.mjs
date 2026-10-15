@@ -12,9 +12,10 @@
  *   ADMIN_TOKEN=... node scripts/import-export.mjs \
  *     --dir ./export-data --url https://music-warehouse.<subdomain>.workers.dev
  *
- * It is safe to re-run at any time: plays already stored are left out, either
- * by the (played_at_ms, track_id) primary key or, for plays the poller caught,
- * by matching the same track within --matchWindow seconds.
+ * It is safe to re-run at any time: the Worker drops a record when a play of
+ * the same track is already stored within --matchWindow seconds of it (5 by
+ * default), which catches a re-run and the poller's copy of the same play
+ * alike. It also drops skips (ms_played under 30 s).
  *
  * --dryRun writes nothing and reports where the export would add plays, by
  * local month and day, without touching the saved progress or the row budget:
@@ -33,7 +34,7 @@ function parseArgs(argv) {
     dailyRowLimit: 90_000,
     state: '.import-state.json',
     delayMs: 250,
-    matchWindow: 600,
+    matchWindow: 5,
     dryRun: false,
     tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
     report: 'import-report.json',
@@ -117,7 +118,7 @@ const seconds = (ms) => `${(ms / 1000).toFixed(1)}s`;
 async function dryRun(files) {
   const byDay = new Map();
   const offsets = [];
-  const totals = { received: 0, new: 0, duplicates: 0, matched_polled: 0, skipped: 0 };
+  const totals = { received: 0, new: 0, duplicates: 0, skipped: 0, short: 0 };
 
   // A Worker from before dry runs would ignore the flag and import for real.
   // An empty chunk writes nothing either way, so ask with one first.
@@ -136,7 +137,7 @@ async function dryRun(files) {
         const day = dayFormat.format(new Date(ms));
         byDay.set(day, (byDay.get(day) ?? 0) + 1);
       }
-      offsets.push(...(result.polled_offsets_ms ?? []));
+      offsets.push(...(result.duplicate_offsets_ms ?? []));
       await sleep(args.delayMs);
     }
   }
@@ -146,19 +147,20 @@ async function dryRun(files) {
   for (const [day, n] of days) byMonth.set(day.slice(0, 7), (byMonth.get(day.slice(0, 7)) ?? 0) + n);
 
   console.log(
-    `\n${totals.received} records: ${totals.new} new, ${totals.duplicates} already stored, ` +
-      `${totals.matched_polled} matched to polled plays, ${totals.skipped} skipped (podcasts, local files).`,
+    `\n${totals.received} records: ${totals.new} new, ${totals.duplicates} already stored (within ±${args.matchWindow}s), ` +
+      `${totals.short} skips under 30 s, ${totals.skipped} skipped (podcasts, local files).`,
   );
 
   if (offsets.length > 0) {
     const signed = [...offsets].sort((a, b) => a - b);
     const abs = offsets.map(Math.abs).sort((a, b) => a - b);
-    console.log(`\nPolled minus export timestamp over ${offsets.length} matches (window ±${args.matchWindow}s):`);
+    console.log(`\nStored minus export timestamp over ${offsets.length} matches (window ±${args.matchWindow}s):`);
     console.log(`  median ${seconds(percentile(signed, 0.5))}, |p95| ${seconds(percentile(abs, 0.95))}, |max| ${seconds(abs.at(-1))}`);
-    // The same listen should land at a steady offset. Matches far out in the
-    // window are more likely a repeat of the track than the same play.
+    // The same listen should land at a steady offset, well inside the window.
+    // Matches near its edge suggest copies of polled plays just outside it:
+    // compare with a dry run at a wider --matchWindow before the real run.
     if (abs.at(-1) > args.matchWindow * 500) {
-      console.log('  Some matches sit in the outer half of the window: narrow --matchWindow if the median is tight.');
+      console.log('  Some matches sit in the outer half of the window: try a dry run with a wider --matchWindow.');
     }
   }
 
@@ -212,11 +214,12 @@ async function main() {
       state.recordIndex += chunk.length;
       state.rowsWrittenToday += result.rows_written ?? 0;
       state.totalInserted += result.inserted ?? 0;
-      state.totalMatched = (state.totalMatched ?? 0) + (result.matched_polled ?? 0);
+      state.totalDuplicates = (state.totalDuplicates ?? 0) + (result.duplicates ?? 0);
+      state.totalShort = (state.totalShort ?? 0) + (result.short ?? 0);
       await saveState(state);
 
       process.stdout.write(
-        `\r  ${state.recordIndex}/${records.length} | inserted ${state.totalInserted} | matched polled ${state.totalMatched} | ` +
+        `\r  ${state.recordIndex}/${records.length} | inserted ${state.totalInserted} | already stored ${state.totalDuplicates} | ` +
           `rows written today ${state.rowsWrittenToday}/${args.dailyRowLimit}   `,
       );
       await sleep(args.delayMs);
@@ -226,7 +229,10 @@ async function main() {
     await saveState(state);
   }
 
-  console.log(`\n\nDone. ${state.totalInserted} play rows inserted in total; ${state.totalMatched ?? 0} records matched plays the poller already had.`);
+  console.log(
+    `\n\nDone. ${state.totalInserted} play rows inserted in total; ${state.totalDuplicates ?? 0} records were already stored; ` +
+      `${state.totalShort ?? 0} skips (under 30 s) dropped.`,
+  );
   console.log('Verify: wrangler d1 execute music_warehouse --remote --command "SELECT source, COUNT(*) FROM plays GROUP BY source;"');
 }
 

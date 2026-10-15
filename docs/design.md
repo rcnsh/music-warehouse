@@ -261,7 +261,8 @@ recomputed only after a new play or when the hour turns.
 - **Listening duration is not derivable from polled data.** `played_at`'s exact
   meaning is undocumented, and the export shows consecutive streams
   overlapping. `ms_played` exists only in the export and is not stored, so
-  minutes everywhere are estimates.
+  minutes everywhere are estimates. The import uses it only to drop skips
+  (under 30 s), so export plays count the way polled ones do.
 - **Plays shorter than roughly 30 seconds may never appear.** Widely reported,
   not documented. Do not present counts as exhaustive.
 - **Downtime is data loss.** Nothing recovers plays that aged out of the
