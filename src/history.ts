@@ -63,6 +63,32 @@ function playsSql(tracksCte: string): string {
      ORDER BY p.played_at_ms`;
 }
 
+/**
+ * Every track /api/artist credits to an artist: the tracks whose primary
+ * artist is the id (?1) or shares its name, ignoring case, which folds the
+ * export's `name:` placeholders in. The name is the stored one when the id is
+ * known, else the caller's (?2). Defines `a`, the folded artists, and `ts`.
+ */
+export const ARTIST_TRACKS_CTE = `n AS (SELECT COALESCE((SELECT name FROM artists WHERE artist_id = ?1), ?2) AS name),
+    a AS (
+      SELECT artist_id, name FROM artists WHERE artist_id = ?1
+      UNION SELECT artist_id, name FROM artists WHERE name = (SELECT name FROM n) COLLATE NOCASE
+    ),
+    ts AS (SELECT DISTINCT track_id FROM track_artists WHERE position = 0 AND artist_id IN (SELECT artist_id FROM a))`;
+
+/**
+ * Every edition of track ?1's song, as /api/track folds them: the same title,
+ * case-insensitively, under the same primary artist (itself folded by name).
+ * Defines `ts`; an unknown track is only itself.
+ */
+export const SONG_TRACKS_CTE = `song AS (SELECT t.name, ${PRIMARY_ARTIST_SQL('t.track_id')} AS artist FROM tracks t WHERE t.track_id = ?1),
+    a AS (SELECT artist_id FROM artists WHERE name = (SELECT artist FROM song) COLLATE NOCASE),
+    ts AS (
+      SELECT ?1 AS track_id
+      UNION SELECT ta.track_id FROM track_artists ta JOIN tracks t ON t.track_id = ta.track_id
+       WHERE ta.position = 0 AND ta.artist_id IN (SELECT artist_id FROM a) AND t.name = (SELECT name FROM song) COLLATE NOCASE
+    )`;
+
 function metaSql(tracksCte: string): string {
   return `WITH ${tracksCte}
     SELECT t.track_id, t.name, ${PRIMARY_ARTIST_SQL('t.track_id')} AS artist, al.image_url AS image
@@ -171,13 +197,8 @@ export async function artistRoute(env: Env, url: URL): Promise<Response> {
   const known = id
     ? await env.DB.prepare('SELECT name FROM artists WHERE artist_id = ?').bind(id).first<{ name: string }>()
     : null;
-  // Fold by the stored name when the id is known, else by the caller's.
-  const tracksCte = `a AS (
-      SELECT artist_id, name FROM artists WHERE artist_id = ?1
-      UNION SELECT artist_id, name FROM artists WHERE name = ?2 COLLATE NOCASE
-    ),
-    ts AS (SELECT DISTINCT track_id FROM track_artists WHERE position = 0 AND artist_id IN (SELECT artist_id FROM a))`;
-  const binds = [id, known?.name ?? name];
+  const tracksCte = ARTIST_TRACKS_CTE;
+  const binds = [id, name];
   const [playsResult, metaResult, artistsResult] = await env.DB.batch([
     env.DB.prepare(playsSql(tracksCte)).bind(...binds),
     env.DB.prepare(metaSql(tracksCte)).bind(...binds),
@@ -216,15 +237,8 @@ export async function trackRoute(env: Env, url: URL): Promise<Response> {
     return respond({ track: { id, name: null, artist: null, image: null }, ...historyOf([], timeZone) }, []);
   }
 
-  // Every edition: the same title, case-insensitively, under the same
-  // primary artist (itself folded by name).
-  const tracksCte = `a AS (SELECT artist_id FROM artists WHERE name = ?2 COLLATE NOCASE),
-    ts AS (
-      SELECT ?1 AS track_id
-      UNION SELECT ta.track_id FROM track_artists ta JOIN tracks t ON t.track_id = ta.track_id
-       WHERE ta.position = 0 AND ta.artist_id IN (SELECT artist_id FROM a) AND t.name = ?3 COLLATE NOCASE
-    )`;
-  const binds = [id, track.artist, track.name];
+  const tracksCte = SONG_TRACKS_CTE;
+  const binds = [id];
   const [playsResult, metaResult] = await env.DB.batch([
     env.DB.prepare(playsSql(tracksCte)).bind(...binds),
     env.DB.prepare(metaSql(tracksCte)).bind(...binds),

@@ -1,5 +1,5 @@
 import { DEFAULT_TIMEZONE, endOfLocalDayUtcMs, isValidTimeZone, localDayKey, startOfLocalDayUtcMs } from './tz';
-import { textParam } from './history';
+import { ARTIST_TRACKS_CTE, SONG_TRACKS_CTE, textParam } from './history';
 import { trigramPhrase } from './search-index';
 import type { Env } from './types';
 
@@ -130,18 +130,74 @@ async function cachedMatchingTrackIds(env: Env, q: string): Promise<{ ids: strin
   return { ids: match.ids, rowsRead: match.rowsRead + 1 };
 }
 
+/** The filters /api/plays and /api/daily share. Each is echoed in the response when given. */
+export interface PlayFilter {
+  q?: string;
+  track_id?: string;
+  artist_id?: string;
+  artist_name?: string;
+}
+
+export function playFilterParams(url: URL, options: { q: boolean }): PlayFilter {
+  const filter: PlayFilter = {};
+  for (const name of ['q', 'track_id', 'artist_id', 'artist_name'] as const) {
+    if (name === 'q' && !options.q) continue;
+    const value = textParam(url, name);
+    if (value !== null) filter[name] = value;
+  }
+  return filter;
+}
+
+/**
+ * The track ids a filter allows, or null for no filter. Each filter narrows
+ * the one before. `track_id` takes every edition of the song, as /api/track
+ * folds them, and `artist_id`/`artist_name` every track /api/artist credits
+ * (primary artist, `name:` placeholders included). Resolving either reads
+ * about one row per track it finds.
+ */
+export async function filterTrackIds(env: Env, filter: PlayFilter): Promise<{ ids: string[] | null; rowsRead: number }> {
+  let ids: string[] | null = null;
+  let rowsRead = 0;
+  const narrow = (found: string[]) => {
+    const allowed = new Set(found);
+    ids = ids === null ? found : ids.filter((id) => allowed.has(id));
+  };
+  if (filter.q !== undefined) {
+    const match = await cachedMatchingTrackIds(env, filter.q);
+    narrow(match.ids);
+    rowsRead += match.rowsRead;
+  }
+  const lookups: Array<[string, unknown[]]> = [];
+  if (filter.track_id !== undefined) lookups.push([SONG_TRACKS_CTE, [filter.track_id]]);
+  if (filter.artist_id !== undefined || filter.artist_name !== undefined) {
+    lookups.push([ARTIST_TRACKS_CTE, [filter.artist_id ?? null, filter.artist_name ?? null]]);
+  }
+  if (lookups.length > 0) {
+    const results = await env.DB.batch<{ track_id: string }>(
+      lookups.map(([cte, binds]) => env.DB.prepare(`WITH ${cte} SELECT track_id FROM ts`).bind(...binds)),
+    );
+    for (const result of results) {
+      narrow(result.results.map((row) => row.track_id));
+      rowsRead += result.meta?.rows_read ?? 0;
+    }
+  }
+  return { ids, rowsRead };
+}
+
 /**
  * Most recent plays, newest first, joined to track, album and artist names.
- * `q` keeps only plays whose track, album or artist name contains it, with
- * the same paging, so a client can search the whole history a page at a time.
+ * `q` keeps only plays whose track, album or artist name contains it, and
+ * `track_id`, `artist_id` and `artist_name` one song's or one artist's, with
+ * the same paging, so a client can walk a filtered history a page at a time.
  */
 export async function recentPlays(env: Env, url: URL): Promise<Response> {
   const limit = intParam(url, 'limit', 50, 1, 500);
   const before = intParam(url, 'before', Number.MAX_SAFE_INTEGER, 0, Number.MAX_SAFE_INTEGER);
   const after = intParam(url, 'after', -1, -1, Number.MAX_SAFE_INTEGER);
-  const q = textParam(url, 'q');
+  const filter = playFilterParams(url, { q: true });
 
-  if (q === null) {
+  const match = await filterTrackIds(env, filter);
+  if (match.ids === null) {
     // The (played_at_ms, track_id) primary key drives both the range and the
     // ordering, so this reads only the rows it returns.
     const query = await env.DB.prepare(
@@ -161,9 +217,10 @@ export async function recentPlays(env: Env, url: URL): Promise<Response> {
     });
   }
 
-  const match = await cachedMatchingTrackIds(env, q);
+  // The filters are echoed, so a client can tell a filtered page from an
+  // older Worker that ignored the parameter.
   if (match.ids.length === 0) {
-    return json({ q, plays: [], _meta: { rows_read: match.rowsRead, duration_ms: null } });
+    return json({ ...filter, plays: [], _meta: { rows_read: match.rowsRead, duration_ms: null } });
   }
   // The ids travel as one JSON parameter, since D1 allows only 100 bound
   // parameters. `+p.track_id` stops SQLite using idx_plays_track, which
@@ -189,10 +246,8 @@ export async function recentPlays(env: Env, url: URL): Promise<Response> {
     .bind(JSON.stringify(match.ids), before, after, limit)
     .all();
 
-  // `q` echoes the filter, so a client can tell a filtered page from an
-  // older Worker that ignored the parameter.
   return json({
-    q,
+    ...filter,
     plays: query.results,
     _meta: {
       rows_read: match.rowsRead + (query.meta?.rows_read ?? 0),
@@ -248,11 +303,20 @@ export async function dailyCounts(env: Env, url: URL): Promise<Response> {
   const timeZone = timeZoneParam(url);
   const { fromMs, toMs, from, to } = dateRange(url, timeZone);
 
-  const query = await env.DB.prepare(
-    'SELECT played_at_ms FROM plays WHERE played_at_ms >= ? AND played_at_ms < ? ORDER BY played_at_ms',
-  )
-    .bind(fromMs, toMs)
-    .all<{ played_at_ms: number }>();
+  const filter = playFilterParams(url, { q: false });
+  const match = await filterTrackIds(env, filter);
+
+  // Filtered, idx_plays_track seeks each track's plays in the range, so the
+  // rows read follow the song's or artist's plays rather than everyone's.
+  const query = await (match.ids === null
+    ? env.DB.prepare(
+        'SELECT played_at_ms FROM plays WHERE played_at_ms >= ? AND played_at_ms < ? ORDER BY played_at_ms',
+      ).bind(fromMs, toMs)
+    : env.DB.prepare(
+        `SELECT played_at_ms FROM plays
+          WHERE track_id IN (SELECT value FROM json_each(?)) AND played_at_ms >= ? AND played_at_ms < ?`,
+      ).bind(JSON.stringify(match.ids), fromMs, toMs)
+  ).all<{ played_at_ms: number }>();
 
   const counts = new Map<string, number>();
   // Pre-seed every day in the range so quiet days appear as zero rather than a gap.
@@ -270,8 +334,9 @@ export async function dailyCounts(env: Env, url: URL): Promise<Response> {
     from,
     to,
     tz: timeZone,
+    ...filter,
     days: [...counts.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([day, plays]) => ({ day, plays })),
-    _meta: { rows_read: query.meta?.rows_read ?? null, duration_ms: query.meta?.duration ?? null },
+    _meta: { rows_read: match.rowsRead + (query.meta?.rows_read ?? 0), duration_ms: query.meta?.duration ?? null },
   });
 }
 
