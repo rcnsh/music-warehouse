@@ -430,6 +430,12 @@ the real id (`id` is `null` when only the export knows the artist, so pass the
 `name` to `/api/artist`), and a song's editions count once. `plays` credits
 the primary artist only. Matching is ASCII-case-insensitive, as SQLite's is.
 
+Queries of three or more characters take their candidates from the trigram
+index (migration 0011) and read about one row per candidate track plus the
+plays they count: "shelter" reads about 100 rows rather than 8k. One- and
+two-character queries scan the name tables (about 8k rows), so short names
+such as "U2" are still found.
+
 ### Stats
 
 **`GET /api/stats/{name}`**: aggregates built to be safe to publish: no play
