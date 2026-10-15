@@ -1,4 +1,5 @@
 import { env } from 'cloudflare:test';
+import { vi } from 'vitest';
 import type { Env, RecentlyPlayedResponse } from '../src/types';
 
 /**
@@ -122,4 +123,18 @@ function wrapStatement(statement: D1PreparedStatement, sql: string, calls: strin
 
 export function testEnv(overrides: Partial<Env> = {}): Env {
   return { ...env, ...overrides } as Env;
+}
+
+/**
+ * Stop the clock at `instant` for the rest of the test: `Date` only, so timers
+ * and I/O still run. The Worker under test shares the isolate, so requests
+ * through SELF see the same time. setup.ts undoes it after every test,
+ * and freezes every test at TEST_NOW when that is set.
+ */
+export function freezeClock(instant: string | number): number {
+  const ms = typeof instant === 'number' ? instant : Date.parse(instant);
+  if (!Number.isFinite(ms)) throw new Error(`Not an instant: ${instant}`);
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(ms);
+  return ms;
 }

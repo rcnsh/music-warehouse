@@ -8,6 +8,7 @@
     "deploy": "wrangler deploy",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:clock": "bash scripts/clock-sweep.sh",
     "typecheck": "tsc --noEmit",
     "migrate:local": "wrangler d1 migrations apply music_warehouse --local",
     "migrate:remote": "wrangler d1 migrations apply music_warehouse --remote",

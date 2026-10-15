@@ -1,5 +1,6 @@
 import { applyD1Migrations, env } from 'cloudflare:test';
-import { beforeEach } from 'vitest';
+import { afterEach, beforeEach, vi } from 'vitest';
+import { freezeClock } from './helpers';
 import { edgeRequest } from '../src/snapshots';
 import { buildEras, parseEras } from '../src/eras';
 import { STAT_NAMES, statKey } from '../src/stats';
@@ -13,6 +14,7 @@ const ERAS = buildEras(parseEras(env.ERAS, env.TIMEZONE), 0);
  * than relied on to be isolated.
  */
 beforeEach(async () => {
+  if (env.TEST_NOW) freezeClock(env.TEST_NOW);
   await applyD1Migrations(env.DB, env.TEST_MIGRATIONS);
   // The stats routes keep bodies in the Cache API as well as D1; a body cached
   // by one test would otherwise answer the next.
@@ -53,4 +55,9 @@ beforeEach(async () => {
     env.DB.prepare('UPDATE oauth_token SET access_token = NULL, access_expires_ms = NULL, refresh_token = NULL, authorized_at_ms = 0, needs_reauth = 0, spotify_user_id = NULL WHERE id = 1'),
     env.DB.prepare('UPDATE sync_state SET cursor_ms = 0, last_success_ms = NULL, last_error = NULL, last_error_ms = NULL, consecutive_failures = 0 WHERE id = 1'),
   ]);
+});
+
+// A test that froze the clock (freezeClock, or TEST_NOW above) gets it back.
+afterEach(() => {
+  vi.useRealTimers();
 });
