@@ -8,6 +8,7 @@ import { nowPlaying, recentlyPlayed, topMusic } from './live';
 import { SpotifyError, authorizeUrl, exchangeCode, fetchRecentlyPlayed } from './spotify';
 import { NeedsReauthError, getAccessToken, persistTokenResponse } from './tokens';
 import { readState } from './db';
+import { accessFor, createTokenRoute, listTokensRoute, revokeTokenRoute } from './auth';
 import { SnapshotPending } from './snapshots';
 import { isStatName, statRoute } from './stats';
 import { artistRoute, onThisDayRoute, topTracksRoute, trackRoute } from './history';
@@ -17,40 +18,6 @@ import type { Env } from './types';
 
 /** The cron expression reserved for the alert sweep; everything else polls. */
 const ALERT_CRON = '0 9 * * *';
-
-/**
- * Compare two secrets without leaking length or content through timing.
- * Both sides are hashed first so the comparison is always over 32 equal bytes.
- */
-async function secretsMatch(presented: string, expected: string): Promise<boolean> {
-  const encoder = new TextEncoder();
-  const [a, b] = await Promise.all([
-    crypto.subtle.digest('SHA-256', encoder.encode(presented)),
-    crypto.subtle.digest('SHA-256', encoder.encode(expected)),
-  ]);
-  return crypto.subtle.timingSafeEqual(a, b);
-}
-
-/**
- * Access level of the presented bearer token (R11).
- *
- * `admin` unlocks everything. `read` unlocks the /api/* routes only, so a
- * website can render listening data without holding a credential that could
- * also trigger a poll or write rows. Every route still requires one or the
- * other; /callback is the sole exception, and the OAuth `state` guards it.
- */
-type Access = 'admin' | 'read';
-
-async function accessFor(request: Request, env: Env): Promise<Access | null> {
-  const header = request.headers.get('Authorization') ?? '';
-  const match = /^Bearer\s+(.+)$/i.exec(header.trim());
-  if (!match) return null;
-  const presented = match[1]!;
-
-  if (env.ADMIN_TOKEN && (await secretsMatch(presented, env.ADMIN_TOKEN))) return 'admin';
-  if (env.READ_TOKEN && (await secretsMatch(presented, env.READ_TOKEN))) return 'read';
-  return null;
-}
 
 function unauthorized(): Response {
   return new Response(JSON.stringify({ error: 'Unauthorized' }), {
@@ -146,7 +113,7 @@ async function handle(request: Request, env: Env, ctx: ExecutionContext): Promis
 
   if (path === '/callback') return await callback(env, url);
 
-  const access = await accessFor(request, env);
+  const access = await accessFor(request, env, ctx);
   if (access === null) return unauthorized();
 
   const route = `${request.method} ${path}`;
@@ -182,6 +149,7 @@ async function handle(request: Request, env: Env, ctx: ExecutionContext): Promis
             '/admin/backfill-albums',
             '/admin/backfill-catalog',
             '/admin/raw',
+            '/admin/tokens',
           ],
         });
       case 'GET /login':
@@ -226,6 +194,12 @@ async function handle(request: Request, env: Env, ctx: ExecutionContext): Promis
         return await backfillFromCatalog(env, request);
       case 'GET /admin/raw':
         return await rawRecentlyPlayed(env, url);
+      case 'POST /admin/tokens':
+        return await createTokenRoute(env, request);
+      case 'GET /admin/tokens':
+        return await listTokensRoute(env);
+      case 'DELETE /admin/tokens':
+        return await revokeTokenRoute(env, url);
       default: {
         const stat = /^GET \/api\/stats\/([a-z-]+)$/.exec(route)?.[1];
         if (stat && isStatName(stat)) return await statRoute(env, ctx, stat);

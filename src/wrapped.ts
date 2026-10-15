@@ -3,6 +3,7 @@ import { HISTORY_START_MS, type Era, eraAt, erasFor, localTimeSql, startOfLocalW
 import { peekSnapshot, snapshot } from './snapshots';
 import { PRIMARY_ARTIST_SQL } from './stats/sql';
 import { endOfLocalDayUtcMs, isRealDay, localDayKey, startOfLocalDayUtcMs } from './tz';
+import type { Access } from './auth';
 import type { Env } from './types';
 
 /**
@@ -631,7 +632,7 @@ export async function warmWrappedPresets(env: Env, ctx: ExecutionContext, now = 
   return warmed;
 }
 
-export async function wrappedRoute(env: Env, ctx: ExecutionContext, url: URL, access: 'admin' | 'read'): Promise<Response> {
+export async function wrappedRoute(env: Env, ctx: ExecutionContext, url: URL, access: Access): Promise<Response> {
   const now = Date.now();
   const eras = erasFor(env.MOVED_AT);
   const range = wrappedRange(eras, url, now);
