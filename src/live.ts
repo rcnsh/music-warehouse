@@ -27,11 +27,34 @@ async function accessTokenFor(env: Env): Promise<string> {
   return getAccessToken(env.DB, env, token, Date.now());
 }
 
-/** `GET /api/now-playing` → Spotify's currently-playing payload, or null when idle. */
+/** How long one answer from Spotify serves every client: a GUI polls every 20 s, perhaps from several devices. */
+const NOW_PLAYING_TTL_SECONDS = 10;
+/** The Cache API request the answer is kept under. */
+export const nowPlayingKey = () => new Request('https://now-playing.internal/v1');
+
+/**
+ * `GET /api/now-playing` → Spotify's currently-playing payload, or null when
+ * idle. One answer is kept for NOW_PLAYING_TTL_SECONDS, so polling clients
+ * share a Spotify call; it is the same for any token, as there is one
+ * Spotify account. Failures are not kept.
+ */
 export async function nowPlaying(env: Env): Promise<Response> {
+  const cache = await caches.open('now-playing');
+  const key = nowPlayingKey();
+  const hit = await cache.match(key);
+  if (hit) {
+    const response = new Response(hit.body, hit);
+    response.headers.set('Cache-Control', 'no-store');
+    response.headers.set('X-Cache', 'hit');
+    return response;
+  }
   const accessToken = await accessTokenFor(env);
   // 204 (nothing playing) comes back as null rather than an error.
-  return json({ item: await spotifyGet(accessToken, '/me/player/currently-playing') });
+  const response = json({ item: await spotifyGet(accessToken, '/me/player/currently-playing') });
+  const stored = response.clone();
+  stored.headers.set('Cache-Control', `max-age=${NOW_PLAYING_TTL_SECONDS}`);
+  await cache.put(key, stored);
+  return response;
 }
 
 /** `GET /api/recently-played?limit=` → Spotify's recently-played payload, newest first. */

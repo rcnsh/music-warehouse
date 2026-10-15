@@ -3,6 +3,7 @@ import { afterEach, beforeEach, vi } from 'vitest';
 import { freezeClock } from './helpers';
 import { edgeRequest } from '../src/snapshots';
 import { detailFromMs, homeCacheKey, olderKey } from '../src/home';
+import { nowPlayingKey } from '../src/live';
 import { buildEras, parseEras } from '../src/eras';
 import { STAT_NAMES, statKey } from '../src/stats';
 
@@ -28,6 +29,7 @@ beforeEach(async () => {
   await edge.delete(edgeRequest(olderKey(detailFromMs(now))));
   const home = await caches.open('home');
   await Promise.all(HOME_ZONES.map((zone) => home.delete(homeCacheKey(zone, now))));
+  await (await caches.open('now-playing')).delete(nowPlayingKey());
   await env.DB.batch([
     env.DB.prepare('DELETE FROM plays'),
     env.DB.prepare('DELETE FROM tracks'),
