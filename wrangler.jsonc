@@ -22,9 +22,10 @@
   // Poll cadence. 48 invocations/day, well inside either plan (the Free plan
   // allows 100,000 requests a day; this deployment is on Workers Paid).
   // Tighten to "*/15 * * * *" if gaps ever appear (see README, "Configuration").
-  // Three cron triggers (Free allows five, Paid 250): ingestion every 30 minutes, a
-  // daily sweep that pushes to ALERT_WEBHOOK_URL when something needs a human,
-  // and the daily concert check (needs TICKETMASTER_API_KEY).
+  // Three cron triggers (Free allows five, Paid 250): ingestion every 30 minutes,
+  // each followed by the alert check that pushes to ALERT_WEBHOOK_URL when
+  // something needs a human; a daily maintenance sweep; and the daily concert
+  // check (needs TICKETMASTER_API_KEY).
   "triggers": {
     "crons": ["*/30 * * * *", "0 9 * * *", "23 1 * * *"]
   },

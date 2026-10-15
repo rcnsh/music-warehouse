@@ -14,14 +14,20 @@ ADMIN_TOKEN=
 # openssl rand -hex 32
 READ_TOKEN=
 
-# Optional. Where the daily alert cron POSTs when something needs a human —
-# a Discord or Slack webhook URL, or https://ntfy.sh/<your-topic>.
+# Optional. Where the alert check after each poll POSTs when something needs a
+# human — a Discord or Slack webhook URL, or https://ntfy.sh/<your-topic>.
 # Unset means conditions are logged but never pushed. See README, "Alerting".
 ALERT_WEBHOOK_URL=
 
 # Optional. Leads every alert body so the receiver pings a human rather than
 # just posting: a Discord `<@id>`, a Slack `<@U…>`, an ntfy tag.
 ALERT_MENTION=
+
+# Optional. A dead-man's switch fetched (GET) after every successful poll,
+# e.g. https://hc-ping.com/<uuid> from healthchecks.io, which alerts when the
+# pings stop: the one alert that still works when the Worker is down.
+# Leave it unset locally, or wrangler dev pings it too. See README, "Heartbeat".
+HEARTBEAT_URL=
 
 # Optional. Comma-separated browser origins allowed to read /api/* with a
 # token, e.g. a Wrapped app on another host, or http://localhost:5173 for its

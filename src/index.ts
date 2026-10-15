@@ -4,7 +4,7 @@ import { health } from './health';
 import { importChunk } from './import';
 import { cleanupOverlapsRoute, cleanupShortGapsRoute, cleanupSkipsRoute } from './cleanup';
 import { poll } from './ingest';
-import { alertCheckRoute, runAlertCheck } from './alerts';
+import { alertCheckRoute, runPollCron } from './alerts';
 import { nowPlaying, recentlyPlayed, topMusic } from './live';
 import { SpotifyError, type TokenResponse, authorizeUrl, exchangeCode, fetchRecentlyPlayed } from './spotify';
 import { NeedsReauthError, getAccessToken, persistTokenResponse } from './tokens';
@@ -33,8 +33,8 @@ import { warmWrappedPresets, wrappedRangesRoute, wrappedRoute } from './wrapped'
 import type { Env } from './types';
 import { log } from './log';
 
-/** The cron expression reserved for the alert sweep; everything else polls. */
-const ALERT_CRON = '0 9 * * *';
+/** The cron expression reserved for the daily sweep; everything else polls. */
+const DAILY_CRON = '0 9 * * *';
 /** Its own invocation, so its Ticketmaster calls get a full subrequest budget. */
 const CONCERT_CRON = '23 1 * * *';
 
@@ -344,9 +344,9 @@ const worker = {
   },
 
   async scheduled(event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
-    // The daily alert sweep shares the scheduled handler, dispatched on which
-    // cron expression fired. So does warming one Wrapped preset a day: one
-    // compute, so its row reads stay small and predictable.
+    // The daily sweep shares the scheduled handler, dispatched on which cron
+    // expression fired. So does warming one Wrapped preset a day: one compute,
+    // so its row reads stay small and predictable.
     if (event.cron === CONCERT_CRON) {
       ctx.waitUntil(
         runConcertCheck(env)
@@ -359,16 +359,11 @@ const worker = {
       );
       return;
     }
-    if (event.cron === ALERT_CRON) {
-      ctx.waitUntil(
-        runAlertCheck(env)
-          .then((result) => {
-            log('alert-check', { result });
-          })
-          .catch((error) => {
-            log('alert-check-failed', { error }, 'error');
-          }),
-      );
+    if (event.cron === DAILY_CRON) {
+      // The alert check is not here: it runs after every poll (runPollCron),
+      // and the poll cron fires at 09:00 too, so a second check here could
+      // race it and push the same alert twice.
+      //
       // Polls only reconcile, index and key songs for what they touched; this
       // catches the rest. The index and song keys follow the reconcile so they
       // see merged artists.
@@ -402,12 +397,15 @@ const worker = {
       return;
     }
 
-    // Same code path as POST /admin/poll, so the manual route really does
-    // exercise what the cron does.
+    // The poll is the same code path as POST /admin/poll, so the manual route
+    // really does exercise what the cron does. The cron then pings
+    // HEARTBEAT_URL and runs the alert check; see src/alerts.ts.
     ctx.waitUntil(
-      poll(env)
+      runPollCron(env)
         .then((result) => {
-          log('poll', { result });
+          log('poll', { result: result.poll });
+          if (result.heartbeat !== null) log('heartbeat', { ok: result.heartbeat }, result.heartbeat ? 'info' : 'warn');
+          if (result.alerts) log('alert-check', { result: result.alerts });
         })
         .catch((error) => {
           // Reaching here means D1 itself is unavailable — most likely the free

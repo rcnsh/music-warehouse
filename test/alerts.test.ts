@@ -5,9 +5,11 @@ import {
   RESEND_AFTER_MS,
   STALL_AFTER_MS,
   evaluate,
+  pingHeartbeat,
   runAlertCheck,
+  runPollCron,
 } from '../src/alerts';
-import type { OAuthToken, SyncState } from '../src/types';
+import type { Env, OAuthToken, SyncState } from '../src/types';
 import { seedAuthorized, testEnv } from './helpers';
 
 const NOW = Date.parse('2026-09-09T09:00:00Z');
@@ -58,7 +60,10 @@ async function seedHealthy(options: { authorizedAtMs?: number } = {}) {
     .run();
 }
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+});
 
 describe('evaluate', () => {
   it('stays quiet when everything is healthy', () => {
@@ -247,5 +252,130 @@ describe('POST /admin/alert-check', () => {
     });
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ firing: [], sent: [] });
+  });
+});
+
+describe('runPollCron', () => {
+  /**
+   * Route the cron's outbound calls: Spotify's recently-played, the heartbeat
+   * and the alert webhook. Anything else (context lookups) is a 404.
+   */
+  function stubCron(options: { spotify?: () => Response; heartbeat?: () => Response } = {}) {
+    const calls = { heartbeat: [] as string[], webhook: [] as Array<Record<string, unknown>> };
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url);
+        if (url.pathname.endsWith('/me/player/recently-played')) {
+          return (options.spotify ?? (() => new Response(JSON.stringify({ items: [] }))))();
+        }
+        if (url.host === 'heartbeat.test') {
+          calls.heartbeat.push(init?.method ?? 'GET');
+          return (options.heartbeat ?? (() => new Response('OK')))();
+        }
+        if (url.host === 'hook.test') {
+          calls.webhook.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+          return new Response('ok');
+        }
+        return new Response('{}', { status: 404 });
+      }),
+    );
+    return calls;
+  }
+
+  const cronEnv = (overrides: Partial<Env> = {}) =>
+    testEnv({ ALERT_WEBHOOK_URL: 'https://hook.test/x', HEARTBEAT_URL: 'https://heartbeat.test/ping', ...overrides });
+  const down = () => new Response('down', { status: 503 });
+
+  /** Authorized, with the last successful poll just past the stall line. */
+  async function seedStalled(now: number) {
+    await seedAuthorized({ authorizedAtMs: now - 10 * DAY });
+    await env.DB.prepare('UPDATE sync_state SET last_success_ms = ? WHERE id = 1')
+      .bind(now - STALL_AFTER_MS - 60_000)
+      .run();
+  }
+
+  it('pings the heartbeat with a GET after a successful poll, and alerts on nothing', async () => {
+    await seedHealthy();
+    const calls = stubCron();
+
+    const result = await runPollCron(cronEnv());
+
+    expect(result.poll.ok).toBe(true);
+    expect(result.heartbeat).toBe(true);
+    expect(calls.heartbeat).toEqual(['GET']);
+    expect(result.alerts?.firing).toEqual([]);
+    expect(calls.webhook).toHaveLength(0);
+  });
+
+  it('sends no heartbeat when the poll fails, so the outside monitor notices', async () => {
+    await seedHealthy();
+    const calls = stubCron({ spotify: down });
+
+    const result = await runPollCron(cronEnv());
+
+    expect(result.poll.ok).toBe(false);
+    expect(result.heartbeat).toBeNull();
+    expect(calls.heartbeat).toEqual([]);
+  });
+
+  it('sends no heartbeat when HEARTBEAT_URL is unset', async () => {
+    await seedHealthy();
+    const calls = stubCron();
+
+    const result = await runPollCron(cronEnv({ HEARTBEAT_URL: undefined }));
+
+    expect(result.poll.ok).toBe(true);
+    expect(result.heartbeat).toBeNull();
+    expect(calls.heartbeat).toEqual([]);
+  });
+
+  it('logs a failed heartbeat rather than failing the poll', async () => {
+    await seedHealthy();
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    stubCron({
+      heartbeat: () => {
+        throw new TypeError('network down');
+      },
+    });
+
+    const result = await runPollCron(cronEnv());
+
+    expect(result.poll.ok).toBe(true);
+    expect(result.heartbeat).toBe(false);
+    expect(result.alerts).not.toBeNull();
+  });
+
+  it('counts a non-2xx heartbeat response as a failed ping', async () => {
+    stubCron({ heartbeat: () => new Response('nope', { status: 500 }) });
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    expect(await pingHeartbeat('https://heartbeat.test/ping')).toBe(false);
+  });
+
+  it('pushes a stall from the poll cron, once per resend window', async () => {
+    const start = Date.now();
+    await seedStalled(start);
+    const calls = stubCron({ spotify: down });
+    const cron = cronEnv();
+
+    expect((await runPollCron(cron, start)).alerts?.sent).toEqual(['ingestion_stalled']);
+
+    // The next tick, half an hour on and still failing, stays quiet.
+    const second = await runPollCron(cron, start + 30 * 60_000);
+    expect(second.alerts?.suppressed).toEqual(['ingestion_stalled']);
+    expect(calls.webhook.map((body) => body.key)).toEqual(['ingestion_stalled']);
+  });
+
+  it('clears the stall as soon as a poll succeeds again', async () => {
+    const start = Date.now();
+    await seedStalled(start);
+    stubCron({ spotify: down });
+    await runPollCron(cronEnv(), start);
+
+    vi.unstubAllGlobals();
+    stubCron();
+    const recovered = await runPollCron(cronEnv(), start + 30 * 60_000);
+    expect(recovered.poll.ok).toBe(true);
+    expect(recovered.alerts?.cleared).toEqual(['ingestion_stalled']);
   });
 });

@@ -1,5 +1,6 @@
 import { json } from './api';
 import { readState } from './db';
+import { type PollResult, poll } from './ingest';
 import { daysUntilTokenExpiry } from './tokens';
 import type { Env, OAuthToken, SyncState } from './types';
 import { log } from './log';
@@ -8,8 +9,14 @@ import { log } from './log';
  * Unattended monitoring.
  *
  * /health reports everything needed to spot a dead collector, but only if
- * something reads it. This is that something: a daily cron evaluates the same
- * state and pushes to a webhook when it needs a human.
+ * something reads it. This is that something: the half-hourly poll cron
+ * evaluates the same state after each poll and pushes to a webhook when it
+ * needs a human, so a stall is reported within one tick of crossing
+ * STALL_AFTER_MS.
+ *
+ * None of that runs when the Worker or its crons are down, so a successful
+ * poll also pings HEARTBEAT_URL: an outside dead-man's switch
+ * (healthchecks.io and the like) alerts when the pings stop.
  *
  * Every condition here needs manual intervention. Nothing transient is alerted
  * on — a single failed poll costs nothing, because the cursor never advanced.
@@ -226,4 +233,54 @@ export async function runAlertCheck(
 export async function alertCheckRoute(env: Env, url: URL): Promise<Response> {
   const force = url.searchParams.get('force') === '1';
   return json(await runAlertCheck(env, Date.now(), { force }));
+}
+
+/** How long a heartbeat ping may take before it is abandoned. */
+const HEARTBEAT_TIMEOUT_MS = 5_000;
+
+/**
+ * GET the dead-man's switch. Never throws: a monitor that is down must not
+ * fail the poll it reports on, and a missed ping is exactly what the monitor
+ * is there to notice. Returns whether the ping was accepted, for the log.
+ */
+export async function pingHeartbeat(url: string): Promise<boolean> {
+  try {
+    const response = await fetch(url, { signal: AbortSignal.timeout(HEARTBEAT_TIMEOUT_MS) });
+    if (!response.ok) {
+      log('heartbeat-ping-rejected', { status: response.status }, 'warn');
+      return false;
+    }
+    return true;
+  } catch (error) {
+    log('heartbeat-ping-failed', { error }, 'warn');
+    return false;
+  }
+}
+
+export interface PollCronResult {
+  poll: PollResult;
+  /** Whether HEARTBEAT_URL accepted the ping; null when none was sent. */
+  heartbeat: boolean | null;
+  /** Null when the alert check itself failed (logged). */
+  alerts: AlertRunResult | null;
+}
+
+/**
+ * What the half-hourly cron does: poll, ping the heartbeat if the poll
+ * succeeded, then run the alert check against the state the poll just left.
+ *
+ * The check runs every tick, and its resend window keeps each condition to
+ * one push a day. It reads two one-row tables and the small alerts table, so
+ * 48 runs a day cost next to nothing.
+ */
+export async function runPollCron(env: Env, now: number = Date.now()): Promise<PollCronResult> {
+  const result = await poll(env, now);
+  const heartbeat = result.ok && env.HEARTBEAT_URL ? await pingHeartbeat(env.HEARTBEAT_URL) : null;
+  let alerts: AlertRunResult | null = null;
+  try {
+    alerts = await runAlertCheck(env, now);
+  } catch (error) {
+    log('alert-check-failed', { error }, 'error');
+  }
+  return { poll: result, heartbeat, alerts };
 }
