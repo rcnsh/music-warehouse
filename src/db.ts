@@ -1,3 +1,4 @@
+import { syncSearchIndex } from './search-index';
 import type { NormalizedRows, OAuthToken, SyncState } from './types';
 
 /**
@@ -225,5 +226,7 @@ export function writeStatements(db: D1Database, rows: NormalizedRows): D1Prepare
     // Runs last, after the real artists and links are in place: a poll that
     // teaches us an artist's real id retires every name-keyed row for it.
     ...reconcileArtistsInPoll(db, rows),
+    // After the reconcile, so the text names the artists the track ends up with.
+    ...(rows.tracks.length ? [syncSearchIndex(db, [...new Set(rows.tracks.map((t) => t.track_id))])] : []),
   ];
 }

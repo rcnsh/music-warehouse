@@ -1,6 +1,7 @@
 import { env } from 'cloudflare:test';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { writeStatements } from '../src/db';
+import { syncSearchIndex } from '../src/search-index';
 import type { NormalizedRows } from '../src/types';
 
 /** A payload shaped like one poll of a single track. */
@@ -25,9 +26,15 @@ async function applyAndCountWrites(rows: NormalizedRows): Promise<number> {
   return results.reduce((total, r) => total + (r.meta?.rows_written ?? 0), 0);
 }
 
+/** Seeds a stored track as a poll would leave it: in the name index too. */
+async function seedTrack(sql: string) {
+  await env.DB.batch([env.DB.prepare(sql), syncSearchIndex(env.DB)]);
+}
+
 describe('tracks upsert guard', () => {
   beforeEach(async () => {
     await env.DB.batch([
+      env.DB.prepare('DELETE FROM track_search_text'),
       env.DB.prepare('DELETE FROM track_artists'),
       env.DB.prepare('DELETE FROM tracks'),
     ]);
@@ -56,9 +63,7 @@ describe('tracks upsert guard', () => {
   });
 
   it('writes nothing when the row is already complete', async () => {
-    await env.DB.prepare(
-      "INSERT INTO tracks (track_id, name, duration_ms, album_id, isrc, first_seen_ms) VALUES ('t1','Sad Machine',180000,'alb1','ISRC1',5000)",
-    ).run();
+    await seedTrack("INSERT INTO tracks (track_id, name, duration_ms, album_id, isrc, first_seen_ms) VALUES ('t1','Sad Machine',180000,'alb1','ISRC1',5000)");
 
     const written = await applyAndCountWrites(payload({ duration_ms: 180_000, album_id: 'alb1', isrc: 'ISRC1' }));
 
@@ -68,12 +73,38 @@ describe('tracks upsert guard', () => {
   it('writes nothing for a track that genuinely has no ISRC upstream', async () => {
     // The regression the paired `excluded.<column> IS NOT NULL` conditions
     // prevent: a bare `isrc IS NULL` guard would rewrite this on every poll.
-    await env.DB.prepare(
-      "INSERT INTO tracks (track_id, name, duration_ms, album_id, isrc, first_seen_ms) VALUES ('t1','Sad Machine',180000,'alb1',NULL,5000)",
-    ).run();
+    await seedTrack("INSERT INTO tracks (track_id, name, duration_ms, album_id, isrc, first_seen_ms) VALUES ('t1','Sad Machine',180000,'alb1',NULL,5000)");
 
     const written = await applyAndCountWrites(payload({ duration_ms: 180_000, album_id: 'alb1', isrc: null }));
 
     expect(written).toBe(0);
+  });
+});
+
+describe('search index upkeep on a poll', () => {
+  beforeEach(async () => {
+    await env.DB.batch([
+      env.DB.prepare('DELETE FROM track_search_text'),
+      env.DB.prepare('DELETE FROM track_artists'),
+      env.DB.prepare('DELETE FROM tracks'),
+    ]);
+  });
+
+  const searchRow = () => env.DB.prepare('SELECT text FROM track_search_text WHERE track_id = ?').bind('t1').first<{ text: string }>();
+
+  it('indexes a new track, then rewrites it when the poll fills in its album', async () => {
+    await applyAndCountWrites(payload({}));
+    expect((await searchRow())?.text).toBe('Sad Machine |  | ');
+
+    await env.DB.prepare("INSERT INTO albums (album_id, name) VALUES ('alb1', 'Worlds')").run();
+    await applyAndCountWrites(payload({ album_id: 'alb1' }));
+    expect((await searchRow())?.text).toBe('Sad Machine | Worlds | ');
+    const hits = await env.DB.prepare("SELECT rowid FROM track_search WHERE track_search MATCH '\"worlds\"'").all();
+    expect(hits.results).toHaveLength(1);
+  });
+
+  it('writes nothing to the index when the track is unchanged', async () => {
+    await applyAndCountWrites(payload({ duration_ms: 1, album_id: null, isrc: 'I' }));
+    expect(await applyAndCountWrites(payload({ duration_ms: 1, album_id: null, isrc: 'I' }))).toBe(0);
   });
 });

@@ -1,6 +1,7 @@
 import { SELF, env } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
 import { normalizeExport } from '../src/import';
+import { syncSearchIndex } from '../src/search-index';
 import { seedAuthorized } from './helpers';
 
 const BASE = 'https://warehouse.test';
@@ -269,7 +270,8 @@ describe('searching plays with q', () => {
       plays.push(env.DB.prepare('INSERT INTO plays (played_at_ms, track_id, source) VALUES (?, ?, ?)').bind(ms, day % 2 ? 'sad' : 'div', 'api'));
       plays.push(env.DB.prepare('INSERT INTO plays (played_at_ms, track_id, source) VALUES (?, ?, ?)').bind(ms + 1, day % 2 ? 'pct' : 'exp', 'export'));
     }
-    await env.DB.batch(plays);
+    // Seeded straight into the tables, so build the name index as the daily sync would.
+    await env.DB.batch([...plays, syncSearchIndex(env.DB)]);
   }
 
   async function search(query: string) {
@@ -329,9 +331,41 @@ describe('searching plays with q', () => {
         env.DB.prepare('INSERT INTO plays (played_at_ms, track_id, source) VALUES (?, ?, ?)').bind(base + i, `m${i}`, 'api'),
       );
     }
-    await env.DB.batch(statements);
+    await env.DB.batch([...statements, syncSearchIndex(env.DB)]);
     const plays = await search('q=common&limit=3');
     expect(plays.map((p) => p.track_id)).toEqual(['m599', 'm598', 'm597']);
+  });
+
+  it('echoes q so a client can tell the filter was applied', async () => {
+    await seedCatalog();
+    const body = (await (await get('/api/plays?q=porter')).json()) as { q?: string };
+    expect(body.q).toBe('porter');
+    const none = (await (await get('/api/plays?q=zzzzz')).json()) as { q?: string };
+    expect(none.q).toBe('zzzzz');
+    const plain = (await (await get('/api/plays')).json()) as { q?: string };
+    expect(plain.q).toBeUndefined();
+  });
+
+  it('ignores accents and case beyond ASCII', async () => {
+    await env.DB.batch([
+      env.DB.prepare('INSERT INTO tracks (track_id, name, duration_ms, first_seen_ms) VALUES (?, ?, 1, 0)').bind('apt', 'APT.'),
+      env.DB.prepare('INSERT INTO artists (artist_id, name) VALUES (?, ?)').bind('rose', 'ROSÉ'),
+      env.DB.prepare('INSERT INTO track_artists (track_id, artist_id, position) VALUES (?, ?, 0)').bind('apt', 'rose'),
+      env.DB.prepare('INSERT INTO plays (played_at_ms, track_id, source) VALUES (?, ?, ?)').bind(base, 'apt', 'api'),
+      syncSearchIndex(env.DB),
+    ]);
+    expect((await search('q=rose')).map((p) => p.track_id)).toEqual(['apt']);
+    expect((await search('q=ros%C3%A9')).map((p) => p.track_id)).toEqual(['apt']);
+  });
+
+  it('matches one and two character queries without the index', async () => {
+    await seedCatalog();
+    expect(new Set((await search('q=sa')).map((p) => p.track_id))).toEqual(new Set(['sad']));
+  });
+
+  it('treats a double quote in the query literally', async () => {
+    await seedCatalog();
+    expect(await search('q=%22porter')).toEqual([]);
   });
 
   it('rejects an overlong q', async () => {

@@ -339,7 +339,7 @@ These read only D1, so they keep working when the Spotify grant has lapsed.
 | `limit` | `50` | 1 to 500. |
 | `before` | none | Only plays before this epoch-ms. Pass the last `played_at_ms` to page. |
 | `after` | none | Only plays after this epoch-ms. |
-| `q` | none | Only plays whose track, album or any artist name contains this (case-insensitive, ASCII only, at most 200 characters). Pages with `before` like the unfiltered list. |
+| `q` | none | Only plays whose track, album or any artist name contains this, ignoring case and accents (at most 200 characters). Pages with `before` like the unfiltered list, and the response echoes `q`. |
 
 ```json
 { "plays": [ { "played_at_ms": 1760521802000, "track_id": "…", "track_name": "Shelter",
@@ -351,8 +351,10 @@ These read only D1, so they keep working when the Spotify grant has lapsed.
 
 `source` is `api` for polled plays and `export` for imported ones.
 
-With `q`, `rows_read` includes the name match: about 11k rows on a warehouse
-of 6,000 tracks, plus the plays read to fill the page.
+With `q`, matching names reads about one row per matching track, from a
+trigram index (migration 0011), plus the plays read to fill the page. One- and
+two-character queries can't use the index and scan the name tables instead,
+about 11k rows, matching case-insensitively for ASCII only.
 
 **`GET /api/top-artists`**: play counts per artist. Params: `from` (default 29
 days ago), `to` (default today), `tz`, `limit` (1 to 500, default 50).

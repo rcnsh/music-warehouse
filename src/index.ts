@@ -8,6 +8,7 @@ import { nowPlaying, recentlyPlayed, topMusic } from './live';
 import { SpotifyError, type TokenResponse, authorizeUrl, exchangeCode, fetchRecentlyPlayed } from './spotify';
 import { NeedsReauthError, getAccessToken, persistTokenResponse } from './tokens';
 import { readState, reconcileNameKeyedArtists } from './db';
+import { syncSearchIndex } from './search-index';
 import { accessFor, createTokenRoute, listTokensRoute, listedOrigins, revokeTokenRoute } from './auth';
 import { SnapshotPending } from './snapshots';
 import { isStatName, statRoute } from './stats';
@@ -332,10 +333,11 @@ const worker = {
             console.error('alert-check failed', error);
           }),
       );
-      // Polls only reconcile what they touched; this catches the rest.
+      // Polls only reconcile and index what they touched; this catches the
+      // rest. The index sync runs after the reconcile so it sees merged artists.
       ctx.waitUntil(
-        env.DB.batch(reconcileNameKeyedArtists(env.DB)).catch((error) => {
-          console.error('artist-reconcile failed', error);
+        env.DB.batch([...reconcileNameKeyedArtists(env.DB), syncSearchIndex(env.DB)]).catch((error) => {
+          console.error('artist-reconcile or search-index sync failed', error);
         }),
       );
       ctx.waitUntil(

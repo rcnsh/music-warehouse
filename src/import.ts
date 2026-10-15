@@ -1,5 +1,6 @@
 import { json } from './api';
 import { NAME_KEY_PREFIX, buildInserts, reconcileNameKeyedArtists } from './db';
+import { syncSearchIndex } from './search-index';
 import type { Env } from './types';
 
 /**
@@ -133,6 +134,7 @@ export async function importChunk(env: Env, request: Request): Promise<Response>
     // Name keys just written for an artist the poller already knows by id are
     // redundant; fold them in rather than leaving a duplicate behind.
     ...reconcileNameKeyedArtists(env.DB),
+    syncSearchIndex(env.DB, rows.tracks.map((track) => track.track_id)),
   ]);
 
   let inserted = 0;

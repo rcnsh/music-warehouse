@@ -1,5 +1,6 @@
 import { DEFAULT_TIMEZONE, endOfLocalDayUtcMs, isValidTimeZone, localDayKey, startOfLocalDayUtcMs } from './tz';
 import { textParam } from './history';
+import { trigramPhrase } from './search-index';
 import type { Env } from './types';
 
 export class BadRequest extends Error {}
@@ -67,22 +68,34 @@ const PLAY_COLUMNS = `p.played_at_ms, p.track_id, p.context_uri, p.context_type,
                       ORDER BY ta.position)) AS artists`;
 
 /**
- * Ids of tracks whose title, album or any credited artist contains `q`
- * (case-insensitive, ASCII only, as LIKE is). Artists are read first so
- * their tracks come from idx_track_artists_artist rather than a scan of
- * track_artists; the three name tables are a few thousand rows each.
+ * Ids of tracks whose title, album or any credited artist contains `q`.
+ *
+ * The trigram index (migration 0011) reads about one row per match and
+ * ignores case and accents. It cannot answer fewer than three characters, so
+ * those fall back to LIKE scans of the three name tables (about 11k rows,
+ * case-insensitive for ASCII only). Artists are read first there so their
+ * tracks come from idx_track_artists_artist rather than a scan of
+ * track_artists.
  */
 async function matchingTrackIds(env: Env, q: string): Promise<{ ids: string[]; rowsRead: number }> {
-  const result = await env.DB.prepare(
-    `SELECT track_id FROM tracks
-      WHERE name LIKE ?1 ESCAPE '\\'
-         OR album_id IN (SELECT album_id FROM albums WHERE name LIKE ?1 ESCAPE '\\')
-     UNION
-     SELECT ta.track_id FROM artists a CROSS JOIN track_artists ta ON ta.artist_id = a.artist_id
-      WHERE a.name LIKE ?1 ESCAPE '\\'`,
-  )
-    .bind(likePattern(q))
-    .all<{ track_id: string }>();
+  const phrase = trigramPhrase(q);
+  const result = phrase
+    ? await env.DB.prepare(
+        `SELECT s.track_id FROM track_search f JOIN track_search_text s ON s.id = f.rowid
+          WHERE track_search MATCH ?`,
+      )
+        .bind(phrase)
+        .all<{ track_id: string }>()
+    : await env.DB.prepare(
+        `SELECT track_id FROM tracks
+          WHERE name LIKE ?1 ESCAPE '\\'
+             OR album_id IN (SELECT album_id FROM albums WHERE name LIKE ?1 ESCAPE '\\')
+         UNION
+         SELECT ta.track_id FROM artists a CROSS JOIN track_artists ta ON ta.artist_id = a.artist_id
+          WHERE a.name LIKE ?1 ESCAPE '\\'`,
+      )
+        .bind(likePattern(q))
+        .all<{ track_id: string }>();
   return { ids: result.results.map((row) => row.track_id), rowsRead: result.meta?.rows_read ?? 0 };
 }
 
@@ -119,7 +132,7 @@ export async function recentPlays(env: Env, url: URL): Promise<Response> {
 
   const match = await matchingTrackIds(env, q);
   if (match.ids.length === 0) {
-    return json({ plays: [], _meta: { rows_read: match.rowsRead, duration_ms: null } });
+    return json({ q, plays: [], _meta: { rows_read: match.rowsRead, duration_ms: null } });
   }
   // The ids travel as one JSON parameter, since D1 allows only 100 bound
   // parameters. `+p.track_id` stops SQLite using idx_plays_track, which
@@ -138,7 +151,10 @@ export async function recentPlays(env: Env, url: URL): Promise<Response> {
     .bind(JSON.stringify(match.ids), before, after, limit)
     .all();
 
+  // `q` echoes the filter, so a client can tell a filtered page from an
+  // older Worker that ignored the parameter.
   return json({
+    q,
     plays: query.results,
     _meta: {
       rows_read: match.rowsRead + (query.meta?.rows_read ?? 0),
