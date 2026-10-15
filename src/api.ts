@@ -57,7 +57,10 @@ export const likePattern = (term: string) => `%${term.replace(/[\\%_]/g, (c) => 
  */
 const WALK_ABOVE_TRACKS = 500;
 
-const PLAY_COLUMNS = `p.played_at_ms, p.track_id, p.context_uri, p.context_type, p.source,
+/** Joined by every play query, for PLAY_COLUMNS' play number. */
+const PLAY_NUMBER_JOIN = 'LEFT JOIN play_numbers pn ON pn.played_at_ms = p.played_at_ms AND pn.track_id = p.track_id';
+
+const PLAY_COLUMNS = `p.played_at_ms, p.track_id, p.context_uri, p.context_type, p.source, pn.n AS play_number,
             t.name AS track_name, t.duration_ms, t.isrc,
             al.name AS album_name, al.image_url,
             (SELECT group_concat(name, ', ')
@@ -128,6 +131,14 @@ async function cachedMatchingTrackIds(env: Env, q: string): Promise<{ ids: strin
     new Response(JSON.stringify(match.ids), { headers: { 'Cache-Control': `max-age=${MATCH_TTL_SECONDS}` } }),
   );
   return { ids: match.ids, rowsRead: match.rowsRead + 1 };
+}
+
+/**
+ * `first_play` beside `play_number`, as a boolean. Null when a play has no
+ * number yet: one stored by a write that predates migration 0012's upkeep.
+ */
+function withFirstPlay(rows: Record<string, unknown>[]): Record<string, unknown>[] {
+  return rows.map((row) => ({ ...row, first_play: row.play_number == null ? null : row.play_number === 1 }));
 }
 
 /** The filters /api/plays and /api/daily share. Each is echoed in the response when given. */
@@ -205,6 +216,7 @@ export async function recentPlays(env: Env, url: URL): Promise<Response> {
          FROM plays p
          LEFT JOIN tracks t  ON t.track_id = p.track_id
          LEFT JOIN albums al ON al.album_id = t.album_id
+         ${PLAY_NUMBER_JOIN}
         WHERE p.played_at_ms < ? AND p.played_at_ms > ?
         ORDER BY p.played_at_ms DESC
         LIMIT ?`,
@@ -212,7 +224,7 @@ export async function recentPlays(env: Env, url: URL): Promise<Response> {
       .bind(before, after, limit)
       .all();
     return json({
-      plays: query.results,
+      plays: withFirstPlay(query.results),
       _meta: { rows_read: query.meta?.rows_read ?? null, duration_ms: query.meta?.duration ?? null },
     });
   }
@@ -241,6 +253,7 @@ export async function recentPlays(env: Env, url: URL): Promise<Response> {
        JOIN plays p ON p.played_at_ms = page.played_at_ms AND p.track_id = page.track_id
        LEFT JOIN tracks t  ON t.track_id = p.track_id
        LEFT JOIN albums al ON al.album_id = t.album_id
+       ${PLAY_NUMBER_JOIN}
       ORDER BY p.played_at_ms DESC, p.track_id DESC`,
   )
     .bind(JSON.stringify(match.ids), before, after, limit)
@@ -248,7 +261,7 @@ export async function recentPlays(env: Env, url: URL): Promise<Response> {
 
   return json({
     ...filter,
-    plays: query.results,
+    plays: withFirstPlay(query.results),
     _meta: {
       rows_read: match.rowsRead + (query.meta?.rows_read ?? 0),
       duration_ms: query.meta?.duration ?? null,

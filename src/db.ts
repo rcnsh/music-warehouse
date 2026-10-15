@@ -1,3 +1,4 @@
+import { songStatements } from './play-numbers';
 import { syncSearchIndex } from './search-index';
 import type { NormalizedRows, OAuthToken, SyncState } from './types';
 
@@ -228,5 +229,7 @@ export function writeStatements(db: D1Database, rows: NormalizedRows): D1Prepare
     ...reconcileArtistsInPoll(db, rows),
     // After the reconcile, so the text names the artists the track ends up with.
     ...(rows.tracks.length ? [syncSearchIndex(db, [...new Set(rows.tracks.map((t) => t.track_id))])] : []),
+    // Also after the reconcile: a song's key is its primary artist's name.
+    ...songStatements(db, rows.tracks.map((t) => t.track_id), rows.plays),
   ];
 }

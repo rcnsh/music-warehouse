@@ -1,5 +1,6 @@
 import { json } from './api';
 import { NAME_KEY_PREFIX, buildInserts, reconcileNameKeyedArtists } from './db';
+import { songStatements } from './play-numbers';
 import { syncSearchIndex } from './search-index';
 import type { Env } from './types';
 
@@ -135,6 +136,7 @@ export async function importChunk(env: Env, request: Request): Promise<Response>
     // redundant; fold them in rather than leaving a duplicate behind.
     ...reconcileNameKeyedArtists(env.DB),
     syncSearchIndex(env.DB, rows.tracks.map((track) => track.track_id)),
+    ...songStatements(env.DB, rows.tracks.map((track) => track.track_id), rows.plays),
   ]);
 
   let inserted = 0;

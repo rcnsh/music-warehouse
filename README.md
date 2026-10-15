@@ -379,11 +379,20 @@ walking everyone's.
 { "plays": [ { "played_at_ms": 1760521802000, "track_id": "…", "track_name": "Shelter",
                "artists": "Porter Robinson, Madeon", "album_name": "Shelter", "image_url": "https://i.scdn.co/…",
                "duration_ms": 219000, "isrc": "…", "context_uri": "spotify:playlist:…", "context_type": "playlist",
-               "source": "api" } ],
+               "source": "api", "play_number": 96, "first_play": false } ],
   "_meta": { "rows_read": 50, "duration_ms": 1.2 } }
 ```
 
 `source` is `api` for polled plays and `export` for imported ones.
+
+`play_number` says which play of its song this was, counting every edition
+the way `/api/track` folds them (same title and primary artist, ignoring
+ASCII case), and `first_play` is `true` for a song's first ever play. Both are
+`null` only for a play with no stored track. They come from a table kept up
+to date by every poll and import (migration 0012), so they cost one row read
+per play; an import of older plays renumbers the later plays of each song it
+touches. A track whose title or primary artist changes (the daily artist
+reconcile can do this) moves to its new song by the next daily sweep.
 
 With `q`, matching names reads about one row per matching track, from a
 trigram index (migration 0011), plus the plays read to fill the page. One- and

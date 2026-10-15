@@ -1,6 +1,7 @@
 import { env } from 'cloudflare:test';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { writeStatements } from '../src/db';
+import { syncAllSongs } from '../src/play-numbers';
 import { syncSearchIndex } from '../src/search-index';
 import type { NormalizedRows } from '../src/types';
 
@@ -26,15 +27,16 @@ async function applyAndCountWrites(rows: NormalizedRows): Promise<number> {
   return results.reduce((total, r) => total + (r.meta?.rows_written ?? 0), 0);
 }
 
-/** Seeds a stored track as a poll would leave it: in the name index too. */
+/** Seeds a stored track as a poll would leave it: in the name index and keyed to its song too. */
 async function seedTrack(sql: string) {
-  await env.DB.batch([env.DB.prepare(sql), syncSearchIndex(env.DB)]);
+  await env.DB.batch([env.DB.prepare(sql), syncSearchIndex(env.DB), ...syncAllSongs(env.DB)]);
 }
 
 describe('tracks upsert guard', () => {
   beforeEach(async () => {
     await env.DB.batch([
       env.DB.prepare('DELETE FROM track_search_text'),
+      env.DB.prepare('DELETE FROM track_songs'),
       env.DB.prepare('DELETE FROM track_artists'),
       env.DB.prepare('DELETE FROM tracks'),
     ]);
@@ -85,6 +87,7 @@ describe('search index upkeep on a poll', () => {
   beforeEach(async () => {
     await env.DB.batch([
       env.DB.prepare('DELETE FROM track_search_text'),
+      env.DB.prepare('DELETE FROM track_songs'),
       env.DB.prepare('DELETE FROM track_artists'),
       env.DB.prepare('DELETE FROM tracks'),
     ]);
