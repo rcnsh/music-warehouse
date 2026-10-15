@@ -187,8 +187,33 @@ describe('read endpoints (R9)', () => {
       env.DB.prepare('INSERT OR IGNORE INTO track_artists (track_id, artist_id, position) VALUES (?, ?, 0)').bind('t1', 'a1'),
     ]);
 
-    const body = (await (await get('/api/plays')).json()) as { plays: Array<{ artists: string }> };
+    const body = (await (await get('/api/plays')).json()) as {
+      plays: Array<{ artists: string; artist_list: Array<{ id: string; name: string }> }>;
+    };
     expect(body.plays[0]!.artists).toBe('First, Second');
+    expect(body.plays[0]!.artist_list).toEqual([
+      { id: 'a1', name: 'First' },
+      { id: 'a2', name: 'Second' },
+    ]);
+  });
+
+  it('keeps a comma inside one artist\'s name in artist_list', async () => {
+    const ms = Date.parse('2026-09-08T12:00:00Z');
+    await seedPlays([
+      { ms, trackId: 't1', artistId: 'tyler', artistName: 'Tyler, The Creator' },
+      { ms: ms + 1, trackId: 't2', artistId: 'name:someone', artistName: 'Someone' },
+    ]);
+    // A track with no stored credits still has a list, just an empty one.
+    await env.DB.prepare('DELETE FROM track_artists WHERE track_id = ?').bind('t2').run();
+
+    const body = (await (await get('/api/plays')).json()) as {
+      plays: Array<{ track_id: string; artists: string | null; artist_list: Array<{ id: string; name: string }> }>;
+    };
+    const byId = new Map(body.plays.map((play) => [play.track_id, play]));
+    expect(byId.get('t1')!.artists).toBe('Tyler, The Creator');
+    expect(byId.get('t1')!.artist_list).toEqual([{ id: 'tyler', name: 'Tyler, The Creator' }]);
+    expect(byId.get('t2')!.artists).toBeNull();
+    expect(byId.get('t2')!.artist_list).toEqual([]);
   });
 
   it('buckets the same rows into different local days per timezone', async () => {

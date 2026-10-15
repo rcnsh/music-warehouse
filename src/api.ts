@@ -66,12 +66,27 @@ export const PLAY_COLUMNS = `p.played_at_ms, p.track_id, p.context_uri, p.contex
             pn.n AS play_number,
             t.name AS track_name, t.duration_ms, t.isrc,
             al.name AS album_name, al.image_url,
-            (SELECT group_concat(name, ', ')
-               FROM (SELECT a.name
+            (SELECT json_group_array(json_object('id', artist_id, 'name', name))
+               FROM (SELECT a.artist_id, a.name
                        FROM track_artists ta
                        JOIN artists a ON a.artist_id = ta.artist_id
                       WHERE ta.track_id = p.track_id
-                      ORDER BY ta.position)) AS artists`;
+                      ORDER BY ta.position)) AS artist_list`;
+
+/**
+ * Turns PLAY_COLUMNS' JSON `artist_list` into an array and derives the older
+ * `artists` string from it. One read of the credits serves both, so a page
+ * costs what it did when the string came straight from SQL. A track with no
+ * credits keeps `artists: null`, as group_concat gave.
+ */
+export function withArtistList(rows: Record<string, unknown>[]): Record<string, unknown>[] {
+  return rows.map((row) => {
+    const raw = row.artist_list;
+    const list: Array<{ id: string; name: string }> = typeof raw === 'string' ? JSON.parse(raw) : [];
+    const { artist_list: _, ...rest } = row;
+    return { ...rest, artists: list.length ? list.map((a) => a.name).join(', ') : null, artist_list: list };
+  });
+}
 
 /**
  * Ids of tracks whose title, album or any credited artist contains `q`.
@@ -227,7 +242,8 @@ export function selectPlays(
         LIMIT ?`,
     )
       .bind(...upper, after, limit)
-      .all();
+      .all()
+      .then(withArtists);
   }
   // The ids travel as one JSON parameter, since D1 allows only 100 bound
   // parameters. `+p.track_id` stops SQLite using idx_plays_track, which
@@ -251,8 +267,11 @@ export function selectPlays(
       ORDER BY p.played_at_ms DESC, p.track_id DESC`,
   )
     .bind(JSON.stringify(ids), ...upper, after, limit)
-    .all();
+    .all()
+    .then(withArtists);
 }
+
+const withArtists = (result: D1Result<Record<string, unknown>>) => ({ ...result, results: withArtistList(result.results) });
 
 /**
  * Most recent plays, newest first, joined to track, album and artist names.
