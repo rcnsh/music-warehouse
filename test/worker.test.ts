@@ -73,6 +73,51 @@ describe('authorization (R11)', () => {
   });
 });
 
+describe('CORS', () => {
+  const WRAPPED = 'https://wrapped.test';
+
+  it('answers a preflight from a listed origin without a token', async () => {
+    const response = await SELF.fetch(`${BASE}/api/wrapped`, {
+      method: 'OPTIONS',
+      headers: { Origin: WRAPPED, 'Access-Control-Request-Method': 'GET', 'Access-Control-Request-Headers': 'authorization' },
+    });
+    expect(response.status).toBe(204);
+    expect(response.headers.get('Access-Control-Allow-Origin')).toBe(WRAPPED);
+    expect(response.headers.get('Access-Control-Allow-Headers')).toBe('Authorization');
+  });
+
+  it('matches a listed origin written with a trailing slash', async () => {
+    const response = await get('/api/plays', { headers: { ...AUTH, Origin: 'https://other.test' } });
+    expect(response.headers.get('Access-Control-Allow-Origin')).toBe('https://other.test');
+  });
+
+  it('marks an authenticated /api response readable by a listed origin', async () => {
+    const response = await get('/api/plays', { headers: { ...AUTH, Origin: WRAPPED } });
+    expect(response.status).toBe(200);
+    expect(response.headers.get('Access-Control-Allow-Origin')).toBe(WRAPPED);
+    expect(response.headers.get('Access-Control-Expose-Headers')).toContain('Retry-After');
+  });
+
+  it('still requires the token from a listed origin', async () => {
+    const response = await SELF.fetch(`${BASE}/api/plays`, { headers: { Origin: WRAPPED } });
+    expect(response.status).toBe(401);
+    expect(response.headers.get('Access-Control-Allow-Origin')).toBe(WRAPPED);
+  });
+
+  it('says nothing to an origin that is not listed', async () => {
+    const preflight = await SELF.fetch(`${BASE}/api/plays`, { method: 'OPTIONS', headers: { Origin: 'https://evil.test' } });
+    expect(preflight.status).toBe(401);
+    expect(preflight.headers.get('Access-Control-Allow-Origin')).toBeNull();
+    const response = await get('/api/plays', { headers: { ...AUTH, Origin: 'https://evil.test' } });
+    expect(response.headers.get('Access-Control-Allow-Origin')).toBeNull();
+  });
+
+  it('never opens the admin routes to another origin', async () => {
+    const response = await get('/health', { headers: { ...AUTH, Origin: WRAPPED } });
+    expect(response.headers.get('Access-Control-Allow-Origin')).toBeNull();
+  });
+});
+
 describe('/health (R6)', () => {
   it('reports liveness, totals and token expiry', async () => {
     const now = Date.now();

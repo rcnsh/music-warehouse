@@ -143,6 +143,20 @@ range), and a listening age. It feeds
 [music-warehouse-wrapped](https://github.com/rcnsh/music-warehouse-wrapped),
 which turns it into a story and an MP4.
 
+That app holds no link to any warehouse: its reader types in their own
+warehouse URL and token, and the browser calls the warehouse directly. For
+that, list the app's origin in the `CORS_ORIGINS` secret (comma-separated, or
+`*`), and let preflights past the WAF rule (see
+[Before exposing the URL publicly](#before-exposing-the-url-publicly)):
+
+```bash
+npx wrangler secret put CORS_ORIGINS   # e.g. https://wrapped.example.workers.dev
+```
+
+It is a secret rather than a var only so that this public repo doesn't name
+the deployment. CORS covers `/api/*` and nothing else, and every request still
+needs a token; unset, the Worker sends no CORS headers at all.
+
 It is private, not a public stat: it names days. It also takes parameters, so
 anyone holding a token could mint new keys and force scans. `ADMIN_TOKEN`
 computes any range. `READ_TOKEN` reads any range already computed, computes
@@ -274,6 +288,7 @@ npx wrangler secret put READ_TOKEN           # optional, openssl rand -hex 32
 npx wrangler secret put ALERT_WEBHOOK_URL    # optional, see Alerting
 npx wrangler secret put ALERT_MENTION        # optional, see Alerting
 npx wrangler secret put MOVED_AT             # optional, see Listening stats
+npx wrangler secret put CORS_ORIGINS         # optional, see Wrapped
 ```
 
 `npx wrangler secret list` shows what is set. For local work, copy
@@ -295,13 +310,16 @@ is invoked — and it uses a different quota from the single rate limiting rule
 the free plan allows:
 
 ```txt
-(http.host eq "your-hostname.example" and http.request.uri.path ne "/callback" and not len(http.request.headers["authorization"][0]) > 0)
+(http.host eq "your-hostname.example" and http.request.uri.path ne "/callback" and http.request.method ne "OPTIONS" and not len(http.request.headers["authorization"][0]) > 0)
 ```
 
 Action: _Block_. Every legitimate caller sends `Authorization: Bearer …`, so
 this is the same check the Worker already makes, moved one hop earlier.
 `/callback` stays open for Spotify's browser redirect, guarded by its
-single-use `state` value.
+single-use `state` value. `OPTIONS` stays open because a browser's CORS
+preflight never carries the header; the Worker answers it only for an origin
+in `CORS_ORIGINS`, and it returns no data. Without `CORS_ORIGINS`, drop that
+clause.
 
 ### Redeploying
 

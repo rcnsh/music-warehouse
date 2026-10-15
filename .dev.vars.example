@@ -23,6 +23,11 @@ ALERT_WEBHOOK_URL=
 # just posting: a Discord `<@id>`, a Slack `<@U…>`, an ntfy tag.
 ALERT_MENTION=
 
+# Optional. Comma-separated browser origins allowed to read /api/* with a
+# token, e.g. a Wrapped app on another host, or http://localhost:5173 for its
+# dev server. Unset means no CORS headers. See README, "Wrapped".
+CORS_ORIGINS=
+
 # Overrides the production value in wrangler.jsonc for local dev. Spotify
 # permits plain HTTP only on the loopback address, and this must match a
 # redirect URI registered in the Spotify dashboard character for character.
