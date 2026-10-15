@@ -915,8 +915,12 @@ now. Each artist is matched to a Ticketmaster attraction by exact name
 first few days fill in gradually. An act whose name Ticketmaster spells
 differently is missed rather than guessed at; [pin it](#admin) instead. Events
 Ticketmaster stops listing (past, cancelled) drop out, as do rows for a region
-taken out of `CONCERT_REGIONS`. Needs `TICKETMASTER_API_KEY` and at least one
-region; there are no push alerts.
+taken out of `CONCERT_REGIONS`. A region with more than 600 events is read up
+to the date its third page reaches, and later events keep their rows (and
+`first_seen`) until a run reaches them. A 429 is retried after its
+`Retry-After` when that is short (30 s a run in all); the last run, and the
+last failure, are kept in `concert_check_state` (migration 0017). Needs
+`TICKETMASTER_API_KEY` and at least one region; there are no push alerts.
 
 ### Live from Spotify
 
