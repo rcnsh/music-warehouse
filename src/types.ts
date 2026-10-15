@@ -93,6 +93,8 @@ export interface OAuthToken {
   refresh_token: string | null;
   authorized_at_ms: number;
   needs_reauth: number;
+  /** The Spotify account that authorized ingestion; sign-in must match it. */
+  spotify_user_id?: string | null;
 }
 
 /** Rows produced by normalize(), ready for a single batched write. */

@@ -30,9 +30,10 @@ is one client.
 ### 1. Create the Spotify app
 
 1. At <https://developer.spotify.com/dashboard>, create an app with the Web API.
-2. Add a redirect URI: `https://<your-worker-host>/callback`. For local
-   authorization also add `http://127.0.0.1:8787/callback` (Spotify allows
-   plain HTTP only on loopback).
+2. Add two redirect URIs: `https://<your-worker-host>/callback` for
+   ingestion and `https://<your-worker-host>/auth/callback` for
+   [signing in](#signing-in-with-spotify). Locally, also add the same two paths
+   on `http://127.0.0.1:8787` (Spotify allows plain HTTP only on loopback).
 3. Under **User Management**, add your own Spotify account (development mode
    allows five users).
 4. Note the **client ID** and **client secret**.
@@ -93,11 +94,13 @@ shares. A WAF custom rule (Security → WAF → Custom rules, action **Block**)
 stops them at the edge:
 
 ```txt
-(http.host eq "your-host.example" and http.request.uri.path ne "/callback" and http.request.method ne "OPTIONS" and not len(http.request.headers["authorization"][0]) > 0)
+(http.host eq "your-host.example" and http.request.uri.path ne "/callback" and not starts_with(http.request.uri.path, "/auth/") and http.request.method ne "OPTIONS" and not len(http.request.headers["authorization"][0]) > 0)
 ```
 
 `/callback` stays open for Spotify's redirect, which its single-use `state`
-guards. `OPTIONS` stays open for browser clients' CORS preflights, which never
+guards. `/auth/*` stays open for [signing in](#signing-in-with-spotify), which
+is how a device without a token gets one; a rate-limiting rule on
+`/auth/` is a sensible extra. `OPTIONS` stays open for browser clients' CORS preflights, which never
 carry the header; drop that clause if you don't set `CORS_ORIGINS`.
 
 Then [authorize](#authorizing).
@@ -161,6 +164,40 @@ only a hash is stored.
 `GET /admin/tokens` lists them with when each was last used (to the hour), and
 `DELETE /admin/tokens?id=tok_…` revokes one immediately. Revoked tokens stay
 in the list.
+
+### Signing in with Spotify
+
+A device can also get a **read** token by signing in with the Spotify account
+that owns the warehouse (the one that [authorized](#authorizing) ingestion).
+Any other Spotify account is refused. Sign-in never mints admin tokens, and it
+never touches the ingestion grant: it asks Spotify for no scopes and discards
+what Spotify returns once it has read the account id. Tokens it mints expire
+after 90 days and show `created_via: "spotify"` in the list.
+
+**In a browser, for a shell or script:** open
+`$WORKER_URL/auth/login?name=laptop`, approve, and copy the token from the
+page. It is shown once.
+
+**From an app** on an origin listed in `CORS_ORIGINS`, it works like OAuth
+with PKCE ([RFC 7636](https://www.rfc-editor.org/rfc/rfc7636)):
+
+1. Generate a random `code_verifier` (43 to 128 characters of
+   `A-Z a-z 0-9 - . _ ~`) and keep it, e.g. in `sessionStorage`.
+   `code_challenge` is base64url(SHA-256(verifier)), without padding.
+2. Send the browser to
+   `/auth/login?name=<device>&return_to=<url on your origin>&code_challenge=<challenge>`.
+3. Spotify sends it back to `return_to` with `?code=…`, or with `?error=`:
+   `access_denied`, `not_owner` or `unavailable`.
+4. Within 60 seconds, from that same origin,
+   `POST /auth/token` with `{ "code": "…", "code_verifier": "…" }`. The
+   response is the minted token, as from `POST /admin/tokens`.
+
+A code works once, even if the exchange fails, and only alongside the verifier
+that produced its challenge. A failed exchange always answers
+`400 { "error": "invalid_grant" }`.
+
+A warehouse authorized before sign-in existed learns its owner's account id on
+the first sign-in, from the stored grant.
 
 Keep `ADMIN_TOKEN` in a password manager as the way back in if every device
 token is lost. Once nothing uses `READ_TOKEN`, delete it with
@@ -246,7 +283,7 @@ requests a day; tighten it to `*/15` if plays ever go missing.
 
 ## API reference
 
-Every route except `/callback` takes `Authorization: Bearer <token>`.
+Every route except `/callback` and `/auth/*` takes `Authorization: Bearer <token>`.
 
 | Token | Reaches |
 |---|---|
@@ -406,6 +443,9 @@ grant has lapsed.
 | `GET /` | Lists the routes. |
 | `GET /login` | `302` to Spotify's consent page. Use `npm run authorize`. |
 | `GET /callback` | Spotify's redirect target. No token; guarded by `state`. |
+| `GET /auth/login?name=&return_to=&code_challenge=` | No token. [Sign in with Spotify](#signing-in-with-spotify). |
+| `GET /auth/callback` | No token. Spotify's redirect target for sign-in. |
+| `POST /auth/token` | No token. Body `{ code, code_verifier }`; exchanges a sign-in code for a read token. |
 | `GET /health` | Whether ingestion is working. See [Health](#health). |
 | `POST /admin/poll` | Poll now, exactly as the cron does. |
 | `POST /admin/import` | Body: an array of export records, or `{ "records": [...] }`. Returns `{ inserted, duplicates, skipped }`. Use `npm run import`. |
