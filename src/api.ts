@@ -4,6 +4,7 @@ import {
   endOfLocalDayUtcMs,
   isRealDay,
   isValidTimeZone,
+  localCalendar,
   localDayKey,
   startOfLocalDayUtcMs,
 } from './tz';
@@ -440,13 +441,9 @@ export async function dailyCounts(env: Env, url: URL): Promise<Response> {
   const filter = playFilterParams(url, { q: false });
   const match = await filterTrackIds(env, filter);
 
-  const counts = new Map<string, number>();
   // Pre-seed every day in the range so quiet days appear as zero rather than a gap.
-  for (let cursor = fromMs; cursor < toMs; ) {
-    const key = localDayKey(cursor, timeZone);
-    counts.set(key, 0);
-    cursor = endOfLocalDayUtcMs(key, timeZone);
-  }
+  const calendar = localCalendar(timeZone, fromMs, toMs);
+  const counts = new Map<string, number>(calendar.days().map((day) => [day, 0]));
   const days = () => [...counts.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([day, plays]) => ({ day, plays }));
   // With the default grouping the body is exactly what it was before group_by.
   const buckets = () =>
@@ -493,7 +490,7 @@ export async function dailyCounts(env: Env, url: URL): Promise<Response> {
   ).all<{ played_at_ms: number }>();
 
   for (const row of query.results ?? []) {
-    const key = localDayKey(row.played_at_ms, timeZone);
+    const key = calendar.dayOf(row.played_at_ms);
     counts.set(key, (counts.get(key) ?? 0) + 1);
   }
 

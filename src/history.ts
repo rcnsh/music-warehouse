@@ -3,7 +3,7 @@ import { withTrackCounts } from './rollup';
 import { NAME_KEY_PREFIX } from './db';
 import { songTitle } from './song-title';
 import { PRIMARY_ARTIST_SQL } from './stats/sql';
-import { endOfLocalDayUtcMs, isRealDay, localDayKey, startOfLocalDayUtcMs } from './tz';
+import { endOfLocalDayUtcMs, isRealDay, localCalendar, localDayKey, startOfLocalDayUtcMs } from './tz';
 import type { Env } from './types';
 import { FALLBACK_DURATION_MS, MIN_PLAY_MS } from './wrapped';
 
@@ -115,8 +115,11 @@ const iso = (ms: number | undefined) => (ms === undefined ? null : new Date(ms).
 /** Every month from the first to the last, quiet ones as zero, so a chart has no gaps. */
 function monthsOf(plays: PlayRow[], timeZone: string): Month[] {
   const counts = new Map<string, number>();
+  if (plays.length === 0) return [];
+  // Plays come oldest first, so the first and last bound them.
+  const calendar = localCalendar(timeZone, plays[0]!.played_at_ms, plays[plays.length - 1]!.played_at_ms + 1);
   for (const play of plays) {
-    const month = localDayKey(play.played_at_ms, timeZone).slice(0, 7);
+    const month = calendar.dayOf(play.played_at_ms).slice(0, 7);
     counts.set(month, (counts.get(month) ?? 0) + 1);
   }
   const keys = [...counts.keys()].sort();
