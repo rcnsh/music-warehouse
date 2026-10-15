@@ -4,8 +4,8 @@
 <p>
 <a href="LICENSE"><img alt="Licence: MIT" src="https://img.shields.io/badge/licence-MIT-blue?style=flat-square"></a>
 <img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-3178C6?style=flat-square&logo=typescript&logoColor=white">
-<img alt="Cloudflare Workers" src="https://img.shields.io/badge/Cloudflare%20Workers-F38020?style=flat-square&logo=cloudflareworkers&logoColor=white">
-<a href="https://github.com/rcnsh/music-warehouse#clients"><img alt="Part of music-warehouse" src="https://img.shields.io/static/v1?label=part%20of&message=music-warehouse&color=1DB954&style=flat-square"></a>
+<a href="https://workers.cloudflare.com"><img alt="Cloudflare Workers" src="https://img.shields.io/badge/Cloudflare%20Workers-F38020?style=flat-square&logo=cloudflareworkers&logoColor=white"></a>
+<a href="https://github.com/rcnsh/music-warehouse#clients"><img alt="Part of music-warehouse" src="https://img.shields.io/badge/part%20of-music--warehouse-1DB954?style=flat-square"></a>
 </p>
 <p><a href="#what-it-does">What it does</a> · <a href="#quick-start">Quick start</a> · <a href="#configuration">Configuration</a> · <a href="#api-reference">API reference</a> · <a href="#clients">Clients</a> · <a href="#related-projects">Related projects</a></p>
 </div>
@@ -960,7 +960,7 @@ How it works, why, and what it can't do: [docs/design.md](docs/design.md).
 
 ## Licence
 
-[MIT](LICENSE).
+MIT. See [LICENSE](LICENSE).
 
 > [!WARNING]
 > Spotify's Developer Terms prohibit using Spotify content to train machine
