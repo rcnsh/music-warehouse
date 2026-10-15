@@ -265,6 +265,11 @@ These read only D1, so they keep working when the Spotify grant has lapsed.
 days ago), `to` (default today), `tz`, `limit` (1 to 500, default 50).
 Returns `{ from, to, tz, artists: [{ artist_id, name, plays }] }`.
 
+**`GET /api/top-tracks`**: play counts per song, editions folded (same title
+and primary artist). Same params as `/api/top-artists`. Returns
+`{ from, to, tz, tracks: [{ id, name, artist, plays, image }] }`; `id` is the
+most-played edition's.
+
 **`GET /api/daily`**: plays per local day, quiet days as `0`. Params: `from`,
 `to`, `tz`, as above.
 

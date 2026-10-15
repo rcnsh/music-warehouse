@@ -24,7 +24,7 @@ export function timeZoneParam(url: URL): string {
 }
 
 /** Resolve `from`/`to` local calendar dates into a half-open UTC millisecond range. */
-function dateRange(url: URL, timeZone: string): { fromMs: number; toMs: number; from: string; to: string } {
+export function dateRange(url: URL, timeZone: string): { fromMs: number; toMs: number; from: string; to: string } {
   const to = url.searchParams.get('to') ?? localDayKey(Date.now(), timeZone);
   const from = url.searchParams.get('from') ?? localDayKey(Date.now() - 29 * 86_400_000, timeZone);
 
