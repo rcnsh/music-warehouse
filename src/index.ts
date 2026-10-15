@@ -13,7 +13,7 @@ import { SnapshotPending } from './snapshots';
 import { isStatName, statRoute } from './stats';
 import { artistRoute, onThisDayRoute, topTracksRoute, trackRoute } from './history';
 import { searchRoute } from './search';
-import { concertCheckRoute, concertsRoute, runConcertCheck } from './concerts';
+import { concertArtistsRoute, concertCheckRoute, concertsRoute, pinConcertArtistRoute, runConcertCheck } from './concerts';
 import { recordOwner, signInCallback, signInExchange, signInStart } from './signin';
 import { warmWrappedPresets, wrappedRangesRoute, wrappedRoute } from './wrapped';
 import type { Env } from './types';
@@ -175,6 +175,7 @@ async function handle(request: Request, env: Env, ctx: ExecutionContext): Promis
             '/admin/poll',
             '/admin/alert-check',
             '/admin/concert-check',
+            '/admin/concert-artists',
             '/admin/import',
             '/admin/backfill-albums',
             '/admin/backfill-catalog',
@@ -216,6 +217,11 @@ async function handle(request: Request, env: Env, ctx: ExecutionContext): Promis
         return await searchRoute(env, url);
       case 'POST /admin/poll':
         return json(await poll(env));
+      case 'GET /admin/concert-artists':
+        return await concertArtistsRoute(env, url);
+      case 'PUT /admin/concert-artists':
+      case 'DELETE /admin/concert-artists':
+        return await pinConcertArtistRoute(env, request);
       case 'POST /admin/concert-check':
         return await concertCheckRoute(env, url);
       case 'POST /admin/alert-check':
