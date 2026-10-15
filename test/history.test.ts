@@ -107,6 +107,68 @@ describe('history routes: access', () => {
   });
 });
 
+describe('history routes: caching', () => {
+  const ROUTES = [
+    '/api/artist?id=por&tz=Europe/London',
+    '/api/track?id=t1',
+    '/api/on-this-day?date=2025-01-10',
+    '/api/top-tracks?from=2024-01-01&to=2024-12-31',
+    '/api/top-artists?from=2024-01-01&to=2024-12-31',
+    '/api/daily?from=2024-01-01&to=2024-01-31&tz=Asia/Singapore',
+  ];
+
+  it.each(ROUTES)('keeps %s until a new play, for any token, and lets a client reuse it briefly', async (path) => {
+    await seed(session(JAN_10, 3, { trackId: 't1', artistId: 'por', artistName: 'Porter Robinson' }));
+    const first = await SELF.fetch(`${BASE}${path}`, { headers: READ });
+    expect(first.status).toBe(200);
+    expect(first.headers.get('Cache-Control')).toBe('private, max-age=60');
+    expect(first.headers.get('X-Cache')).toBeNull();
+    const body = await first.text();
+
+    // Another token, the parameters in another order: the same answer, kept.
+    const reordered = `${path.split('?')[0]}?${new URLSearchParams([...new URL(`${BASE}${path}`).searchParams].reverse())}`;
+    const second = await SELF.fetch(`${BASE}${reordered}`, { headers: ADMIN });
+    expect(second.headers.get('X-Cache')).toBe('hit');
+    expect(second.headers.get('Cache-Control')).toBe('private, max-age=60');
+    expect(await second.text()).toBe(body);
+    // A hit reports what it read itself, the cache check: a handful of rows.
+    const hitRows = Number(second.headers.get('X-Rows-Read'));
+    expect(hitRows).toBeGreaterThan(0);
+    expect(hitRows).toBeLessThan(10);
+
+    await seed([{ ms: JAN_10 + 3 * DAY, trackId: 't1', artistId: 'por', artistName: 'Porter Robinson' }]);
+    const third = await SELF.fetch(`${BASE}${path}`, { headers: READ });
+    expect(third.headers.get('X-Cache')).toBeNull();
+  });
+
+  it('keys every parameter, so group_by gets its own answer', async () => {
+    await seed(session(JAN_10, 3, { trackId: 't1', artistId: 'por', artistName: 'Porter Robinson' }));
+    const path = '/api/daily?from=2024-01-01&to=2024-01-31&tz=Asia/Singapore';
+    await SELF.fetch(`${BASE}${path}`, { headers: READ });
+    const weekly = await SELF.fetch(`${BASE}${path}&group_by=week`, { headers: READ });
+    expect(weekly.headers.get('X-Cache')).toBeNull();
+    expect(((await weekly.json()) as { group_by: string }).group_by).toBe('week');
+  });
+
+  it('keeps no errors, and adds CORS headers to a kept answer per request', async () => {
+    const bad = await SELF.fetch(`${BASE}/api/track`, { headers: READ });
+    expect(bad.status).toBe(400);
+    expect(bad.headers.get('Cache-Control')).toBe('no-store');
+    expect((await SELF.fetch(`${BASE}/api/track`, { headers: READ })).headers.get('X-Cache')).toBeNull();
+
+    const path = '/api/track?id=t9';
+    await SELF.fetch(`${BASE}${path}`, { headers: READ });
+    const plain = await SELF.fetch(`${BASE}${path}`, { headers: READ });
+    expect(plain.headers.get('X-Cache')).toBe('hit');
+    expect(plain.headers.get('Access-Control-Allow-Origin')).toBeNull();
+    const cors = await SELF.fetch(`${BASE}${path}`, { headers: { ...READ, Origin: 'https://wrapped.test' } });
+    expect(cors.headers.get('X-Cache')).toBe('hit');
+    expect(cors.headers.get('Access-Control-Allow-Origin')).toBe('https://wrapped.test');
+    expect(cors.headers.get('Vary')).toBe('Origin');
+    expect((await SELF.fetch(`${BASE}${path}`)).status).toBe(401);
+  });
+});
+
 describe('/api/artist', () => {
   it('folds name placeholders into the real id and credits the primary artist only', async () => {
     await seed([

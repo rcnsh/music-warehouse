@@ -1,6 +1,6 @@
 import { env } from 'cloudflare:test';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { NAME_KEY_PREFIX, reconcileArtistsInPoll, reconcileNameKeyedArtists } from '../src/db';
+import { NAME_KEY_PREFIX, dailyTrackSweep, reconcileArtistsInPoll, reconcileNameKeyedArtists } from '../src/db';
 import type { NormalizedRows } from '../src/types';
 
 const NAME_KEY = `${NAME_KEY_PREFIX}Porter Robinson`;
@@ -131,5 +131,64 @@ describe('reconcileArtistsInPoll', () => {
     await env.DB.batch(reconcileArtistsInPoll(env.DB, poll([], [])));
     await env.DB.batch(reconcileArtistsInPoll(env.DB, poll([{ artist_id: 'x', name: "Guns N' Roses \"live\"" }], [])));
     expect(await links()).toHaveLength(3);
+  });
+});
+
+describe('dailyTrackSweep', () => {
+  const text = async (id: string) =>
+    (await env.DB.prepare('SELECT text FROM track_search_text WHERE track_id = ?').bind(id).first<{ text: string }>())?.text;
+  const song = async (id: string) =>
+    (await env.DB.prepare('SELECT song FROM track_songs WHERE track_id = ?').bind(id).first<{ song: string }>())?.song;
+  const marked = async () =>
+    (await env.DB.prepare('SELECT track_id FROM track_changes ORDER BY track_id').all<{ track_id: string }>()).results.map((r) => r.track_id);
+
+  beforeEach(async () => {
+    await seed();
+    await env.DB.batch([
+      env.DB.prepare(
+        `WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i < 199)
+         INSERT INTO tracks (track_id, name, first_seen_ms) SELECT 'other' || i, 'Other ' || i, 0 FROM n`,
+      ),
+      env.DB.prepare("INSERT INTO plays (played_at_ms, track_id, source) VALUES (100, 'exportOnly', 'export'), (200, 'bothSeen', 'api')"),
+    ]);
+    // Everything stored so far is marked, so the first sweep covers it all.
+    expect(await marked()).toContain('other7');
+    await env.DB.batch(dailyTrackSweep(env.DB));
+    expect(await marked()).toEqual([]);
+  });
+
+  it('syncs what an album backfill changed, and reads only that', async () => {
+    expect(await text('exportOnly')).toBe('Sad Machine |  | Porter Robinson');
+    await env.DB.batch([
+      env.DB.prepare("INSERT INTO albums (album_id, name) VALUES ('worlds', 'Worlds')"),
+      env.DB.prepare("UPDATE tracks SET album_id = 'worlds' WHERE track_id = 'exportOnly'"),
+    ]);
+    expect(await marked()).toEqual(['exportOnly']);
+
+    const results = await env.DB.batch(dailyTrackSweep(env.DB));
+    expect(await text('exportOnly')).toBe('Sad Machine | Worlds | Porter Robinson');
+    expect(await marked()).toEqual([]);
+    // About the marked track's rows, not all 202 tracks'.
+    const [, , , search, rekey] = results;
+    expect(search!.meta.rows_read + rekey!.meta.rows_read).toBeLessThan(60);
+  });
+
+  it('rekeys and reindexes a track whose credit the reconcile moved', async () => {
+    await env.DB.batch([
+      env.DB.prepare("INSERT INTO artists (artist_id, name) VALUES ('madeon', 'Madeon'), ('name:Madeon', 'Madeon')"),
+      env.DB.prepare("INSERT INTO track_artists (track_id, artist_id, position) VALUES ('other3', 'name:Madeon', 0)"),
+      // As a poll leaves it: synced already, while still credited to the placeholder.
+      env.DB.prepare('DELETE FROM track_changes'),
+    ]);
+    await env.DB.batch(dailyTrackSweep(env.DB));
+    expect(await env.DB.prepare("SELECT artist_id FROM track_artists WHERE track_id = 'other3'").first('artist_id')).toBe('madeon');
+    expect(await song('other3')).toBe(`other 3${String.fromCharCode(31)}madeon`);
+    expect(await text('other3')).toBe('Other 3 |  | Madeon');
+    expect(await marked()).toEqual([]);
+  });
+
+  it('reads almost nothing when nothing changed', async () => {
+    const results = await env.DB.batch(dailyTrackSweep(env.DB));
+    expect(results.reduce((sum, r) => sum + r.meta.rows_read, 0)).toBeLessThan(40);
   });
 });

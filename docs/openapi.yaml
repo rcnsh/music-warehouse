@@ -526,8 +526,8 @@ paths:
       description: |
         Four rows of playlists, albums and artist pages. Rows can overlap: show
         each item once, in the order shortcuts, jump_back_in, around_now,
-        rediscover. Held at the edge until the newest play, the local hour or
-        the local day changes.
+        rediscover. Held at the edge for the local hour, so a new play can take
+        up to an hour to show.
       parameters:
         - $ref: '#/components/parameters/Tz'
       responses:

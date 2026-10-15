@@ -3,7 +3,7 @@ import { withTrackCounts } from './rollup';
 import { NAME_KEY_PREFIX } from './db';
 import { songTitle } from './song-title';
 import { PRIMARY_ARTIST_SQL } from './stats/sql';
-import { endOfLocalDayUtcMs, isRealDay, localDayKey, startOfLocalDayUtcMs } from './tz';
+import { endOfLocalDayUtcMs, isRealDay, localCalendar, localDayKey, startOfLocalDayUtcMs } from './tz';
 import type { Env } from './types';
 import { FALLBACK_DURATION_MS, MIN_PLAY_MS } from './wrapped';
 
@@ -115,8 +115,11 @@ const iso = (ms: number | undefined) => (ms === undefined ? null : new Date(ms).
 /** Every month from the first to the last, quiet ones as zero, so a chart has no gaps. */
 function monthsOf(plays: PlayRow[], timeZone: string): Month[] {
   const counts = new Map<string, number>();
+  if (plays.length === 0) return [];
+  // Plays come oldest first, so the first and last bound them.
+  const calendar = localCalendar(timeZone, plays[0]!.played_at_ms, plays[plays.length - 1]!.played_at_ms + 1);
   for (const play of plays) {
-    const month = localDayKey(play.played_at_ms, timeZone).slice(0, 7);
+    const month = calendar.dayOf(play.played_at_ms).slice(0, 7);
     counts.set(month, (counts.get(month) ?? 0) + 1);
   }
   const keys = [...counts.keys()].sort();
@@ -193,6 +196,62 @@ export function respond(body: unknown, results: D1Result[]): Response {
   return new Response(JSON.stringify(body), {
     headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Rows-Read': String(rowsRead) },
   });
+}
+
+const HISTORY_CACHE_ORIGIN = 'https://history.internal';
+/** How long an answer is kept at the edge; a new play or track starts a new key sooner. */
+const HISTORY_EDGE_TTL_SECONDS = 600;
+/** How long a client may reuse one. */
+const HISTORY_CLIENT_MAX_AGE = 60;
+/** Defaults such as "the last 30 days" or "today" move with the clock; a key lasts this long, so they never go stale (zones are offset in quarter hours). */
+const CLOCK_BUCKET_MS = 15 * 60_000;
+
+/**
+ * A history route's answer through the Cache API. The key is the route and
+ * its whole query, the newest play and the newest search-index row (so a new
+ * play, or a new track, artist or album, starts a new key), the rollup's
+ * state (its zone, or a rebuild, changes which plays answer; three rows read in
+ * all), and the quarter hour, for the routes' date defaults. An import
+ * of older plays changes neither newest, so it can take up to
+ * HISTORY_EDGE_TTL_SECONDS to show.
+ *
+ * X-Rows-Read on a hit is the key lookup's reads; on a miss, the route's,
+ * as in its `_meta.rows_read` (the lookup's few rows are not added).
+ *
+ * The routes answer the same whatever token asked (this is one listener's
+ * history, and the token was checked before this), so the key holds no
+ * token; only successful answers are kept. The CORS headers are added after,
+ * per request, so a kept answer carries none.
+ */
+export async function cachedHistory(env: Env, url: URL, route: () => Promise<Response>): Promise<Response> {
+  const stateResult = await env.DB.prepare(
+    `SELECT (SELECT MAX(played_at_ms) FROM plays) AS play, (SELECT MAX(id) FROM track_search_text) AS track,
+            (SELECT time_zone || ':' || usable || ':' || horizon_ms FROM rollup_state WHERE id = 1) AS rollup`,
+  ).all<{ play: number | null; track: number | null; rollup: string | null }>();
+  const state = stateResult.results[0];
+  const stateRowsRead = stateResult.meta?.rows_read ?? 0;
+  const query = [...url.searchParams].sort(([a, x], [b, y]) => (a < b ? -1 : a > b ? 1 : x < y ? -1 : x > y ? 1 : 0));
+  const version = [state?.play ?? 0, state?.track ?? 0, encodeURIComponent(state?.rollup ?? ''), Math.floor(Date.now() / CLOCK_BUCKET_MS)];
+  const key = new Request(`${HISTORY_CACHE_ORIGIN}/v1/${version.join('/')}${url.pathname}?${new URLSearchParams(query)}`);
+  const cache = await caches.open('history');
+  const hit = await cache.match(key);
+  const response = hit ? new Response(hit.body, hit) : await route();
+  if (!hit && response.status === 200) {
+    const stored = response.clone();
+    stored.headers.set('Cache-Control', `max-age=${HISTORY_EDGE_TTL_SECONDS}`);
+    await cache.put(key, stored);
+  }
+  if (response.status !== 200) return response;
+  const out = new Response(response.body, response);
+  out.headers.set('Cache-Control', `private, max-age=${HISTORY_CLIENT_MAX_AGE}`);
+  // A kept answer reports what this request read, the key lookup, rather than
+  // what computing it read once (still in the body's `_meta.rows_read`). A
+  // miss reports the route's reads, matching `_meta`.
+  if (hit) {
+    out.headers.set('X-Rows-Read', String(stateRowsRead));
+    out.headers.set('X-Cache', 'hit');
+  }
+  return out;
 }
 
 /** GET /api/artist?id=&name=&tz= */

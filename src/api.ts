@@ -4,6 +4,7 @@ import {
   endOfLocalDayUtcMs,
   isRealDay,
   isValidTimeZone,
+  localCalendar,
   localDayKey,
   startOfLocalDayUtcMs,
 } from './tz';
@@ -98,7 +99,7 @@ export const likePattern = (term: string) => `%${term.replace(/[\\%_]/g, (c) => 
  * real warehouse: 4 tracks read 649 rows by seek and 36k by walk; 1,612
  * tracks read 8k by seek and 2k by walk.
  */
-const WALK_ABOVE_TRACKS = 500;
+export const WALK_ABOVE_TRACKS = 500;
 
 /** Joined by every play query, for PLAY_COLUMNS' play number and context name. */
 const PLAY_JOINS = `LEFT JOIN play_numbers pn ON pn.played_at_ms = p.played_at_ms AND pn.track_id = p.track_id
@@ -137,7 +138,7 @@ export function withArtistList(rows: Record<string, unknown>[]): Record<string, 
  * ignores case and accents. It cannot answer fewer than three characters, so
  * those fall back to LIKE scans of the three name tables (about 11k rows,
  * case-insensitive for ASCII only). Artists are read first there so their
- * tracks come from idx_track_artists_artist rather than a scan of
+ * tracks come from idx_track_artists_artist_pos rather than a scan of
  * track_artists.
  */
 async function matchingTrackIds(env: Env, q: string): Promise<{ ids: string[]; rowsRead: number }> {
@@ -440,13 +441,9 @@ export async function dailyCounts(env: Env, url: URL): Promise<Response> {
   const filter = playFilterParams(url, { q: false });
   const match = await filterTrackIds(env, filter);
 
-  const counts = new Map<string, number>();
   // Pre-seed every day in the range so quiet days appear as zero rather than a gap.
-  for (let cursor = fromMs; cursor < toMs; ) {
-    const key = localDayKey(cursor, timeZone);
-    counts.set(key, 0);
-    cursor = endOfLocalDayUtcMs(key, timeZone);
-  }
+  const calendar = localCalendar(timeZone, fromMs, toMs);
+  const counts = new Map<string, number>(calendar.days().map((day) => [day, 0]));
   const days = () => [...counts.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([day, plays]) => ({ day, plays }));
   // With the default grouping the body is exactly what it was before group_by.
   const buckets = () =>
@@ -493,7 +490,7 @@ export async function dailyCounts(env: Env, url: URL): Promise<Response> {
   ).all<{ played_at_ms: number }>();
 
   for (const row of query.results ?? []) {
-    const key = localDayKey(row.played_at_ms, timeZone);
+    const key = calendar.dayOf(row.played_at_ms);
     counts.set(key, (counts.get(key) ?? 0) + 1);
   }
 
@@ -528,7 +525,7 @@ export function fromRollup(response: Response, rollup: boolean): Response {
 }
 
 export function json(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body, null, 2), {
+  return new Response(JSON.stringify(body), {
     status,
     headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' },
   });

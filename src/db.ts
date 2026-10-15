@@ -1,5 +1,5 @@
 import { insertContexts } from './contexts';
-import { songStatements } from './play-numbers';
+import { songStatements, syncChangedSongs } from './play-numbers';
 import { syncSearchIndex } from './search-index';
 import type { NormalizedRows, OAuthToken, SyncState } from './types';
 
@@ -81,12 +81,15 @@ export const NAME_KEY_END = 'name;';
  * `'name:' || name`, which no index can serve. Written the wrong way round
  * this reads 10.6 million rows per call instead of a few thousand.
  *
- * This sweeps every name-keyed row (about 46k rows read with 4,574 such links
- * left), so it runs after an import and once a day. Polls use
+ * This sweeps every name-keyed row, sought as an index range (it was a scan
+ * of every credit: about 46k rows read with 4,574 such links left), so it
+ * runs after an import and once a day. Polls use
  * reconcileArtistsInPoll, which only looks at what the poll touched.
  */
 export function reconcileNameKeyedArtists(db: D1Database): D1PreparedStatement[] {
   // The name carried by a key, as a value the index on artists(name) can seek to.
+  // Keys are found as a range, which the artist_id indexes can seek, where
+  // LIKE (case-insensitive) scans every credit and every artist.
   const nameOfKey = `substr(track_artists.artist_id, ${NAME_KEY_PREFIX.length + 1})`;
   return [
     db.prepare(
@@ -94,23 +97,40 @@ export function reconcileNameKeyedArtists(db: D1Database): D1PreparedStatement[]
           SET artist_id = (SELECT real.artist_id FROM artists real
                             WHERE real.name = ${nameOfKey}
                               AND real.artist_id NOT LIKE '${NAME_KEY_PREFIX}%')
-        WHERE artist_id LIKE '${NAME_KEY_PREFIX}%'
+        WHERE artist_id >= '${NAME_KEY_PREFIX}' AND artist_id < '${NAME_KEY_END}'
           AND EXISTS (SELECT 1 FROM artists real
                        WHERE real.name = ${nameOfKey}
                          AND real.artist_id NOT LIKE '${NAME_KEY_PREFIX}%')`,
     ),
     db.prepare(
       `DELETE FROM track_artists
-        WHERE artist_id LIKE '${NAME_KEY_PREFIX}%'
+        WHERE artist_id >= '${NAME_KEY_PREFIX}' AND artist_id < '${NAME_KEY_END}'
           AND EXISTS (SELECT 1 FROM track_artists real
                        WHERE real.track_id = track_artists.track_id
                          AND real.artist_id NOT LIKE '${NAME_KEY_PREFIX}%')`,
     ),
     db.prepare(
       `DELETE FROM artists
-        WHERE artist_id LIKE '${NAME_KEY_PREFIX}%'
+        WHERE artist_id >= '${NAME_KEY_PREFIX}' AND artist_id < '${NAME_KEY_END}'
           AND NOT EXISTS (SELECT 1 FROM track_artists ta WHERE ta.artist_id = artists.artist_id)`,
     ),
+  ];
+}
+
+/**
+ * The daily catch-all after the writes' own upkeep: reconcile every
+ * name-keyed artist, then sync the search text and song keys of the tracks
+ * marked changed since the last run (migration 0020), which include those
+ * the reconcile just touched, and clear the marks. The syncs follow the
+ * reconcile so they see merged artists. One batch, so a mark is cleared only
+ * with its track synced.
+ */
+export function dailyTrackSweep(db: D1Database): D1PreparedStatement[] {
+  return [
+    ...reconcileNameKeyedArtists(db),
+    syncSearchIndex(db, 'changed'),
+    ...syncChangedSongs(db),
+    db.prepare('DELETE FROM track_changes'),
   ];
 }
 

@@ -1,6 +1,7 @@
 import { SELF, env } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
-import { type HomePlay, hourDistance, rankHome, sessions } from '../src/home';
+import { type HomePlay, detailFromMs, hourDistance, olderKey, rankHome, sessions } from '../src/home';
+import { edgeRequest } from '../src/snapshots';
 
 const BASE = 'https://warehouse.test';
 const READ = { Authorization: 'Bearer test-read-token' };
@@ -188,6 +189,37 @@ describe('GET /api/home', () => {
     expect(album).toMatchObject({ type: 'album', name: 'Album exported', image: 'https://i.scdn.co/image/exported', artist: 'Artist exported', sessions: 1 });
     expect(playlist).toMatchObject({ type: 'playlist', name: 'Road trip', image: null, artist: null });
     expect(body.shortcuts).toHaveLength(2);
+  });
+
+  it('keeps the contexts from before the detailed year for the day, and the body for the hour', async () => {
+    const now = Date.now();
+    // Played on five days two years ago, and not since: rediscover.
+    await seed([0, 3, 9, 20, 40].map((d) => ({ ms: now - (730 + d) * DAY, track: 'old', context: null, album: 'gone' })));
+    await seed([{ ms: now - HOUR, track: 'new', context: null, album: 'fresh' }]);
+
+    const first = await SELF.fetch(`${BASE}/api/home?tz=UTC`, { headers: READ });
+    expect(first.headers.get('X-Cache')).toBeNull();
+    const body = (await first.json()) as Body;
+    expect(body.rediscover.map((i) => [i.uri, i.sessions])).toEqual([['spotify:album:gone', 5]]);
+    const stored = await env.DB.prepare('SELECT key, body FROM stats_snapshots WHERE key = ?')
+      .bind(olderKey(detailFromMs(now)))
+      .first<{ key: string; body: string }>();
+    expect(JSON.parse(stored!.body)).toEqual([['spotify:album:gone', 5, now - 730 * DAY, 'ar-gone']]);
+
+    // A new play no longer starts a new key: the hour's body answers.
+    await seed([{ ms: now - MIN, track: 'newer', context: null, album: 'newer' }]);
+    const second = await SELF.fetch(`${BASE}/api/home?tz=UTC`, { headers: READ });
+    expect(second.headers.get('X-Cache')).toBe('hit');
+    expect(await second.json()).toEqual(body);
+
+    // In another zone (a new body), the stored contexts are read, not counted again.
+    await env.DB.prepare('UPDATE stats_snapshots SET body = ? WHERE key = ?')
+      .bind(JSON.stringify([['spotify:album:gone', 9, now - 730 * DAY, 'ar-gone']]), stored!.key)
+      .run();
+    await (await caches.open('stats')).delete(edgeRequest(stored!.key));
+    const other = (await (await SELF.fetch(`${BASE}/api/home?tz=Asia/Singapore`, { headers: READ })).json()) as Body;
+    expect(other.rediscover.map((i) => [i.uri, i.sessions])).toEqual([['spotify:album:gone', 9]]);
+    expect(other.jump_back_in.map((i) => i.uri)).toEqual(['spotify:album:newer', 'spotify:album:fresh']);
   });
 
   it('answers an empty warehouse with empty rows', async () => {

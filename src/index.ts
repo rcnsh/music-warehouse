@@ -8,15 +8,13 @@ import { alertCheckRoute, runPollCron } from './alerts';
 import { nowPlaying, recentlyPlayed, topMusic } from './live';
 import { SpotifyError, type TokenResponse, authorizeUrl, exchangeCode, fetchRecentlyPlayed } from './spotify';
 import { NeedsReauthError, getAccessToken, persistTokenResponse } from './tokens';
-import { readState, reconcileNameKeyedArtists } from './db';
+import { dailyTrackSweep, readState } from './db';
 import { EraConfigError } from './eras';
-import { syncSearchIndex } from './search-index';
-import { syncAllSongs } from './play-numbers';
 import { ensureRollup } from './rollup';
 import { accessFor, clientKey, createTokenRoute, listTokensRoute, listedOrigins, revokeTokenRoute } from './auth';
 import { SnapshotPending } from './snapshots';
 import { isStatName, statRoute } from './stats';
-import { artistRoute, onThisDayRoute, topTracksRoute, trackRoute } from './history';
+import { artistRoute, cachedHistory, onThisDayRoute, topTracksRoute, trackRoute } from './history';
 import { searchRoute } from './search';
 import { homeRoute } from './home';
 import { playsCsvRoute } from './export';
@@ -233,11 +231,11 @@ async function handle(request: Request, env: Env, ctx: ExecutionContext): Promis
       case 'GET /api/plays.csv':
         return await playsCsvRoute(env, url);
       case 'GET /api/top-artists':
-        return await topArtists(env, url);
+        return await cachedHistory(env, url, () => topArtists(env, url));
       case 'GET /api/top-tracks':
-        return await topTracksRoute(env, url);
+        return await cachedHistory(env, url, () => topTracksRoute(env, url));
       case 'GET /api/daily':
-        return await dailyCounts(env, url);
+        return await cachedHistory(env, url, () => dailyCounts(env, url));
       case 'GET /api/now-playing':
         return await nowPlaying(env);
       case 'GET /api/recently-played':
@@ -249,13 +247,13 @@ async function handle(request: Request, env: Env, ctx: ExecutionContext): Promis
       case 'GET /api/wrapped/ranges':
         return await wrappedRangesRoute(env);
       case 'GET /api/artist':
-        return await artistRoute(env, url);
+        return await cachedHistory(env, url, () => artistRoute(env, url));
       case 'GET /api/track':
-        return await trackRoute(env, url);
+        return await cachedHistory(env, url, () => trackRoute(env, url));
       case 'GET /api/on-this-day':
-        return await onThisDayRoute(env, url);
+        return await cachedHistory(env, url, () => onThisDayRoute(env, url));
       case 'GET /api/home':
-        return await homeRoute(env, url);
+        return await homeRoute(env, ctx, url);
       case 'GET /api/concerts':
         return await concertsRoute(env, url);
       case 'GET /api/search':
@@ -387,14 +385,11 @@ const worker = {
       // race it and push the same alert twice.
       //
       // Polls only reconcile, index and key songs for what they touched; this
-      // catches the rest. The index and song keys follow the reconcile so they
-      // see merged artists.
+      // catches the rest.
       ctx.waitUntil(
-        env.DB.batch([...reconcileNameKeyedArtists(env.DB), syncSearchIndex(env.DB), ...syncAllSongs(env.DB)]).catch(
-          (error) => {
-            log('daily-sync-failed', { step: 'artist-reconcile, search-index or song sync', error }, 'error');
-          },
-        ),
+        env.DB.batch(dailyTrackSweep(env.DB)).catch((error) => {
+          log('daily-sync-failed', { step: 'artist-reconcile, search-index or song sync', error }, 'error');
+        }),
       );
       // Writes out the rollup zone's offsets a day further, or rebuilds the
       // rollup when its zone has changed.

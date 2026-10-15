@@ -133,6 +133,68 @@ describe('/api/search', () => {
     expect((await search('q=song&artist=porter')).tracks).toEqual([{ id: 'a', name: 'Song', artist: 'Porter Robinson', plays: 2 }]);
   });
 
+  it('counts a short query’s closest matches as before, and only those', async () => {
+    await seed([
+      { trackId: 'a1', name: 'Oslo', artistId: 'o1', artistName: 'Oh Wonder', count: 3 },
+      { trackId: 'a2', name: 'Drive', artistId: 'o1', artistName: 'Oh Wonder', count: 5 },
+      { trackId: 'a3', name: 'Ultralife', artistId: 'name:Oh Wonder', artistName: 'Oh Wonder', count: 2 },
+      { trackId: 'a4', name: 'Oslo', artistId: 'o2', artistName: 'Other', count: 4 },
+      { trackId: 'a5', name: 'Feat', artistId: 'o1', artistName: 'Oh Wonder', position: 1, count: 7 },
+      { trackId: 'a6', name: 'Unknown', artistId: 'o3', artistName: 'Odd', count: 0 },
+      // The export's edition of a1's song, under the placeholder: one song, two editions, two artist rows.
+      { trackId: 'a7', name: 'oslo', artistId: 'name:Oh Wonder', artistName: 'Oh Wonder', count: 2 },
+    ]);
+
+    // What the short path used to count: every play of every matching row.
+    const counted = async (sql: string, ...binds: string[]) => (await env.DB.prepare(sql).bind(...binds).first<{ n: number }>())!.n;
+    const body = await search('q=o&limit=50');
+    for (const a of body.artists) {
+      expect(a.plays, a.name).toBe(
+        await counted(
+          `SELECT COUNT(*) AS n FROM artists a JOIN track_artists ta ON ta.artist_id = a.artist_id AND ta.position = 0
+             JOIN plays p ON p.track_id = ta.track_id WHERE a.name = ? COLLATE NOCASE`,
+          a.name,
+        ),
+      );
+    }
+    expect(body.artists).toEqual([
+      { id: 'o1', name: 'Oh Wonder', plays: 12 },
+      { id: 'o2', name: 'Other', plays: 4 },
+      { id: 'o3', name: 'Odd', plays: 0 },
+    ]);
+    // Oslo by Oh Wonder folds a1 and a7, and takes the id of the edition played most.
+    expect(body.tracks.map((t) => [t.id, t.name, t.artist, t.plays])).toEqual([
+      ['a1', 'Oslo', 'Oh Wonder', 5],
+      ['a4', 'Oslo', 'Other', 4],
+      ['a6', 'Unknown', 'Odd', 0],
+    ]);
+  });
+
+  it('counts only the hundred artist names that match a short query best', async () => {
+    await seed([
+      { trackId: 'a1', name: 'Song', artistId: 'o1', artistName: 'Oh Wonder', count: 1 },
+      { trackId: 'a2', name: 'Hit', artistId: 'big', artistName: 'Zzzzz Big Zoo', count: 9 },
+    ]);
+    // A hundred short names that merely contain the letter, and so match better than the big one.
+    await env.DB.prepare(
+      `WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 100)
+       INSERT INTO artists (artist_id, name) SELECT 'z' || i, 'Zo' || i FROM n`,
+    ).run();
+    const names = (await search('q=o&limit=50')).artists.map((a) => a.name);
+    expect(names[0]).toBe('Oh Wonder');
+    expect(names).not.toContain('Zzzzz Big Zoo');
+    expect((await search('q=big')).artists).toEqual([{ id: 'big', name: 'Zzzzz Big Zoo', plays: 9 }]);
+  });
+
+  it('keeps a short query’s answer a few minutes, whatever its ASCII case', async () => {
+    await seed([{ trackId: 'a', name: 'One', artistId: 'u2', artistName: 'U2', count: 2 }]);
+    expect((await search('q=u2')).artists).toEqual([{ id: 'u2', name: 'U2', plays: 2 }]);
+    await env.DB.prepare('INSERT INTO plays (played_at_ms, track_id, source) VALUES (?, ?, ?)').bind(JAN_10 - MIN, 'a', 'api').run();
+    const again = await search('q=U2');
+    expect(again.q).toBe('U2');
+    expect(again.artists).toEqual([{ id: 'u2', name: 'U2', plays: 2 }]);
+  });
+
   it('answers no matches with empty lists', async () => {
     expect(await search('q=nothing')).toEqual({ q: 'nothing', artists: [], tracks: [] });
   });

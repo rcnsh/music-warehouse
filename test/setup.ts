@@ -2,11 +2,15 @@ import { applyD1Migrations, env } from 'cloudflare:test';
 import { afterEach, beforeEach, vi } from 'vitest';
 import { freezeClock } from './helpers';
 import { edgeRequest } from '../src/snapshots';
+import { detailFromMs, homeCacheKey, olderKey } from '../src/home';
+import { nowPlayingKey } from '../src/live';
 import { buildEras, parseEras } from '../src/eras';
 import { STAT_NAMES, statKey } from '../src/stats';
 
 // The test settings give the first era a start, so these are the eras every route loads.
 const ERAS = buildEras(parseEras(env.ERAS, env.TIMEZONE), 0);
+/** The zones the tests ask /api/home for. */
+const HOME_ZONES = ['UTC', 'Europe/London', 'Asia/Singapore'];
 
 /**
  * Every test starts against the real schema with an empty warehouse. The pool
@@ -20,6 +24,12 @@ beforeEach(async () => {
   // by one test would otherwise answer the next.
   const edge = await caches.open('stats');
   await Promise.all(STAT_NAMES.map((name) => edge.delete(edgeRequest(statKey(name, ERAS)))));
+  // So are /api/home's: its body for the hour, and the older contexts it keeps for the day.
+  const now = Date.now();
+  await edge.delete(edgeRequest(olderKey(detailFromMs(now))));
+  const home = await caches.open('home');
+  await Promise.all(HOME_ZONES.map((zone) => home.delete(homeCacheKey(zone, now))));
+  await (await caches.open('now-playing')).delete(nowPlayingKey());
   await env.DB.batch([
     env.DB.prepare('DELETE FROM plays'),
     env.DB.prepare('DELETE FROM tracks'),
@@ -39,6 +49,8 @@ beforeEach(async () => {
     env.DB.prepare('DELETE FROM track_songs'),
     env.DB.prepare('DELETE FROM play_numbers'),
     env.DB.prepare('DELETE FROM contexts'),
+    // Deleting tracks leaves their change marks (migration 0020) behind.
+    env.DB.prepare('DELETE FROM track_changes'),
     // The plays' delete trigger has emptied the rollup; put back the
     // migration's UTC state, which a test may have rebuilt for another zone.
     env.DB.prepare('DELETE FROM rollup_days'),

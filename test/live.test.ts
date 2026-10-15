@@ -63,6 +63,20 @@ describe('GET /api/now-playing', () => {
     expect(body.item.item).toEqual(item);
   });
 
+  it('shares one Spotify call between polls a few seconds apart, but not a failure', async () => {
+    await seedAuthorized();
+    let status = 429;
+    const calls = stubSpotify(() => (status === 429 ? new Response('{}', { status }) : jsonResponse({ is_playing: true, item: { name: 'Kids' } })));
+    expect((await SELF.fetch(`${BASE}/api/now-playing`, { headers: READ })).status).toBe(429);
+    status = 200;
+    const first = await SELF.fetch(`${BASE}/api/now-playing`, { headers: READ });
+    const second = await SELF.fetch(`${BASE}/api/now-playing`, { headers: ADMIN });
+    expect(calls).toHaveLength(2);
+    expect(second.headers.get('X-Cache')).toBe('hit');
+    expect(second.headers.get('Cache-Control')).toBe('no-store');
+    expect(await second.json()).toEqual(await first.json());
+  });
+
   it('reports idle as null rather than an error when Spotify returns 204', async () => {
     await seedAuthorized();
     stubSpotify(() => new Response(null, { status: 204 }));
