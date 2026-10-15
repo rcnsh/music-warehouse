@@ -19,6 +19,8 @@
  * so a junk query string cannot mint a new key and force a scan.
  */
 
+import { log } from './log';
+
 const EDGE_TTL_SECONDS = 300;
 /** Longest a compute may hold its claim before another request may take over. */
 const CLAIM_MS = 2 * 60 * 1000;
@@ -125,7 +127,7 @@ async function fromSnapshotTable(
   if (won) {
     ctx.waitUntil(
       computeAndStore(db, key, compute).catch((error) => {
-        console.error('stats refresh failed', key, error);
+        log('stats-refresh-failed', { key, error }, 'error');
       }),
     );
   }

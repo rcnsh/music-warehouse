@@ -2,6 +2,7 @@ import { BadRequest, json, timeZoneParam } from './api';
 import { startOfLocalDayUtcMs } from './tz';
 import { NAME_KEY_PREFIX } from './db';
 import type { Env } from './types';
+import { log } from './log';
 
 /**
  * Concert alerts: upcoming Ticketmaster events in the configured regions
@@ -210,7 +211,7 @@ async function resolveArtists(env: Env, tm: Ticketmaster, artists: TopArtist[], 
       match = await matchAttraction(tm, artist.name);
     } catch (error) {
       // Most likely the rate limit: keep what was learnt and stop for today.
-      console.error('concerts: lookup failed', artist.name, (error as Error).message);
+      log('concert-lookup-failed', { artist: artist.name, message: (error as Error).message }, 'error');
       break;
     }
     lookedUp++;

@@ -3,6 +3,7 @@ import { readState } from './db';
 import { spotifyGet } from './spotify';
 import { getAccessToken } from './tokens';
 import type { Env } from './types';
+import { log } from './log';
 
 /**
  * Read-through proxies for what a warehouse cannot answer from stored rows:
@@ -138,7 +139,7 @@ async function relabelEditions(db: D1Database, payload: unknown): Promise<void> 
       .bind(JSON.stringify(wanted))
       .all<EditionRow>());
   } catch (error) {
-    console.error('top-track edition relabel failed', error);
+    log('top-track-relabel-failed', { error }, 'error');
     return;
   }
 

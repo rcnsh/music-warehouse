@@ -2,6 +2,7 @@ import { json } from './api';
 import { readState } from './db';
 import { daysUntilTokenExpiry } from './tokens';
 import type { Env, OAuthToken, SyncState } from './types';
+import { log } from './log';
 
 /**
  * Unattended monitoring.
@@ -196,7 +197,7 @@ export async function runAlertCheck(
     if (!env.ALERT_WEBHOOK_URL) {
       // Nothing to send to. Still worth the log line, and no row is written so
       // configuring a webhook later delivers immediately.
-      console.warn('alert firing with no ALERT_WEBHOOK_URL set', alert.key, alert.title);
+      log('alert-no-webhook', { key: alert.key, title: alert.title }, 'warn');
       result.failed.push({ key: alert.key, error: 'ALERT_WEBHOOK_URL is not set' });
       continue;
     }

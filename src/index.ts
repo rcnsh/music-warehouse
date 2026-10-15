@@ -30,6 +30,7 @@ import {
 import { recordOwner, signInCallback, signInExchange, signInStart } from './signin';
 import { warmWrappedPresets, wrappedRangesRoute, wrappedRoute } from './wrapped';
 import type { Env } from './types';
+import { log } from './log';
 
 /** The cron expression reserved for the alert sweep; everything else polls. */
 const ALERT_CRON = '0 9 * * *';
@@ -103,7 +104,7 @@ async function callback(env: Env, url: URL): Promise<Response> {
   try {
     await recordOwner(env.DB, token.access_token);
   } catch (cause) {
-    console.error('owner', cause instanceof Error ? cause.message : cause);
+    log('owner-error', { error: cause instanceof Error ? cause.message : cause }, 'error');
   }
 
   return text('Authorized. Ingestion will resume on the next cron tick; POST /admin/poll to start now.');
@@ -273,7 +274,7 @@ async function handle(request: Request, env: Env, ctx: ExecutionContext): Promis
     // A deployment setting is wrong, not the request: name it so the operator
     // can fix it. The message holds the setting's shape, never its values.
     if (error instanceof EraConfigError || error instanceof RegionConfigError) {
-      console.error('config', error.message);
+      log('config-error', { message: error.message }, 'error');
       return json({ error: `Worker misconfigured: ${error.message}` }, 500);
     }
     if (error instanceof SnapshotPending) {
@@ -289,14 +290,14 @@ async function handle(request: Request, env: Env, ctx: ExecutionContext): Promis
     if (error instanceof SpotifyError) {
       // The client only ever sees the error *kind*, so without this an
       // upstream failure is undiagnosable after the fact.
-      console.error('spotify', error.kind, error.status, error.message);
+      log('spotify-error', { kind: error.kind, status: error.status, message: error.message }, 'error');
       const status = error.kind === 'rate_limited' || error.kind === 'quota_exceeded' ? 429 : 502;
       return json(
         { error: `Spotify upstream: ${error.kind}`, retry_after_seconds: error.retryAfterSeconds },
         status,
       );
     }
-    console.error('Unhandled error', error);
+    log('unhandled-error', { error }, 'error');
     return json({ error: 'Internal error' }, 500);
   }
 }
@@ -342,10 +343,10 @@ const worker = {
       ctx.waitUntil(
         runConcertCheck(env)
           .then((result) => {
-            console.log('concert-check', JSON.stringify(result));
+            log('concert-check', { result });
           })
           .catch((error) => {
-            console.error('concert-check failed', error);
+            log('concert-check-failed', { error }, 'error');
           }),
       );
       return;
@@ -354,10 +355,10 @@ const worker = {
       ctx.waitUntil(
         runAlertCheck(env)
           .then((result) => {
-            console.log('alert-check', JSON.stringify(result));
+            log('alert-check', { result });
           })
           .catch((error) => {
-            console.error('alert-check failed', error);
+            log('alert-check-failed', { error }, 'error');
           }),
       );
       // Polls only reconcile, index and key songs for what they touched; this
@@ -366,7 +367,7 @@ const worker = {
       ctx.waitUntil(
         env.DB.batch([...reconcileNameKeyedArtists(env.DB), syncSearchIndex(env.DB), ...syncAllSongs(env.DB)]).catch(
           (error) => {
-            console.error('artist-reconcile, search-index or song sync failed', error);
+            log('daily-sync-failed', { step: 'artist-reconcile, search-index or song sync', error }, 'error');
           },
         ),
       );
@@ -375,19 +376,19 @@ const worker = {
       ctx.waitUntil(
         ensureRollup(env)
           .then((result) => {
-            console.log('rollup', JSON.stringify(result));
+            log('rollup', { result });
           })
           .catch((error) => {
-            console.error('rollup failed', error);
+            log('rollup-failed', { error }, 'error');
           }),
       );
       ctx.waitUntil(
         warmWrappedPresets(env, ctx)
           .then((warmed) => {
-            console.log('wrapped-warm', JSON.stringify(warmed));
+            log('wrapped-warm', { result: warmed });
           })
           .catch((error) => {
-            console.error('wrapped-warm failed', error);
+            log('wrapped-warm-failed', { error }, 'error');
           }),
       );
       return;
@@ -398,13 +399,13 @@ const worker = {
     ctx.waitUntil(
       poll(env)
         .then((result) => {
-          console.log('poll', JSON.stringify(result));
+          log('poll', { result });
         })
         .catch((error) => {
           // Reaching here means D1 itself is unavailable — most likely the free
           // plan's daily row limit, which resets at 00:00 UTC. The cursor never
           // advanced, so the next run recovers on its own.
-          console.error('poll failed before any state could be recorded', error);
+          log('poll-failed', { note: 'before any state could be recorded', error }, 'error');
         }),
     );
   },
