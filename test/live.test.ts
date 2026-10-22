@@ -329,5 +329,107 @@ describe('authorization scopes', () => {
     expect(scope).toContain('user-read-recently-played');
     expect(scope).toContain('user-read-currently-playing');
     expect(scope).toContain('user-top-read');
+    expect(scope).toContain('user-modify-playback-state');
+  });
+});
+
+describe('POST /control/play', () => {
+  const CONTROL = { Authorization: 'Bearer test-control-token' };
+  const TRACK = '6PCUP3dWmTjcTtXY02oFdT';
+
+  function playRequest(headers: Record<string, string>, body: unknown = { track_id: TRACK }) {
+    return SELF.fetch(`${BASE}/control/play`, {
+      method: 'POST',
+      headers: { ...headers, 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  }
+
+  function stubPlayer(response: () => Response) {
+    const sent: Array<{ method: string; path: string; body: unknown }> = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url);
+        sent.push({ method: init?.method ?? 'GET', path: url.pathname, body: init?.body ? JSON.parse(String(init.body)) : null });
+        return response();
+      }),
+    );
+    return sent;
+  }
+
+  it('starts the track on the active device', async () => {
+    await seedAuthorized();
+    const sent = stubPlayer(() => new Response(null, { status: 204 }));
+
+    const response = await playRequest(CONTROL);
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ playing: TRACK });
+    expect(sent).toEqual([{ method: 'PUT', path: '/v1/me/player/play', body: { uris: [`spotify:track:${TRACK}`] } }]);
+    const counted = await env.DB.prepare("SELECT SUM(calls) AS calls FROM spotify_calls WHERE source = 'play'").first<{ calls: number }>();
+    expect(counted?.calls).toBe(1);
+  });
+
+  it('is refused to a read token, and is all a control token reaches', async () => {
+    await seedAuthorized();
+    const sent = stubPlayer(() => new Response(null, { status: 204 }));
+
+    expect((await playRequest(READ)).status).toBe(401);
+    for (const [method, path] of [
+      ['GET', '/api/plays'],
+      ['GET', '/api/now-playing'],
+      ['GET', '/health'],
+      ['POST', '/admin/poll'],
+      ['GET', '/admin/tokens'],
+    ] as const) {
+      const response = await SELF.fetch(`${BASE}${path}`, { method, headers: CONTROL });
+      expect(response.status, `${method} ${path}`).toBe(401);
+    }
+    expect(sent).toEqual([]);
+  });
+
+  it('is open to the admin token', async () => {
+    await seedAuthorized();
+    stubPlayer(() => new Response(null, { status: 204 }));
+    expect((await playRequest(ADMIN)).status).toBe(200);
+  });
+
+  it.each([{}, { track_id: 'spotify:track:abc' }, { track_id: 42 }, null])('refuses %j without calling Spotify', async (body) => {
+    await seedAuthorized();
+    const sent = stubPlayer(() => new Response(null, { status: 204 }));
+    expect((await playRequest(CONTROL, body)).status).toBe(400);
+    expect(sent).toEqual([]);
+  });
+
+  it('says when no device is active', async () => {
+    await seedAuthorized();
+    stubPlayer(() => jsonResponse({ error: { status: 404, message: 'Player command failed: No active device found', reason: 'NO_ACTIVE_DEVICE' } }, { status: 404 }));
+
+    const response = await playRequest(CONTROL);
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ reason: 'no_active_device' });
+  });
+
+  it.each([
+    ['Player command failed: Premium required', 'PREMIUM_REQUIRED', 'premium_required'],
+    ['Insufficient client scope', undefined, 'missing_scope'],
+  ])('names a 403 (%s)', async (message, spotifyReason, reason) => {
+    await seedAuthorized();
+    stubPlayer(() => jsonResponse({ error: { status: 403, message, reason: spotifyReason } }, { status: 403 }));
+
+    const response = await playRequest(CONTROL);
+    expect(response.status).toBe(403);
+    expect(await response.json()).toMatchObject({ reason });
+  });
+
+  it('returns 503 with needs_reauth when the grant is dead', async () => {
+    await seedAuthorized();
+    await env.DB.prepare('UPDATE oauth_token SET needs_reauth = 1 WHERE id = 1').run();
+    const sent = stubPlayer(() => new Response(null, { status: 204 }));
+
+    const response = await playRequest(CONTROL);
+    expect(response.status).toBe(503);
+    expect(sent).toEqual([]);
   });
 });

@@ -7,10 +7,14 @@ import { log } from './log';
  *
  * `admin` unlocks everything. `read` unlocks the /api/* routes only, so a
  * website can render listening data without holding a credential that could
- * also trigger a poll or write rows. Every route still requires one or the
- * other; /callback is the sole exception, and the OAuth `state` guards it.
+ * also trigger a poll or write rows. `control` unlocks POST /control/play and
+ * nothing else, not even reads, so starting playback is never a side effect
+ * of handing out a read token. Every route still requires one of them;
+ * /callback is the sole exception, and the OAuth `state` guards it.
  */
-export type Access = 'admin' | 'read';
+export type Access = TokenAccess | 'control';
+/** The levels a device token can hold. `control` is CONTROL_TOKEN alone. */
+export type TokenAccess = 'admin' | 'read';
 
 /** Prefix of every minted token, so a leaked one is easy to recognise and grep for. */
 const TOKEN_PREFIX = 'mw_';
@@ -95,7 +99,8 @@ export function listedOrigins(env: Env): string[] {
  * shared secret that never expires and cannot be revoked per reader. It
  * predates device tokens and is honoured until every reader has moved off it,
  * with a warning in the log each time it is used so the stragglers show up.
- * Everything else is a row in `api_tokens`, looked up by hash — which leaks
+ * CONTROL_TOKEN is the one credential that can start playback, held by the
+ * owner's website. Everything else is a row in `api_tokens`, looked up by hash — which leaks
  * nothing useful through timing, since a caller cannot choose what their guess
  * hashes to. Anything not shaped like a minted token is refused before D1 is
  * asked, so a stranger's guesses cost no reads.
@@ -107,6 +112,7 @@ export async function accessFor(request: Request, env: Env, ctx: ExecutionContex
   const presented = match[1]!;
 
   if (env.ADMIN_TOKEN && (await secretsMatch(presented, env.ADMIN_TOKEN))) return 'admin';
+  if (env.CONTROL_TOKEN && (await secretsMatch(presented, env.CONTROL_TOKEN))) return 'control';
   if (env.READ_TOKEN && (await secretsMatch(presented, env.READ_TOKEN))) {
     log('read-token-deprecated', { message: 'READ_TOKEN used: it is deprecated. Sign in, or mint a device token, and unset READ_TOKEN.' }, 'warn');
     return 'read';
@@ -119,7 +125,7 @@ export async function accessFor(request: Request, env: Env, ctx: ExecutionContex
       'WHERE token_hash = ? AND revoked_ms IS NULL AND (expires_ms IS NULL OR expires_ms > ?)',
   )
     .bind(await sha256Hex(presented), now)
-    .first<{ id: string; access: Access; last_used_ms: number | null }>();
+    .first<{ id: string; access: TokenAccess; last_used_ms: number | null }>();
   if (!row) return null;
 
   if (!row.last_used_ms || now - row.last_used_ms > LAST_USED_RESOLUTION_MS) {
@@ -132,14 +138,14 @@ export interface MintedToken {
   id: string;
   token: string;
   name: string;
-  access: Access;
+  access: TokenAccess;
   expires_ms: number | null;
 }
 
 /** Store a new token and return it. The token itself is never readable again. */
 export async function mintToken(
   db: D1Database,
-  options: { name: string; access: Access; ttlDays: number | null; via: string },
+  options: { name: string; access: TokenAccess; ttlDays: number | null; via: string },
   now = Date.now(),
 ): Promise<MintedToken> {
   const id = `tok_${randomSecret(9)}`;

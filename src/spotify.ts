@@ -31,6 +31,7 @@ export const SCOPE = [
   'user-read-currently-playing',
   'user-top-read',
   'user-library-read',
+  'user-modify-playback-state',
 ].join(' ');
 
 export type SpotifyErrorKind =

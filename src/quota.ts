@@ -25,6 +25,7 @@ export type CallSource =
   | 'contexts'
   | 'backfill'
   | 'signin'
+  | 'play'
   | 'admin';
 
 export type CallOutcome = '2xx' | '429' | 'other';

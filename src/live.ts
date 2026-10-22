@@ -1,7 +1,7 @@
 import { BadRequest, intParam, json } from './api';
 import { readState } from './db';
 import type { CallSource } from './quota';
-import { SpotifyError, type SpotifyCaller, assertSpotifyOpen, spotifyGet } from './spotify';
+import { SpotifyError, type SpotifyCaller, assertSpotifyOpen, spotifyFetch, spotifyGet, truncate } from './spotify';
 import { getAccessToken } from './tokens';
 import type { Env } from './types';
 import { log } from './log';
@@ -370,4 +370,53 @@ function albumImages(url: string | null): Array<{ url: string; height: number | 
     { url: url.replace(large, '/image/ab67616d00001e02'), height: 300, width: 300 },
     { url: url.replace(large, '/image/ab67616d00004851'), height: 64, width: 64 },
   ];
+}
+
+const TRACK_ID = /^[0-9A-Za-z]{22}$/;
+
+/**
+ * POST /control/play `{ track_id }`: start that track on whichever device is
+ * already playing or last played (Spotify Connect). Nothing plays in the
+ * Worker. Spotify answers 404 when no device is active, and 403 without
+ * Premium or without the user-modify-playback-state scope, which a grant from
+ * before the scope was added lacks until it is re-authorised at /login.
+ */
+export async function play(env: Env, request: Request, ctx?: ExecutionContext): Promise<Response> {
+  let body: { track_id?: unknown };
+  try {
+    body = (await request.json()) as typeof body;
+  } catch {
+    throw new BadRequest('Body must be JSON.');
+  }
+  const trackId = typeof body === 'object' && body !== null ? body.track_id : undefined;
+  if (typeof trackId !== 'string' || !TRACK_ID.test(trackId)) {
+    throw new BadRequest('`track_id` must be a Spotify track id.');
+  }
+
+  const path = '/me/player/play';
+  const accessToken = await accessTokenFor(env);
+  let response: Response;
+  try {
+    response = await spotifyFetch(callerFor(env, 'play', ctx), `https://api.spotify.com/v1${path}`, {
+      method: 'PUT',
+      headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ uris: [`spotify:track:${trackId}`] }),
+    });
+  } catch (cause) {
+    if (cause instanceof SpotifyError) throw cause;
+    throw new SpotifyError('network', `${path} request failed: ${(cause as Error).message}`);
+  }
+
+  if (response.ok) return json({ playing: trackId });
+  if (response.status === 401) throw new SpotifyError('unauthorized', `${path} returned 401.`, { status: 401 });
+  const detail = truncate(await response.text(), 300);
+  if (response.status === 404) {
+    return json({ error: 'No Spotify device is active. Start playing on one first.', reason: 'no_active_device' }, 409);
+  }
+  if (response.status === 403) {
+    log('play-forbidden', { detail }, 'warn');
+    const reason = detail.includes('PREMIUM_REQUIRED') ? 'premium_required' : /scope/i.test(detail) ? 'missing_scope' : 'forbidden';
+    return json({ error: `Spotify refused playback (${reason}).`, reason }, 403);
+  }
+  throw new SpotifyError('http', `${path} returned ${response.status}: ${detail}`, { status: response.status });
 }
