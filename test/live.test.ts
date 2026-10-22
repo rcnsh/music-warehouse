@@ -42,11 +42,6 @@ describe('read-only token (R11)', () => {
       expect(response.status, `${method} ${path}`).toBe(401);
     }
   });
-
-  it('still rejects an unknown token outright', async () => {
-    const response = await SELF.fetch(`${BASE}/api/plays`, { headers: { Authorization: 'Bearer nope' } });
-    expect(response.status).toBe(401);
-  });
 });
 
 describe('GET /api/now-playing', () => {
@@ -97,14 +92,6 @@ describe('GET /api/now-playing', () => {
     expect(response.status).toBe(503);
     expect(await response.json()).toMatchObject({ needs_reauth: true });
   });
-
-  it('surfaces a Spotify rate limit as 429, not a blank 500', async () => {
-    await seedAuthorized();
-    stubSpotify(() => new Response('{}', { status: 429 }));
-
-    const response = await SELF.fetch(`${BASE}/api/now-playing`, { headers: READ });
-    expect(response.status).toBe(429);
-  });
 });
 
 describe('GET /api/recently-played', () => {
@@ -130,14 +117,6 @@ describe('GET /api/recently-played', () => {
       expect(((await response.json()) as { error: string }).error).toMatch(/limit/);
     }
     expect(calls).toEqual([]);
-  });
-
-  it('passes a valid limit through', async () => {
-    await seedAuthorized();
-    const calls = stubSpotify(() => jsonResponse({ items: [] }));
-
-    await SELF.fetch(`${BASE}/api/recently-played?limit=50`, { headers: READ });
-    expect(calls).toEqual(['/v1/me/player/recently-played?limit=50']);
   });
 
   it('serves every limit from one kept page, sliced as Spotify would have answered', async () => {

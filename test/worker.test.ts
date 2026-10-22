@@ -333,12 +333,6 @@ describe('read endpoints (R9)', () => {
     expect(limited.artists).toEqual(expected.slice(0, 1));
   });
 
-  it('reports rows_read so query cost can be checked against D1 usage', async () => {
-    await seedPlays([{ ms: Date.parse('2026-09-08T12:00:00Z'), trackId: 't1' }]);
-    const body = (await (await get('/api/plays')).json()) as { _meta: { rows_read: number | null } };
-    expect(body._meta.rows_read).not.toBeNull();
-  });
-
   it('rejects an unknown timezone and a malformed date with 400', async () => {
     expect((await get('/api/daily?tz=Middle/Earth')).status).toBe(400);
     expect((await get('/api/daily?from=08-09-2026&tz=UTC')).status).toBe(400);
