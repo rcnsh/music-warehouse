@@ -498,6 +498,7 @@ locally. `npx wrangler secret list` shows what is set.
 | `ADMIN_TOKEN` | yes | Full access. `openssl rand -hex 32`. Keep it offline and use [device tokens](#device-tokens) day to day. |
 | `SPOTIFY_REDIRECT_URI` | yes | A var in `wrangler.jsonc`, not a secret. `.dev.vars` overrides it locally. |
 | `READ_TOKEN` | no | Deprecated: `/api/*` only. Prefer a read [device token](#device-tokens). |
+| `CONTROL_TOKEN` | no | [`POST /control/play`](#playback-control) only, for the one client allowed to start playback. `openssl rand -hex 32`. |
 | `CORS_ORIGINS` | no | Comma-separated browser origins (or `*`) allowed to call `/api/*`, e.g. `https://wrapped.example.com`. Unset sends no CORS headers. |
 | `ALERT_WEBHOOK_URL` | no | Where alerts are POSTed. See [Alerting](#alerting). |
 | `ALERT_MENTION` | no | Prefix for every alert, e.g. a Discord `<@id>`. |
@@ -572,6 +573,7 @@ Every route except `/callback` and `/auth/*` takes `Authorization: Bearer <token
 |---|---|
 | `ADMIN_TOKEN`, or an `admin` [device token](#device-tokens) | Everything. |
 | A `read` device token, or `READ_TOKEN` | `/api/*` only. Wrapped: presets and ranges already computed. |
+| `CONTROL_TOKEN` | [`POST /control/play`](#playback-control) only. Not a device token: it reads nothing. |
 
 Responses are JSON. Errors are `{ "error": "..." }` with:
 
@@ -627,6 +629,7 @@ Timestamps in responses are UTC.
 | `GET` | [`/api/now-playing`](#live-from-spotify) | Spotify's currently-playing, live. |
 | `GET` | [`/api/recently-played`](#live-from-spotify) | Spotify's recently-played, live. |
 | `GET` | [`/api/top`](#live-from-spotify) | Spotify's top tracks and artists, live. |
+| `POST` | [`/control/play`](#playback-control) | Start a track on the active Spotify device. |
 | | [`/login`, `/callback`, `/auth/*`](#sign-in-and-authorization) | Authorizing ingestion and signing in. |
 | | [`/health`, `/admin/*`](#admin) | Health, polling, imports, tokens and maintenance. Admin only. |
 
@@ -1015,6 +1018,25 @@ developer account, so these spend it carefully (migration 0021):
 - **Every call counted.** Each request sent to `api.spotify.com` is counted
   per hour by what sent it and how Spotify answered, kept 14 days, and summed
   under `spotify` in [`/health`](#health).
+
+### Playback control
+
+`POST /control/play` with `{ "track_id": "<22-character Spotify id>" }` starts
+that track on whichever Spotify device is playing or last played, through
+Spotify Connect. Only `CONTROL_TOKEN` and the admin token reach it; a read
+token gets `401`, so handing out read tokens never hands out control of the
+owner's speakers. It is outside `/api/*`, so it never gets CORS headers: call
+it from a server.
+
+| Status | Body |
+|---|---|
+| `200` | `{ "playing": "<track_id>" }` |
+| `400` | Not JSON, or no valid `track_id`. Spotify is not asked. |
+| `409` | `{ "reason": "no_active_device" }`: open Spotify somewhere first. |
+| `403` | `{ "reason": "premium_required" \| "missing_scope" \| "forbidden" }`. `missing_scope` means the grant predates `user-modify-playback-state`: [re-authorize](#re-authorizing). |
+| `429`, `502`, `503` | As for the [live routes](#live-from-spotify): paused after a 429, Spotify failed, grant lapsed. |
+
+Each call is one Spotify request, counted as `play` in `/health`.
 
 ### Sign-in and authorization
 

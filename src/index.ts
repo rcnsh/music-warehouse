@@ -5,7 +5,7 @@ import { importChunk } from './import';
 import { cleanupOverlapsRoute, cleanupShortGapsRoute, cleanupSkipsRoute } from './cleanup';
 import { poll } from './ingest';
 import { alertCheckRoute, runPollCron } from './alerts';
-import { nowPlaying, recentlyPlayed, topMusic } from './live';
+import { nowPlaying, play, recentlyPlayed, topMusic } from './live';
 import { SpotifyError, type TokenResponse, authorizeUrl, exchangeCode, fetchRecentlyPlayed } from './spotify';
 import { NeedsReauthError, getAccessToken, persistTokenResponse } from './tokens';
 import { dailyTrackSweep, readState } from './db';
@@ -178,8 +178,10 @@ async function handle(request: Request, env: Env, ctx: ExecutionContext): Promis
 
     const access = await accessFor(request, env, ctx);
     if (access === null) return unauthorized();
-    // A read-only token reaches the data routes and nothing else.
+    // A read-only token reaches the data routes and nothing else; a control
+    // token, playback alone.
     if (access === 'read' && !path.startsWith('/api/')) return unauthorized();
+    if (access === 'control' && route !== 'POST /control/play') return unauthorized();
 
     switch (route) {
       case 'GET /':
@@ -209,6 +211,7 @@ async function handle(request: Request, env: Env, ctx: ExecutionContext): Promis
             '/api/home',
             '/api/search',
             '/api/concerts',
+            '/control/play',
             '/admin/poll',
             '/admin/alert-check',
             '/admin/concert-check',
@@ -258,6 +261,8 @@ async function handle(request: Request, env: Env, ctx: ExecutionContext): Promis
         return await concertsRoute(env, url);
       case 'GET /api/search':
         return await searchRoute(env, url);
+      case 'POST /control/play':
+        return await play(env, request, ctx);
       case 'POST /admin/poll':
         return json(await poll(env));
       case 'GET /admin/concert-artists':

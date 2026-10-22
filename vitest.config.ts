@@ -40,6 +40,7 @@ export default defineConfig({
           SPOTIFY_REDIRECT_URI: 'http://127.0.0.1:8787/callback',
           ADMIN_TOKEN: 'test-admin-token',
           READ_TOKEN: 'test-read-token',
+          CONTROL_TOKEN: 'test-control-token',
           // Synthetic eras and regions: a deployment's own live in its secrets.
           // Two zones with different rules, one with summer time, so local-time
           // SQL is exercised across a change of era and a change of offset.

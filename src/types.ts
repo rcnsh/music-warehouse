@@ -13,6 +13,12 @@ export interface Env {
    */
   READ_TOKEN?: string;
   /**
+   * Optional credential for POST /control/play and nothing else, for the one
+   * client allowed to start playback on the owner's devices. Unset means only
+   * ADMIN_TOKEN can.
+   */
+  CONTROL_TOKEN?: string;
+  /**
    * Where the alert check POSTs when something needs a human. Optional:
    * unset means conditions are logged but never pushed anywhere.
    */
