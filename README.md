@@ -1022,8 +1022,8 @@ developer account, so these spend it carefully (migration 0021):
 ### Playback control
 
 `POST /control/play` with `{ "track_id": "<22-character Spotify id>" }` starts
-that track on whichever Spotify device is playing or last played, through
-Spotify Connect. Only `CONTROL_TOKEN` and the admin token reach it; a read
+that track, inside its album, on whichever Spotify device is playing or last
+played, through Spotify Connect. Only `CONTROL_TOKEN` and the admin token reach it; a read
 token gets `401`, so handing out read tokens never hands out control of the
 owner's speakers. It is outside `/api/*`, so it never gets CORS headers: call
 it from a server.
@@ -1036,7 +1036,10 @@ it from a server.
 | `403` | `{ "reason": "premium_required" \| "missing_scope" \| "forbidden" }`. `missing_scope` means the grant predates `user-modify-playback-state`: [re-authorize](#re-authorizing). |
 | `429`, `502`, `503` | As for the [live routes](#live-from-spotify): paused after a 429, Spotify failed, grant lapsed. |
 
-Each call is one Spotify request, counted as `play` in `/health`.
+The track starts inside its album, which plays on after it: Spotify accepts a
+bare track and then plays nothing. The album is the stored one, or for a track
+stored without one, asked of Spotify first. Each Spotify request is counted as
+`play` in `/health`.
 
 ### Sign-in and authorization
 

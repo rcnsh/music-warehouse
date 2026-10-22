@@ -375,8 +375,34 @@ function albumImages(url: string | null): Array<{ url: string; height: number | 
 const TRACK_ID = /^[0-9A-Za-z]{22}$/;
 
 /**
- * POST /control/play `{ track_id }`: start that track on whichever device is
- * already playing or last played (Spotify Connect). Nothing plays in the
+ * Spotify answers a bare `uris` list with 204 and then plays nothing, at
+ * least on the desktop app, so the track is started inside its album. That
+ * also lets the album carry on after it, rather than playback stopping.
+ */
+export function playBody(trackId: string, albumId: string | null): Record<string, unknown> {
+  const uri = `spotify:track:${trackId}`;
+  return albumId ? { context_uri: `spotify:album:${albumId}`, offset: { uri } } : { uris: [uri] };
+}
+
+/** The stored album, else Spotify's; null only if Spotify cannot say either. */
+async function albumOf(env: Env, caller: SpotifyCaller, accessToken: string, trackId: string): Promise<string | null> {
+  const stored = await env.DB.prepare('SELECT album_id FROM tracks WHERE track_id = ?')
+    .bind(trackId)
+    .first<{ album_id: string | null }>();
+  if (stored?.album_id) return stored.album_id;
+  try {
+    const track = (await spotifyGet(caller, accessToken, `/tracks/${trackId}`)) as { album?: { id?: unknown } } | null;
+    return typeof track?.album?.id === 'string' ? track.album.id : null;
+  } catch (error) {
+    if (error instanceof SpotifyError && (error.kind === 'rate_limited' || error.kind === 'quota_exceeded')) throw error;
+    log('play-album-lookup-failed', { error }, 'warn');
+    return null;
+  }
+}
+
+/**
+ * POST /control/play `{ track_id }`: start that track, inside its album, on
+ * whichever device is already playing or last played (Spotify Connect). Nothing plays in the
  * Worker. Spotify answers 404 when no device is active, and 403 without
  * Premium or without the user-modify-playback-state scope, which a grant from
  * before the scope was added lacks until it is re-authorised at /login.
@@ -395,12 +421,14 @@ export async function play(env: Env, request: Request, ctx?: ExecutionContext): 
 
   const path = '/me/player/play';
   const accessToken = await accessTokenFor(env);
+  const caller = callerFor(env, 'play', ctx);
+  const albumId = await albumOf(env, caller, accessToken, trackId);
   let response: Response;
   try {
-    response = await spotifyFetch(callerFor(env, 'play', ctx), `https://api.spotify.com/v1${path}`, {
+    response = await spotifyFetch(caller, `https://api.spotify.com/v1${path}`, {
       method: 'PUT',
       headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ uris: [`spotify:track:${trackId}`] }),
+      body: JSON.stringify(playBody(trackId, albumId)),
     });
   } catch (cause) {
     if (cause instanceof SpotifyError) throw cause;

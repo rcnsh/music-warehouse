@@ -345,30 +345,65 @@ describe('POST /control/play', () => {
     });
   }
 
-  function stubPlayer(response: () => Response) {
+  /** `response` answers the play command; a track lookup gets `track` (default: none). */
+  function stubPlayer(response: () => Response, track: () => Response = () => new Response('{}', { status: 404 })) {
     const sent: Array<{ method: string; path: string; body: unknown }> = [];
     vi.stubGlobal(
       'fetch',
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url);
         sent.push({ method: init?.method ?? 'GET', path: url.pathname, body: init?.body ? JSON.parse(String(init.body)) : null });
-        return response();
+        return url.pathname.startsWith('/v1/tracks/') ? track() : response();
       }),
     );
     return sent;
   }
 
-  it('starts the track on the active device', async () => {
+  async function storeTrack(albumId: string | null) {
+    await env.DB.prepare('INSERT INTO tracks (track_id, name, duration_ms, album_id, first_seen_ms) VALUES (?, ?, ?, ?, ?)')
+      .bind(TRACK, 'Kids', 200_000, albumId, Date.now())
+      .run();
+  }
+
+  it('starts the track inside its stored album, asking Spotify nothing else', async () => {
     await seedAuthorized();
+    await storeTrack('1V8Qu6CwkBfYucnCWxynq8');
     const sent = stubPlayer(() => new Response(null, { status: 204 }));
 
     const response = await playRequest(CONTROL);
 
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ playing: TRACK });
-    expect(sent).toEqual([{ method: 'PUT', path: '/v1/me/player/play', body: { uris: [`spotify:track:${TRACK}`] } }]);
+    expect(sent).toEqual([
+      {
+        method: 'PUT',
+        path: '/v1/me/player/play',
+        body: { context_uri: 'spotify:album:1V8Qu6CwkBfYucnCWxynq8', offset: { uri: `spotify:track:${TRACK}` } },
+      },
+    ]);
     const counted = await env.DB.prepare("SELECT SUM(calls) AS calls FROM spotify_calls WHERE source = 'play'").first<{ calls: number }>();
     expect(counted?.calls).toBe(1);
+  });
+
+  it('asks Spotify for the album of a track stored without one', async () => {
+    await seedAuthorized();
+    await storeTrack(null);
+    const sent = stubPlayer(
+      () => new Response(null, { status: 204 }),
+      () => jsonResponse({ id: TRACK, album: { id: '0Oq3mWfexhsjUh0aNNBB5u' } }),
+    );
+
+    expect((await playRequest(CONTROL)).status).toBe(200);
+    expect(sent.map((call) => call.path)).toEqual([`/v1/tracks/${TRACK}`, '/v1/me/player/play']);
+    expect(sent[1]!.body).toMatchObject({ context_uri: 'spotify:album:0Oq3mWfexhsjUh0aNNBB5u' });
+  });
+
+  it('falls back to the bare track when no album can be found', async () => {
+    await seedAuthorized();
+    const sent = stubPlayer(() => new Response(null, { status: 204 }));
+
+    expect((await playRequest(CONTROL)).status).toBe(200);
+    expect(sent.at(-1)).toEqual({ method: 'PUT', path: '/v1/me/player/play', body: { uris: [`spotify:track:${TRACK}`] } });
   });
 
   it('is refused to a read token, and is all a control token reaches', async () => {
