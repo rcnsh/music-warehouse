@@ -191,6 +191,20 @@ describe('GET /api/home', () => {
     expect(body.shortcuts).toHaveLength(2);
   });
 
+  it('counts an autoplayed track under its own album, not the one it was left with', async () => {
+    const now = Date.now();
+    await seed([
+      { ms: now - 2 * HOUR, track: 'single', context: 'spotify:album:al-single' },
+      { ms: now - 2 * HOUR + 4 * MIN, track: 'auto', context: 'spotify:album:al-single' },
+    ]);
+    const response = await SELF.fetch(`${BASE}/api/home?tz=UTC`, { headers: READ });
+    const body = (await response.json()) as Body;
+    expect(body.jump_back_in.map((i) => [i.uri, i.sessions])).toEqual([
+      ['spotify:album:al-auto', 1],
+      ['spotify:album:al-single', 1],
+    ]);
+  });
+
   it('keeps the contexts from before the detailed year for the day, and the body for the hour', async () => {
     const now = Date.now();
     // Played on five days two years ago, and not since: rediscover.

@@ -101,6 +101,41 @@ describe('context names', () => {
     expect(lookups).toContain('/playlists/editorial?fields=name');
   });
 
+  it('reads an album or artist the track is not part of as no context, since autoplay leaves it behind', async () => {
+    await env.DB.batch([
+      env.DB.prepare("INSERT INTO albums (album_id, name) VALUES ('alb1', 'Single'), ('alb2', 'Other')"),
+      env.DB.prepare("INSERT INTO artists (artist_id, name) VALUES ('art1', 'Singer'), ('art2', 'Other')"),
+      env.DB.prepare(
+        "INSERT INTO tracks (track_id, name, album_id, first_seen_ms) VALUES ('own', 'Own', 'alb1', 0), ('auto', 'Auto', 'alb2', 0), ('bare', 'Bare', NULL, 0)",
+      ),
+      env.DB.prepare("INSERT INTO track_artists (track_id, artist_id, position) VALUES ('own', 'art1', 0), ('auto', 'art2', 0)"),
+      env.DB.prepare(
+        `INSERT INTO contexts (uri, type, name, fetched_ms) VALUES ('spotify:album:alb1', 'album', 'Single', 0),
+           ('spotify:artist:art1', 'artist', 'Singer', 0), ('spotify:playlist:p', 'playlist', 'Mix', 0)`,
+      ),
+      env.DB.prepare(
+        `INSERT INTO plays (played_at_ms, track_id, context_uri, context_type) VALUES
+           (1, 'own', 'spotify:album:alb1', 'album'), (2, 'auto', 'spotify:album:alb1', 'album'),
+           (3, 'own', 'spotify:artist:art1', 'artist'), (4, 'auto', 'spotify:artist:art1', 'artist'),
+           (5, 'auto', 'spotify:playlist:p', 'playlist'), (6, 'bare', 'spotify:album:alb1', 'album')`,
+      ),
+    ]);
+
+    const response = await SELF.fetch(`${BASE}/api/plays`, { headers: READ });
+    const plays = ((await response.json()) as {
+      plays: Array<{ track_id: string; context_uri: string | null; context_type: string | null; context_name: string | null }>;
+    }).plays;
+    expect(plays.map((p) => [p.track_id, p.context_uri, p.context_type, p.context_name])).toEqual([
+      // A track whose album isn't known keeps its context.
+      ['bare', 'spotify:album:alb1', 'album', 'Single'],
+      ['auto', 'spotify:playlist:p', 'playlist', 'Mix'],
+      ['auto', null, null, null],
+      ['own', 'spotify:artist:art1', 'artist', 'Singer'],
+      ['auto', null, null, null],
+      ['own', 'spotify:album:alb1', 'album', 'Single'],
+    ]);
+  });
+
   it('asks at most a few per poll, and stops at a rate limit', async () => {
     await seedAuthorized();
     const items = Array.from({ length: 6 }, (_, i) => item(i, `t${i}`, { uri: `spotify:playlist:p${i}`, type: 'playlist' }));

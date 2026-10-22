@@ -127,3 +127,17 @@ export async function nameContexts(
   }
   return settled.length;
 }
+
+/**
+ * SQL, true unless play `p` (with its track `t`) claims an album it is not on
+ * or an artist it is not by. When an album or artist runs out, Spotify keeps
+ * reporting it as the context of the tracks autoplay picks next, so those
+ * plays are read as having no context. A playlist's tracks aren't stored, so
+ * a playlist context can't be checked and is always kept.
+ */
+export const CONTEXT_FITS = `(p.context_uri IS NULL
+   OR (NOT (p.context_uri GLOB 'spotify:album:*' AND t.album_id IS NOT NULL
+            AND p.context_uri <> 'spotify:album:' || t.album_id)
+       AND NOT (p.context_uri GLOB 'spotify:artist:*'
+                AND NOT EXISTS (SELECT 1 FROM track_artists cta
+                                 WHERE cta.track_id = p.track_id AND cta.artist_id = substr(p.context_uri, 16)))))`;

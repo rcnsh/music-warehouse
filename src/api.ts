@@ -9,6 +9,7 @@ import {
   startOfLocalDayUtcMs,
 } from './tz';
 import { ARTIST_TRACKS_CTE, SONG_TRACKS_CTE, textParam } from './history';
+import { CONTEXT_FITS } from './contexts';
 import { NAME_KEY_PREFIX } from './db';
 import { trigramPhrase } from './search-index';
 import { ROLLUP_STATE_SQL, type RollupState, beginsDay, endsDay, rollupServes, rollupZone, withTrackCounts } from './rollup';
@@ -101,11 +102,18 @@ export const likePattern = (term: string) => `%${term.replace(/[\\%_]/g, (c) => 
  */
 export const WALK_ABOVE_TRACKS = 500;
 
-/** Joined by every play query, for PLAY_COLUMNS' play number and context name. */
+/**
+ * Joined by every play query, for PLAY_COLUMNS' play number and context name.
+ * Every query also joins the play's track as `t`, which CONTEXT_FITS reads.
+ */
 const PLAY_JOINS = `LEFT JOIN play_numbers pn ON pn.played_at_ms = p.played_at_ms AND pn.track_id = p.track_id
        LEFT JOIN contexts cx ON cx.uri = p.context_uri`;
 
-export const PLAY_COLUMNS = `p.played_at_ms, p.track_id, p.context_uri, p.context_type, cx.name AS context_name, p.source,
+/** An autoplayed track's leftover album or artist context reads as none. */
+export const PLAY_COLUMNS = `p.played_at_ms, p.track_id,
+            CASE WHEN ${CONTEXT_FITS} THEN p.context_uri END AS context_uri,
+            CASE WHEN ${CONTEXT_FITS} THEN p.context_type END AS context_type,
+            CASE WHEN ${CONTEXT_FITS} THEN cx.name END AS context_name, p.source,
             pn.n AS play_number,
             t.name AS track_name, t.duration_ms, t.isrc,
             al.name AS album_name, al.image_url,

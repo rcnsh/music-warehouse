@@ -11,6 +11,8 @@ import type { Env } from './types';
  * looked up the first time a page meets them and remembered for the rest of
  * the download, a few rows per distinct track rather than per play. The CSV
  * has no play numbers, art, ISRCs or durations, so nothing else is joined.
+ * Contexts are written as stored, including the autoplay leftovers that
+ * /api/plays reads as none (see CONTEXT_FITS).
  *
  * A page is at most two D1 calls, its plays and one batch of the names it
  * lacks. The Workers Paid plan allows 1,000 per request (the Free plan 50),

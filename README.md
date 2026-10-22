@@ -708,6 +708,13 @@ if the grant lacks `playlist-read-private` (the Worker doesn't ask for it).
 Migration 0013 lists every context already stored. Export plays carry no
 context.
 
+When an album or artist runs out, Spotify autoplay carries on and Spotify
+keeps reporting the old album or artist as the context of what it picks. So
+a play whose album context isn't the track's album, or whose artist context
+isn't one of its artists, has all three `context_*` fields `null` here, and
+`/api/home` counts it under the track's own album. `/api/plays.csv` keeps
+the stored context. Playlist contexts can't be checked and are kept.
+
 `play_number` says which play of its song this was, counting every edition
 the way `/api/track` folds them (same title and primary artist, ignoring
 ASCII case), and `first_play` is `true` for a song's first ever play. Both are

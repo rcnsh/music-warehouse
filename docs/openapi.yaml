@@ -1267,7 +1267,7 @@ components:
         played_at_ms: { type: integer, description: "When the play ended, epoch-ms UTC." }
         track_id: { $ref: '#/components/schemas/TrackId' }
         context_uri:
-          description: The album, artist or playlist URI it was played from. Null for export plays and plays with no context.
+          description: The album, artist or playlist URI it was played from. Null for export plays, plays with no context, and autoplayed tracks Spotify still reports under an album they are not on or an artist they are not by.
           type: [string, 'null']
         context_type: { type: [string, 'null'], examples: [playlist, album, artist] }
         context_name:

@@ -1,4 +1,5 @@
 import { timeZoneParam } from './api';
+import { CONTEXT_FITS } from './contexts';
 import { respond } from './history';
 import { SnapshotPending, snapshot } from './snapshots';
 import { type LocalCalendar, localCalendar, localDayKey, offsetMsAt } from './tz';
@@ -69,8 +70,11 @@ const EDGE_TTL_SECONDS = 3600;
 const CACHE_ORIGIN = 'https://home.internal';
 const VERSION = 1;
 
-/** A play's context key, in SQL: its playlist, album or artist, its track's album without one, or NULL. */
-const KEY_SQL = `CASE WHEN p.context_uri IS NULL THEN 'spotify:album:' || t.album_id
+/**
+ * A play's context key, in SQL: its playlist, album or artist, its track's
+ * album without one (or with an autoplay leftover, see CONTEXT_FITS), or NULL.
+ */
+const KEY_SQL = `CASE WHEN p.context_uri IS NULL OR NOT ${CONTEXT_FITS} THEN 'spotify:album:' || t.album_id
                       WHEN p.context_uri GLOB 'spotify:album:*' OR p.context_uri GLOB 'spotify:playlist:*'
                         OR p.context_uri GLOB 'spotify:artist:*' THEN p.context_uri END`;
 const LEAD_SQL = `(SELECT ta.artist_id FROM track_artists ta WHERE ta.track_id = p.track_id AND ta.position = 0)`;

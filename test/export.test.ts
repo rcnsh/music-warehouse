@@ -112,13 +112,15 @@ describe('/api/plays.csv', () => {
         `WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i < 12499)
          INSERT INTO plays (played_at_ms, track_id, context_uri, source)
          SELECT 1700000000000 + (i / 2) * 60000, CASE WHEN i % 997 = 0 THEN 'gone' ELSE 't' || ((i * i) % 200) END,
-                CASE i % 4 WHEN 0 THEN 'spotify:playlist:p1' WHEN 1 THEN 'spotify:playlist:p2' WHEN 2 THEN 'spotify:album:x' END,
+                CASE i % 4 WHEN 0 THEN 'spotify:playlist:p1' WHEN 1 THEN 'spotify:playlist:p2' WHEN 2 THEN 'spotify:album:al' || ((i * i) % 200 % 40) END,
                 CASE WHEN i % 3 = 0 THEN 'export' ELSE 'api' END
            FROM n WHERE true ON CONFLICT DO NOTHING`,
       ),
       syncSearchIndex(db),
     ]);
 
+    // Album contexts match their tracks: /api/plays drops one that doesn't
+    // (an autoplay leftover), while the CSV keeps the stored context as it is.
     /** The CSV as the route wrote it before, from selectPlays' joined pages. */
     async function joined(query: string): Promise<string[]> {
       const url = new URL(`${BASE}/api/plays.csv${query}`);
