@@ -158,7 +158,12 @@ export function nowPlayingFreshMs(payload: unknown): number {
  * Spotify account. Failures are not kept.
  */
 export async function nowPlaying(env: Env, ctx?: ExecutionContext): Promise<Response> {
-  const { body, cache } = await sharedAnswer(
+  const { body, cache } = await sharedNowPlaying(env, ctx);
+  return answer(`{"item":${body}}`, cache);
+}
+
+function sharedNowPlaying(env: Env, ctx?: ExecutionContext) {
+  return sharedAnswer(
     env,
     ctx,
     'now-playing',
@@ -167,8 +172,18 @@ export async function nowPlaying(env: Env, ctx?: ExecutionContext): Promise<Resp
       spotifyGet(callerFor(env, 'now-playing', ctx), await accessTokenFor(env), '/me/player/currently-playing'),
     nowPlayingFreshMs,
   );
-  return answer(`{"item":${body}}`, cache);
 }
+
+/** Drop a shared answer from D1 and this colo, so the next reader asks Spotify. */
+async function forgetAnswer(env: Env, key: string): Promise<void> {
+  await Promise.all([
+    env.DB.prepare('DELETE FROM spotify_answers WHERE key = ?').bind(key).run(),
+    caches.open('spotify-answers').then((edge) => edge.delete(sharedAnswerKey(key))),
+  ]);
+}
+
+/** How long Spotify takes to report a track started through the API. */
+export const PLAY_SETTLE_MS = 2_000;
 
 /** How long one recently-played answer is shared. */
 export const RECENTLY_PLAYED_FRESH_MS = 60_000;
@@ -435,7 +450,18 @@ export async function play(env: Env, request: Request, ctx?: ExecutionContext): 
     throw new SpotifyError('network', `${path} request failed: ${(cause as Error).message}`);
   }
 
-  if (response.ok) return json({ playing: trackId });
+  if (response.ok) {
+    // The shared now-playing answer still names the old track, for up to 30s.
+    // Dropped now, and fetched again once Spotify reports the new one, so a
+    // reader polling in between cannot leave its stale answer behind.
+    await forgetAnswer(env, 'now-playing');
+    const refresh = new Promise((resolve) => setTimeout(resolve, PLAY_SETTLE_MS))
+      .then(() => forgetAnswer(env, 'now-playing'))
+      .then(() => sharedNowPlaying(env, ctx))
+      .catch((error) => log('play-now-playing-refresh-failed', { error }, 'warn'));
+    if (ctx) ctx.waitUntil(refresh);
+    return json({ playing: trackId });
+  }
   if (response.status === 401) throw new SpotifyError('unauthorized', `${path} returned 401.`, { status: 401 });
   const detail = truncate(await response.text(), 300);
   if (response.status === 404) {

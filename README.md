@@ -1041,6 +1041,10 @@ bare track and then plays nothing. The album is the stored one, or for a track
 stored without one, asked of Spotify first. Each Spotify request is counted as
 `play` in `/health`.
 
+A play drops the shared `/api/now-playing` answer, which still names the old
+track, and 2 s later, once Spotify reports the new one, fetches it again (one
+more call, counted as `now-playing`).
+
 ### Sign-in and authorization
 
 These take no token.

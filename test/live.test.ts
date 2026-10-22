@@ -385,6 +385,20 @@ describe('POST /control/play', () => {
     expect(counted?.calls).toBe(1);
   });
 
+  it('drops the shared now-playing answer, which still names the old track', async () => {
+    await seedAuthorized();
+    await storeTrack('1V8Qu6CwkBfYucnCWxynq8');
+    const now = Date.now();
+    await env.DB.prepare('INSERT INTO spotify_answers (key, body, fetched_ms, fresh_until_ms) VALUES (?, ?, ?, ?)')
+      .bind('now-playing', '{"is_playing":true,"item":{"name":"Old"}}', now, now + 30_000)
+      .run();
+    stubPlayer(() => new Response(null, { status: 204 }));
+
+    expect((await playRequest(CONTROL)).status).toBe(200);
+    const kept = await env.DB.prepare("SELECT body FROM spotify_answers WHERE key = 'now-playing'").first();
+    expect(kept).toBeNull();
+  });
+
   it('asks Spotify for the album of a track stored without one', async () => {
     await seedAuthorized();
     await storeTrack(null);
