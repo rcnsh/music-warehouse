@@ -51,8 +51,8 @@ There is no UI; the [clients](#clients) are separate repos.
   screen rows, publishable stats and Wrapped-style summaries for any range.
 - **Proxies live Spotify data.** Now playing, recently played and Spotify's top
   lists, so clients need no Spotify credentials of their own.
-- **Finds concerts.** Optionally, a daily Ticketmaster check for upcoming gigs by
-  the artists you play most.
+- **Finds concerts.** Optionally, with your own Ticketmaster key, a daily check
+  for upcoming gigs by the artists you play most.
 - **Serves synced lyrics.** Optionally, from the Spicy Lyrics API with your own
   secret key, so a client app needs no lyrics key of its own.
 - **Looks after itself.** `/health` reports whether ingestion is working, each
@@ -506,10 +506,10 @@ locally. `npx wrangler secret list` shows what is set.
 | `ALERT_MENTION` | no | Prefix for every alert, e.g. a Discord `<@id>`. |
 | `HEARTBEAT_URL` | no | A dead-man's switch, e.g. a [healthchecks.io](https://healthchecks.io) ping URL, fetched after every successful poll. See [Heartbeat](#heartbeat). |
 | `SIGN_IN_SCHEMES` | no | Comma-separated custom URL schemes a mobile app may [sign in](#signing-in-with-spotify) to, e.g. `app.remastered`. |
-| `TICKETMASTER_API_KEY` | no | A Ticketmaster Discovery API consumer key, from <https://developer.ticketmaster.com>, for [concerts](#concerts). The consumer secret isn't needed. Unset turns the concert check off. |
+| `TICKETMASTER_API_KEY` | no | A Ticketmaster Discovery API consumer key, from <https://developer.ticketmaster.com>, for [concerts](#concerts). The consumer secret isn't needed. Unset turns concerts off: no daily check, and `/api/concerts` answers `404`. |
 | `TIMEZONE` | no | IANA timezone the stats read local time in, when `ERAS` is unset. Default `UTC`. Also the zone of the [play-count rollup](#the-play-count-rollup); with only `ERAS` set, the rollup uses the latest era's zone. |
 | `ERAS` | no | JSON list of periods, each read in its own timezone. See [step 2](#2-configure-the-deployment) and [`src/eras.ts`](src/eras.ts). |
-| `CONCERT_REGIONS` | no | JSON list of places to look for [concerts](#concerts). Unset means none. |
+| `CONCERT_REGIONS` | no | JSON list of up to five places to look for [concerts](#concerts). Set it as a secret: a `geoPoint` can locate you. Unset (or `[]`) turns concerts off, like a missing key. |
 | `SPICY_LYRICS_SECRET_KEY` | no | A Spicy Lyrics **secret** key (`sl_sk_…`), from <https://developers.spicylyrics.org>, for [lyrics](#lyrics). Unset turns `/api/lyrics` off (it answers `404`). |
 
 ### Crons
@@ -970,6 +970,14 @@ and this year up to the last full week.
 
 ### Concerts
 
+Optional, and off until you set a Ticketmaster key and at least one region
+(see [Setting up concerts](#setting-up-concerts)). While it's off,
+`/api/concerts` answers `404 { "error": "Not found" }`, the same as a route the
+Worker doesn't have, so a client can hide concerts rather than show an empty
+list, and the daily check doesn't run. A client can probe with
+`GET /api/concerts?region=-`: `400` means on, `404` off, and neither reads the
+database.
+
 **`GET /api/concerts?region=&since=&tz=`**: upcoming Ticketmaster music
 events in the regions you configure, for the 80 artists you played most over
 the last year. Soonest first. `region` is one of the configured keys; `since`
@@ -1015,8 +1023,62 @@ to the date its third page reaches, and later events keep their rows (and
 `Retry-After` when that is short (30 s a run in all); the last run, and the
 last failure, are kept in `concert_check_state` (migration 0017), shown under
 `concerts` in `/health`, and two failed runs in a row raise the
-`concert_check_failing` [alert](#alerting). Needs `TICKETMASTER_API_KEY` and at
-least one region; new events themselves are not pushed.
+`concert_check_failing` [alert](#alerting). New events themselves are not
+pushed.
+
+#### Setting up concerts
+
+1. **Get a Ticketmaster key.** Sign up at <https://developer.ticketmaster.com>
+   and open **My Apps**. The default app's **Consumer Key** is the key; the
+   consumer secret isn't needed.
+   It's free, with a quota of 5,000 calls a day and 5 a second.
+2. **Choose your regions**, up to five, as a JSON list. Each has a `key`
+   (lowercase letters, digits and `-`, shown to clients), a `label`, and
+   either a Ticketmaster `countryCode` (ISO 3166, e.g. `"GB"`) or a `geoPoint`
+   [geohash](https://www.movable-type.co.uk/scripts/geohash.html) with a
+   `radius` in km:
+
+   ```json
+   [{ "key": "uk", "label": "United Kingdom", "countryCode": "GB" },
+    { "key": "nyc", "label": "New York", "geoPoint": "dr5ru", "radius": 40 }]
+   ```
+
+3. **Give both to the Worker**, as secrets (a `geoPoint` can say roughly where
+   you live, so keep it out of `wrangler.local.jsonc` and the repo):
+
+   ```bash
+   npx wrangler secret put TICKETMASTER_API_KEY    # paste the consumer key
+   npx wrangler secret put CONCERT_REGIONS         # paste the JSON on one line
+   ```
+
+   No binding or migration beyond the usual ones is needed (the tables come
+   with `npm run migrate:remote`). Locally, put both in `.dev.vars`.
+4. **Run the first check** rather than waiting for 01:23 UTC, then look:
+
+   ```bash
+   curl -s -X POST -H "Authorization: Bearer $ADMIN_TOKEN" "$WORKER_URL/admin/concert-check"
+   curl -s -H "Authorization: Bearer $READ_TOKEN" "$WORKER_URL/api/concerts" | head -c 400
+   curl -s -H "Authorization: Bearer $ADMIN_TOKEN" "$WORKER_URL/admin/concert-artists?unmatched=1"
+   ```
+
+   The first answers with what it did (or `skipped` and why); the last lists
+   top artists Ticketmaster has no exact match for, to [pin](#admin) if you
+   want them. Artists are matched 25 a day, so expect the list to grow over
+   the first few days. `{"error":"Not found"}` from `/api/concerts` means the
+   key or regions aren't set (or the deploy predates them); `500 Worker
+   misconfigured: CONCERT_REGIONS …` means the JSON is malformed.
+
+To turn concerts off again, delete either secret
+(`npx wrangler secret delete TICKETMASTER_API_KEY`). The stored rows stay in
+D1 and come back if you turn it on again.
+
+**Costs and limits.** The check runs once a day in its own cron invocation, so
+it gets a full subrequest budget and fits the Free plan's 50: a few
+Ticketmaster calls per region plus the day's artist lookups, well inside
+Ticketmaster's quota. Reading `/api/concerts` is one small D1 query.
+Ticketmaster's [terms of use](https://developer.ticketmaster.com/support/terms-of-use/)
+apply to you as the key's owner. Each event's `url` is Ticketmaster's own page
+for it.
 
 ### Lyrics
 

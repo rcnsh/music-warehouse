@@ -1,7 +1,8 @@
-import { SELF, env } from 'cloudflare:test';
+import { SELF, createExecutionContext, env } from 'cloudflare:test';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { concertCheckStatus, normalizeName, retryAfterMs, runConcertCheck, topArtists } from '../src/concerts';
 import { ensureRollup } from '../src/rollup';
+import worker from '../src/index';
 import { jsonResponse } from './helpers';
 
 const BASE = 'https://warehouse.test';
@@ -425,5 +426,18 @@ describe('concert artist pins', () => {
     const read = await SELF.fetch(`${BASE}/admin/concert-artists`, { method: 'PUT', headers: READ, body: '{}' });
     expect(read.status).toBe(401);
     expect((await SELF.fetch(`${BASE}/admin/concert-artists`, { headers: READ })).status).toBe(401);
+  });
+});
+
+describe('/api/concerts when concerts are off', () => {
+  const get = (bindings: Cloudflare.Env) =>
+    worker.fetch(new Request(`${BASE}/api/concerts`, { headers: READ }), bindings, createExecutionContext());
+
+  it('is a plain 404 without a Ticketmaster key or without a region', async () => {
+    for (const off of [{ ...env, TICKETMASTER_API_KEY: undefined }, { ...env, CONCERT_REGIONS: undefined }, { ...env, CONCERT_REGIONS: '[]' }]) {
+      const response = await get(off);
+      expect(response.status).toBe(404);
+      expect(await response.json()).toEqual({ error: 'Not found' });
+    }
   });
 });

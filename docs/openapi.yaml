@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: music-warehouse read API
-  version: 1.3.0
+  version: 1.4.0
   license:
     name: MIT
     identifier: MIT
@@ -797,7 +797,12 @@ paths:
       tags: [Concerts]
       operationId: getConcerts
       summary: Upcoming Ticketmaster events for the most-played artists
-      description: Soonest first; events with no date last.
+      description: |
+        Soonest first; events with no date last. Optional: on a deployment
+        without `TICKETMASTER_API_KEY` or a region in `CONCERT_REGIONS`, every
+        request is `404 { "error": "Not found" }`, the same as a route the
+        Worker lacks. With both, `?region=-` is a `400`, so it probes for the
+        feature without reading the database.
       parameters:
         - name: region
           in: query
@@ -837,6 +842,7 @@ paths:
                     items: { $ref: '#/components/schemas/Concert' }
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/FeatureOff' }
         '500': { $ref: '#/components/responses/ServerError' }
 
   /api/lyrics:
@@ -1277,6 +1283,12 @@ components:
         application/json:
           schema: { $ref: '#/components/schemas/Error' }
           example: { error: Unauthorized }
+    FeatureOff:
+      description: The feature is off on this deployment (a setting it needs is unset), the same answer as a route the Worker lacks.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { error: Not found }
     ServerError:
       description: '`Internal error`, or `Worker misconfigured: ...` for a bad deployment setting.'
       content:
