@@ -44,4 +44,4 @@ Each feature file starts with an H1 title and one paragraph describing the user-
 
 ## Not mapped yet
 
-`/api/artist`, `/api/track`, `/api/search` (answer on the seed, e.g. `/api/artist?name=The%20Paper%20Lanterns` has 82 plays and `/api/search?q=harbour` finds `Harbour Lights` with 56), `/api/on-this-day` and `/api/home` (both empty on this seed), `/api/concerts`, `/admin/cleanup/*`, `/admin/rollup`, `/admin/alert-check`, `POST /admin/import?dry_run=1`.
+`/api/artist`, `/api/track`, `/api/search` (answer on the seed, e.g. `/api/artist?name=The%20Paper%20Lanterns` has 82 plays and `/api/search?q=harbour` finds `Harbour Lights` with 56), `/api/on-this-day` and `/api/home` (both empty on this seed), `/api/radio` (the seed's plays are mostly hours apart, so most songs have an empty radio; `?track=mwverify00000000000004` lists one, `mwverify00000000000010`), `/api/concerts`, `/admin/cleanup/*`, `/admin/rollup`, `/admin/alert-check`, `POST /admin/import?dry_run=1`.

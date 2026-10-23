@@ -254,6 +254,30 @@ since only an import of old plays changes it. Bodies are held in the Cache
 API under the zone, local day and local hour, so a new play can take up to an
 hour to show: keyed on the newest play as well, every poll missed.
 
+## Radio
+
+`/api/radio` stands in for the recommendations and related artists Spotify's
+Web API no longer gives apps: a song's radio is what the user plays near it
+(src/radio.ts). The seed is a song, every edition folded as `/api/track` folds
+them, or an artist's songs as `/api/artist` credits them.
+
+The seed's newest play in each UTC hour stands for that hour, for the newest
+300 hours, so a song on repeat or an album played through is a few seeds, not
+dozens. Every play within 45 minutes of a seed is near it; overlapping windows
+are one session. Per session a song scores its best `2^(-minutes from the
+nearest seed / 10) × 2^(-age / 1 year)`, so repeating it there adds nothing,
+and skips (under 30 s before the next play) count for nothing. The sum is
+divided by `(the song's plays + 5)^0.3`, its play count read as its latest
+play number (one seek), so an all-time favourite doesn't top every radio and
+one played once isn't lifted above one played near the seed often. At most
+three songs per primary artist name. A track seed leaves its own editions out;
+an artist seed keeps its songs, which then open the list.
+
+Each window is one range seek on the plays primary key (`CROSS JOIN` keeps
+SQLite from scanning plays once per window, which read 2M rows on the real
+warehouse; now about 2k for a song and 11k for a much-played artist). Answers
+are kept like the history routes'.
+
 ## Known limitations
 
 - **Export-era artists are keyed by name, not id.** The export carries names
