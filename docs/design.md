@@ -278,6 +278,41 @@ SQLite from scanning plays once per window, which read 2M rows on the real
 warehouse; now about 2k for a song and 11k for a much-played artist). Answers
 are kept like the history routes'.
 
+## Lyrics
+
+`/api/lyrics` is a thin, optional proxy to the [Spicy Lyrics
+API](https://developers.spicylyrics.org) (src/lyrics.ts), so a client app can
+show synced lyrics without carrying a key of its own. A publishable key baked
+into an app can be read out of it; the deployment's secret key stays in a
+Worker secret.
+
+- **Off by default.** Without `SPICY_LYRICS_SECRET_KEY` the route is the same
+  `404 Not found` as a route the Worker lacks, before the `track` check, so a
+  client's feature probe (no `track`) hides lyrics. With a key, no `track` is a
+  `400`; neither calls upstream.
+- **The body passes through unchanged.** Spicy Lyrics' terms require the
+  provider, and for community syncs the uploader and maker, shown with the
+  lyrics, and forbid altering the marks each response carries, so the Worker
+  neither parses nor rewrites a `200` or `404`. A client parses it as Spicy
+  Lyrics' own answer. Its "no lyrics" `404` is told from the Worker's own by
+  the body.
+- **Upstream key errors are not the reader's.** Spicy Lyrics' `401` and `403`
+  are about the deployment's key; passed on, they would read as the reader's
+  token being rejected. They become `502 Lyrics upstream: key rejected`, with
+  Spicy Lyrics' error code (never the key) in the log.
+- **Cache within the terms' 30 days.** The Cache API, not D1, so no migration
+  and no row costs: lyrics 7 days, "no lyrics" 1 day (new community syncs
+  appear), errors never. A kept answer's `Age` lets a client that stores it
+  count the time already spent here.
+- **`Retry-After` is honoured.** A `429` or `503` from upstream is passed on,
+  and the isolate sends nothing more until its `Retry-After` passes, answering
+  `429` itself meanwhile. The pause is per isolate, not shared through D1 like
+  Spotify's: lyrics traffic is one request per new song.
+- **Only the owner's clients.** The terms allow a server serving its own users
+  and forbid re-exposing the API to anyone else. The route sits behind the
+  read token like the rest of `/api/*`, and sign-in mints tokens only for the
+  warehouse's owner.
+
 ## Known limitations
 
 - **Export-era artists are keyed by name, not id.** The export carries names

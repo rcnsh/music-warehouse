@@ -18,6 +18,7 @@ import { artistRoute, cachedHistory, onThisDayRoute, topTracksRoute, trackRoute 
 import { searchRoute } from './search';
 import { homeRoute } from './home';
 import { radioRoute } from './radio';
+import { LyricsConfigError, lyricsRoute } from './lyrics';
 import { playsCsvRoute } from './export';
 import {
   RegionConfigError,
@@ -213,6 +214,7 @@ async function handle(request: Request, env: Env, ctx: ExecutionContext): Promis
             '/api/radio',
             '/api/search',
             '/api/concerts',
+            '/api/lyrics',
             '/control/play',
             '/admin/poll',
             '/admin/alert-check',
@@ -265,6 +267,8 @@ async function handle(request: Request, env: Env, ctx: ExecutionContext): Promis
         return await concertsRoute(env, url);
       case 'GET /api/search':
         return await searchRoute(env, url);
+      case 'GET /api/lyrics':
+        return await lyricsRoute(env, url);
       case 'POST /control/play':
         return await play(env, request, ctx);
       case 'POST /admin/poll':
@@ -310,7 +314,7 @@ async function handle(request: Request, env: Env, ctx: ExecutionContext): Promis
     if (error instanceof BadRequest) return json({ error: error.message }, 400);
     // A deployment setting is wrong, not the request: name it so the operator
     // can fix it. The message holds the setting's shape, never its values.
-    if (error instanceof EraConfigError || error instanceof RegionConfigError) {
+    if (error instanceof EraConfigError || error instanceof RegionConfigError || error instanceof LyricsConfigError) {
       log('config-error', { message: error.message }, 'error');
       return json({ error: `Worker misconfigured: ${error.message}` }, 500);
     }

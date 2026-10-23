@@ -53,6 +53,8 @@ There is no UI; the [clients](#clients) are separate repos.
   lists, so clients need no Spotify credentials of their own.
 - **Finds concerts.** Optionally, a daily Ticketmaster check for upcoming gigs by
   the artists you play most.
+- **Serves synced lyrics.** Optionally, from the Spicy Lyrics API with your own
+  secret key, so a client app needs no lyrics key of its own.
 - **Looks after itself.** `/health` reports whether ingestion is working, each
   poll can push alerts to Discord, Slack or ntfy, and an optional heartbeat
   lets an outside monitor notice if the Worker stops altogether.
@@ -508,6 +510,7 @@ locally. `npx wrangler secret list` shows what is set.
 | `TIMEZONE` | no | IANA timezone the stats read local time in, when `ERAS` is unset. Default `UTC`. Also the zone of the [play-count rollup](#the-play-count-rollup); with only `ERAS` set, the rollup uses the latest era's zone. |
 | `ERAS` | no | JSON list of periods, each read in its own timezone. See [step 2](#2-configure-the-deployment) and [`src/eras.ts`](src/eras.ts). |
 | `CONCERT_REGIONS` | no | JSON list of places to look for [concerts](#concerts). Unset means none. |
+| `SPICY_LYRICS_SECRET_KEY` | no | A Spicy Lyrics **secret** key (`sl_sk_…`), from <https://developers.spicylyrics.org>, for [lyrics](#lyrics). Unset turns `/api/lyrics` off (it answers `404`). |
 
 ### Crons
 
@@ -582,10 +585,10 @@ Responses are JSON. Errors are `{ "error": "..." }` with:
 | `400` | A bad parameter; the message says which. |
 | `401` | Missing or wrong token, or a read token on a route outside `/api/*`. |
 | `403` | A read token asked Wrapped for a range it may not compute. |
-| `404` | `Not found`: no such route. |
-| `429` | Spotify rate limit or quota (live routes), `Too many sign-ins in progress` from `/auth/login`, or `Too many sign-in requests` from any `/auth/*` route when `AUTH_RATE_LIMITER` is bound. |
+| `404` | `Not found`: no such route, or an optional one this deployment has switched off ([lyrics](#lyrics)). `/api/lyrics` also passes on Spicy Lyrics' own `404` for a song with no lyrics. |
+| `429` | Spotify rate limit or quota (live routes), Spicy Lyrics' rate limit ([lyrics](#lyrics)), `Too many sign-ins in progress` from `/auth/login`, or `Too many sign-in requests` from any `/auth/*` route when `AUTH_RATE_LIMITER` is bound. |
 | `500` | `Worker misconfigured: …` when a setting such as `ERAS` or `CONCERT_REGIONS` is malformed (the message names the setting, never its value); otherwise `Internal error`. |
-| `502` | Any other Spotify failure (live routes). |
+| `502` | Any other Spotify failure (live routes), or a Spicy Lyrics failure ([lyrics](#lyrics)). |
 | `503` | Either a stat or Wrapped range is still being computed, or (live routes only) the Spotify grant has lapsed. See below. |
 
 Spotify failures (`429`, `502`) also carry `retry_after_seconds` when Spotify
@@ -627,6 +630,7 @@ Timestamps in responses are UTC.
 | `GET` | [`/api/wrapped`](#wrapped) | A Wrapped-style summary of any finished range. |
 | `GET` | [`/api/wrapped/ranges`](#wrapped) | The Wrapped presets. |
 | `GET` | [`/api/concerts`](#concerts) | Upcoming Ticketmaster events for your top artists. |
+| `GET` | [`/api/lyrics`](#lyrics) | Synced lyrics for a song, from Spicy Lyrics. Optional. |
 | `GET` | [`/api/now-playing`](#live-from-spotify) | Spotify's currently-playing, live. |
 | `GET` | [`/api/recently-played`](#live-from-spotify) | Spotify's recently-played, live. |
 | `GET` | [`/api/top`](#live-from-spotify) | Spotify's top tracks and artists, live. |
@@ -1013,6 +1017,93 @@ last failure, are kept in `concert_check_state` (migration 0017), shown under
 `concerts` in `/health`, and two failed runs in a row raise the
 `concert_check_failing` [alert](#alerting). Needs `TICKETMASTER_API_KEY` and at
 least one region; new events themselves are not pushed.
+
+### Lyrics
+
+Optional, and off until you set a key. **`GET /api/lyrics?track=<Spotify track id>`**
+fetches the song's synced lyrics from the [Spicy Lyrics API](https://developers.spicylyrics.org)
+with your deployment's secret key, so a client (the Android app, say) needs no
+lyrics key of its own, and nothing that can be lifted out of an app.
+
+The answer is Spicy Lyrics' own, passed through byte for byte with its status:
+
+| Status | Body | Means |
+|---|---|---|
+| `200` | Spicy Lyrics' `{ "Body": { "Type", "Content", "source", "UploadAttribution"?, … }, "Status": 200 }` | The lyrics. Parse it as Spicy Lyrics documents it. |
+| `404` | Spicy Lyrics' `{ "Body": { "error": "lyrics_not_found", … } }` | No lyrics for this song. |
+| `404` | `{ "error": "Not found" }` | Lyrics are off on this deployment (no key), the same answer as a route it doesn't have. Tell the two `404`s apart by the body. |
+| `400` | `{ "error": "…" }` | `track` is missing or isn't a 22-character Spotify id. Checked before Spicy Lyrics is asked. |
+| `429`, `503` | Spicy Lyrics' error, with its `Retry-After` | Spicy Lyrics asked for a pause. Until it passes, the Worker answers `429` itself without asking again. |
+| `502` | `{ "error": "Lyrics upstream: key rejected" }` or another `Lyrics upstream: …` | Spicy Lyrics refused the key (revoked, paused application) or failed. Its error code is in the Worker log; the key never is. |
+| `500` | `{ "error": "Worker misconfigured: SPICY_LYRICS_SECRET_KEY …" }` | The key is a publishable one (`sl_pk_…`). |
+
+Responses also carry `X-Cache` (`hit` or `miss`), `Age` (seconds since the
+Worker fetched the body; a client that keeps lyrics should count it toward the
+30-day cap below) and Spicy Lyrics' `RateLimit-*` headers on a miss. A client
+can probe for the feature with `GET /api/lyrics` and no `track`: `400` means
+on, `404` off, and neither calls Spicy Lyrics.
+
+#### Setting up lyrics
+
+1. **Make an application.** Sign in at <https://developers.spicylyrics.org>,
+   open the [dashboard](https://developers.spicylyrics.org/dashboard/applications)
+   and create an application. It shows a **secret key** (`sl_sk_…`) once; copy
+   it then. Use the secret key, not client access's publishable key
+   (`sl_pk_…`): Spicy Lyrics' terms put secret keys "on a server you control"
+   and publishable keys in code shipped to users, and a secret key has no
+   per-viewer limit (every request comes from the Worker) and can be rotated
+   without breaking an installed app. The Worker refuses a publishable key.
+2. **Give it to the Worker:**
+
+   ```bash
+   npx wrangler secret put SPICY_LYRICS_SECRET_KEY    # paste the sl_sk_… key
+   ```
+
+   No `wrangler.jsonc` change, binding or migration is needed: the cache is
+   the Workers Cache API. Locally, put `SPICY_LYRICS_SECRET_KEY=sl_sk_…` in
+   `.dev.vars`.
+3. **Check it** with a read token and any track id:
+
+   ```bash
+   curl -s -H "Authorization: Bearer $READ_TOKEN" "$WORKER_URL/api/lyrics?track=4uLU6hMCjMI75M1A2tKUQC" | head -c 300
+   curl -sI -H "Authorization: Bearer $READ_TOKEN" "$WORKER_URL/api/lyrics?track=4uLU6hMCjMI75M1A2tKUQC" | grep -i '^x-cache'   # hit the second time
+   ```
+
+   `{"error":"Not found"}` means the secret isn't set (or the deploy predates
+   it); `Lyrics upstream: key rejected` means Spicy Lyrics doesn't accept the key.
+
+To turn lyrics off again: `npx wrangler secret delete SPICY_LYRICS_SECRET_KEY`.
+
+**Costs and limits.** Spicy Lyrics is free, with no uptime promise, and sets a
+per-application rate limit that its dashboard shows (it can change it at any
+time). On the Worker's side each lyrics request is one request, plus one
+subrequest to Spicy Lyrics when it isn't cached; no D1 reads or writes. On the
+Free plan they count against the 100,000 requests a day the cron shares.
+
+**Caching.** Lyrics are kept in the Cache API for 7 days and "no lyrics" for
+1 day, per Cloudflare location (a colo may drop them sooner). Only `200` and
+Spicy Lyrics' `404` are kept; errors never are.
+
+**Spicy Lyrics' terms** (<https://developers.spicylyrics.org/terms>) apply to
+you as the key's owner. They allow exactly this: "Running your own server that
+calls the API and serves the result to your own users is expected and fine —
+that is what a secret key is for." In short:
+
+- **Your own key.** "If you publish source code that calls this API, each
+  person who runs their own copy of it on a server needs their own key." Don't
+  share yours, or deploy someone else's.
+- **Only your own clients.** The route needs a warehouse token like every other
+  `/api/*` route, and sign-in only mints tokens for the warehouse's owner. Don't
+  open it to others, add other people's sites to `CORS_ORIGINS` for it, or hand
+  out read tokens: serving lyrics "to anyone who turns up with a request" is
+  redistribution, and so is a tool that hands people the response to keep.
+- **Attribution.** Show the provider (`source`) wherever lyrics show, and for
+  `spicy_lyrics` also link the uploader and maker from `UploadAttribution`. The
+  Worker passes the body through unchanged for this; don't strip it in a client.
+- **Under 30 days.** Anything stored must be refetched or dropped within 30
+  days. The Worker keeps at most 7; a client that keeps lyrics too should date
+  them from the response's `Age`.
+- **Rate limits.** Honour `Retry-After`; the Worker does, and passes it on.
 
 ### Live from Spotify
 
