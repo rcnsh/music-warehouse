@@ -535,7 +535,7 @@ in an `X-Rows-Read` header; `/api/plays`, `/api/daily` and `/api/top-artists`
 also put it in the body's `_meta.rows_read`.
 
 `/api/artist`, `/api/track`, `/api/top-artists`, `/api/top-tracks`,
-`/api/daily` and `/api/on-this-day` are kept in the Cache API until a new
+`/api/daily`, `/api/on-this-day` and `/api/radio` are kept in the Cache API until a new
 play or track arrives (three rows read to check), and sent with
 `Cache-Control: private, max-age=60`; a kept answer has `X-Cache: hit`, and its
 `X-Rows-Read` is the rows the check read, while the body's `_meta.rows_read`
@@ -621,6 +621,7 @@ Timestamps in responses are UTC.
 | `GET` | [`/api/track`](#history) | One song's whole history, editions folded. |
 | `GET` | [`/api/on-this-day`](#history) | Top songs on this date in earlier years. |
 | `GET` | [`/api/home`](#home) | Home-screen rows ranked from the history. |
+| `GET` | [`/api/radio`](#radio) | Songs to queue after a song or artist, from what you play near it. |
 | `GET` | [`/api/search`](#search) | Stored artists and songs by name. |
 | `GET` | [`/api/stats/{name}`](#stats) | Cached aggregates safe to publish. |
 | `GET` | [`/api/wrapped`](#wrapped) | A Wrapped-style summary of any finished range. |
@@ -843,6 +844,30 @@ and artists have no image here, and some playlists no name), so a client looks
 those up itself. `artist` is an album's or artist page's primary artist.
 `sessions` is how many times it was played from (for `rediscover`, on how many
 days).
+
+### Radio
+
+**`GET /api/radio?track=&limit=`** or **`?artist=&limit=`**: songs to queue
+after a seed song or artist, ranked from what you play near it, since
+Spotify's Web API no longer gives apps recommendations or related artists.
+Give exactly one of `track` (any edition's id; every edition counts as the
+seed and is left out) or `artist` (an id; its own songs stay in, so its radio
+opens with them). `limit` is 1 to 100, default 40.
+
+```json
+GET /api/radio?track=4Ko4nB4mGsDH4W9ocqCVvA
+{ "seed": { "type": "track", "id": "4Ko4nB4mGsDH4W9ocqCVvA", "name": "…", "artist": "…" },
+  "tracks": [ { "id": "…", "name": "…", "artist": "…", "artist_id": "…", "album": "…",
+                "image": "https://i.scdn.co/…", "sessions": 12, "score": 1.874 } ] }
+```
+
+Songs played within 45 minutes of the seed's plays score by how close and how
+recent, once per listening session, damped by how much they're played
+overall; at most three per primary artist. `sessions` is how many of the
+seed's sessions the song was played in; `score` only orders the list. `id` is
+the edition played most near the seed. An artist seed's `seed` has no
+`artist`. A seed never played (or unknown) is a `200` with no tracks, never a
+`404`. How it ranks: [design notes](docs/design.md#radio).
 
 ### Search
 

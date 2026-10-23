@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: music-warehouse read API
-  version: 1.1.0
+  version: 1.2.0
   license:
     name: MIT
     identifier: MIT
@@ -57,7 +57,7 @@ tags:
   - name: Stored plays
     description: Read only D1, so they work when the Spotify grant has lapsed.
   - name: History
-    description: One artist, one song, a date, search and home rows, from stored plays.
+    description: One artist, one song, a date, search, home rows and radio, from stored plays.
   - name: Stats
     description: Cached aggregates, built to be safe to publish. No parameters.
   - name: Wrapped
@@ -562,6 +562,77 @@ paths:
                     type: array
                     maxItems: 20
                     items: { $ref: '#/components/schemas/HomeItem' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500': { $ref: '#/components/responses/ServerError' }
+
+  /api/radio:
+    get:
+      tags: [History]
+      operationId: getRadio
+      summary: Songs to queue after a seed song or artist, from what is played near it
+      description: |
+        A stand-in for Spotify's recommendations, which apps can no longer
+        read: songs played within 45 minutes of the seed's plays, scored by
+        closeness and recency once per session, damped by overall plays, at
+        most three per primary artist. Give exactly one of `track` or
+        `artist`. A track seed's editions are left out; an artist seed's own
+        songs stay in. An unplayed or unknown seed is a `200` with no tracks.
+      parameters:
+        - name: track
+          in: query
+          description: Any edition's Spotify track id.
+          schema: { type: string, minLength: 1, maxLength: 200 }
+        - name: artist
+          in: query
+          description: A Spotify artist id.
+          schema: { type: string, minLength: 1, maxLength: 200 }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 40 }
+      responses:
+        '200':
+          description: The radio, best first.
+          headers:
+            X-Rows-Read: { $ref: '#/components/headers/X-Rows-Read' }
+            X-Cache:
+              description: '`hit` when served from the edge cache; absent otherwise.'
+              schema: { type: string, enum: [hit] }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [seed, tracks]
+                properties:
+                  seed:
+                    type: object
+                    required: [type, id, name]
+                    properties:
+                      type: { type: string, enum: [track, artist] }
+                      id: { type: string }
+                      name:
+                        description: Null for an unknown id.
+                        type: [string, 'null']
+                      artist:
+                        description: A track seed's primary artist; absent for an artist seed.
+                        type: [string, 'null']
+                  tracks:
+                    type: array
+                    maxItems: 100
+                    items:
+                      type: object
+                      required: [id, name, artist, artist_id, album, image, sessions, score]
+                      properties:
+                        id: { $ref: '#/components/schemas/TrackId' }
+                        name: { type: string }
+                        artist: { type: [string, 'null'], description: Primary artist. }
+                        artist_id:
+                          description: Primary artist's id; `name:`-prefixed for an artist only the export knows.
+                          type: [string, 'null']
+                        album: { type: [string, 'null'] }
+                        image: { $ref: '#/components/schemas/NullableUrl' }
+                        sessions: { type: integer, description: "Seed sessions the song was played in." }
+                        score: { type: number, description: Relative; only orders the list. }
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '500': { $ref: '#/components/responses/ServerError' }

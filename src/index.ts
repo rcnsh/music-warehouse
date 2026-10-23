@@ -17,6 +17,7 @@ import { isStatName, statRoute } from './stats';
 import { artistRoute, cachedHistory, onThisDayRoute, topTracksRoute, trackRoute } from './history';
 import { searchRoute } from './search';
 import { homeRoute } from './home';
+import { radioRoute } from './radio';
 import { playsCsvRoute } from './export';
 import {
   RegionConfigError,
@@ -209,6 +210,7 @@ async function handle(request: Request, env: Env, ctx: ExecutionContext): Promis
             '/api/track',
             '/api/on-this-day',
             '/api/home',
+            '/api/radio',
             '/api/search',
             '/api/concerts',
             '/control/play',
@@ -257,6 +259,8 @@ async function handle(request: Request, env: Env, ctx: ExecutionContext): Promis
         return await cachedHistory(env, url, () => onThisDayRoute(env, url));
       case 'GET /api/home':
         return await homeRoute(env, ctx, url);
+      case 'GET /api/radio':
+        return await cachedHistory(env, url, () => radioRoute(env, url));
       case 'GET /api/concerts':
         return await concertsRoute(env, url);
       case 'GET /api/search':
