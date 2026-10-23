@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: music-warehouse read API
-  version: 1.2.0
+  version: 1.3.0
   license:
     name: MIT
     identifier: MIT
@@ -64,6 +64,8 @@ tags:
     description: Year-in-review summaries of closed date ranges, cached once computed.
   - name: Concerts
     description: Upcoming Ticketmaster events, refreshed by a daily cron.
+  - name: Lyrics
+    description: Synced lyrics from Spicy Lyrics, optional. Off (`404`) unless the deployment set a key.
   - name: Live
     description: Proxies to Spotify with the stored grant. Fail with `503` and `needs_reauth` when it has lapsed.
   - name: Sign-in
@@ -837,6 +839,81 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '500': { $ref: '#/components/responses/ServerError' }
 
+  /api/lyrics:
+    get:
+      tags: [Lyrics]
+      operationId: getLyrics
+      summary: Synced lyrics for a song, from the Spicy Lyrics API
+      description: |
+        Fetched with the deployment's own Spicy Lyrics secret key
+        (`SPICY_LYRICS_SECRET_KEY`), so the client needs none. Optional: on a
+        deployment without the key every request, with or without `track`, is
+        `404 { "error": "Not found" }`, the same as a route the Worker lacks.
+        With the key, a request without `track` is a `400`, so `GET /api/lyrics`
+        alone probes for the feature without calling Spicy Lyrics.
+
+        `200` and Spicy Lyrics' "no lyrics" `404` are Spicy Lyrics' own body,
+        byte for byte: parse them as its docs describe
+        (https://developers.spicylyrics.org/docs/reference/get.lyrics), and show
+        the attribution they carry. Tell its `404` (`Body.error`) from the
+        Worker's (`error`) by the body. Kept in the Cache API: lyrics 7 days,
+        "no lyrics" 1 day. `Age` is how long ago the Worker fetched the body;
+        count it toward Spicy Lyrics' 30-day cap if you store it.
+      parameters:
+        - name: track
+          in: query
+          required: true
+          description: A Spotify track id.
+          schema: { type: string, pattern: '^[0-9A-Za-z]{22}$' }
+      responses:
+        '200':
+          description: The lyrics, as Spicy Lyrics sent them.
+          headers:
+            Age: { $ref: '#/components/headers/LyricsAge' }
+            X-Cache: { $ref: '#/components/headers/LyricsCache' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SpicyLyricsPayload' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404':
+          description: |
+            Either Spicy Lyrics has no lyrics for the song (its own body, with
+            `Body.error`; kept for a day), or lyrics are off on this deployment
+            (`{ "error": "Not found" }`).
+          headers:
+            Age: { $ref: '#/components/headers/LyricsAge' }
+            X-Cache: { $ref: '#/components/headers/LyricsCache' }
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/SpicyLyricsPayload'
+                  - $ref: '#/components/schemas/Error'
+        '429':
+          description: |
+            Spicy Lyrics' rate limit, its body passed on, or the Worker's own
+            `{ "error": "Lyrics upstream: rate limited", "retry_after_seconds" }`
+            while it waits out an earlier one. Retry after `Retry-After`.
+          headers:
+            Retry-After: { $ref: '#/components/headers/Retry-After' }
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '500': { $ref: '#/components/responses/ServerError' }
+        '502':
+          description: '`Lyrics upstream: key rejected` (Spicy Lyrics refused the deployment''s key), or `Lyrics upstream: ...` for any other failure.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '503':
+          description: Spicy Lyrics is temporarily unavailable; its body and `Retry-After` passed on.
+          headers:
+            Retry-After: { $ref: '#/components/headers/Retry-After' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SpicyLyricsPayload' }
+
   /api/now-playing:
     get:
       tags: [Live]
@@ -1178,6 +1255,12 @@ components:
     Retry-After:
       description: Seconds to wait before retrying.
       schema: { type: integer }
+    LyricsAge:
+      description: Seconds since the Worker fetched this body from Spicy Lyrics; `0` when just fetched.
+      schema: { type: integer, minimum: 0 }
+    LyricsCache:
+      description: '`hit` when kept from an earlier request, `miss` when Spicy Lyrics was just asked.'
+      schema: { type: string, enum: [hit, miss] }
 
   responses:
     BadRequest:
@@ -1940,6 +2023,20 @@ components:
         status: { type: [string, 'null'], examples: [onsale] }
         url: { type: [string, 'null'] }
         first_seen: { type: string, format: date-time }
+
+    # ---- lyrics
+    SpicyLyricsPayload:
+      type: object
+      description: |
+        A Spicy Lyrics `GET /v1/lyrics/{trackId}` body, passed through: the
+        lyrics envelope (`Body` with `Type`, `Content` or `Lines`, `source`,
+        and `UploadAttribution` for community syncs), or its error envelope
+        (`Body.error`). See https://developers.spicylyrics.org.
+      required: [Body]
+      properties:
+        Body: { type: object, additionalProperties: true }
+        Status: { type: integer }
+      additionalProperties: true
 
     # ---- live
     SpotifyPayload:

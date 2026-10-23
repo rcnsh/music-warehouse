@@ -76,6 +76,12 @@ export interface Env {
    * See src/concerts.ts. Optional: unset means no regions, so no checks.
    */
   CONCERT_REGIONS?: string;
+  /**
+   * Spicy Lyrics secret key (`sl_sk_…`, from developers.spicylyrics.org), for
+   * GET /api/lyrics. Optional: unset means the route answers 404 like one this
+   * Worker doesn't have. Never logged or sent anywhere but Spicy Lyrics.
+   */
+  SPICY_LYRICS_SECRET_KEY?: string;
 }
 
 /**

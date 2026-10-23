@@ -54,6 +54,11 @@ TIMEZONE=
 # Needs TICKETMASTER_API_KEY. See README, "Concerts".
 # CONCERT_REGIONS=[{"key":"uk","label":"United Kingdom","countryCode":"GB"}]
 
+# Optional. A Spicy Lyrics secret key (sl_sk_…) from
+# https://developers.spicylyrics.org, which turns on GET /api/lyrics.
+# Unset means the route answers 404. See README, "Lyrics".
+SPICY_LYRICS_SECRET_KEY=
+
 # Overrides the value in wrangler.local.jsonc (or the template) for local dev. Spotify
 # permits plain HTTP only on the loopback address, and this must match a
 # redirect URI registered in the Spotify dashboard character for character.
