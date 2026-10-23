@@ -49,9 +49,12 @@ TIMEZONE=
 # after the first needs `from`. Replaces TIMEZONE. See README, step 2.
 # ERAS=[{"key":"home","label":"Home","timeZone":"Europe/London"},{"key":"abroad","label":"Abroad","timeZone":"Asia/Tokyo","from":"2024-09-01T00:00:00Z"}]
 
-# Optional. Where to look for concerts, as a JSON list of up to five regions:
-# a Ticketmaster countryCode, or a geoPoint geohash with a radius in km.
-# Needs TICKETMASTER_API_KEY. See README, "Concerts".
+# Optional. A Ticketmaster Discovery API consumer key and where to look for
+# concerts, as a JSON list of up to five regions: a Ticketmaster countryCode,
+# or a geoPoint geohash with a radius in km. Both turn on the daily concert
+# check and GET /api/concerts; without either the route answers 404. See
+# README, "Setting up concerts".
+# TICKETMASTER_API_KEY=
 # CONCERT_REGIONS=[{"key":"uk","label":"United Kingdom","countryCode":"GB"}]
 
 # Optional. A Spicy Lyrics secret key (sl_sk_…) from

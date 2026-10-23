@@ -481,12 +481,19 @@ export async function concertCheckRoute(env: Env, url: URL): Promise<Response> {
   return json(await runConcertCheck(env, { spacingMs: spacing }));
 }
 
-/** GET /api/concerts?region=&since=&tz= */
+/**
+ * GET /api/concerts?region=&since=&tz=
+ *
+ * Optional: without TICKETMASTER_API_KEY or a region in CONCERT_REGIONS the
+ * route answers `404 Not found`, exactly like a route this Worker doesn't
+ * have, so clients hide concerts rather than show an empty list.
+ */
 export async function concertsRoute(env: Env, url: URL): Promise<Response> {
   const regions = parseRegions(env.CONCERT_REGIONS);
+  if (!env.TICKETMASTER_API_KEY || regions.length === 0) return json({ error: 'Not found' }, 404);
   const region = url.searchParams.get('region');
   if (region !== null && !regions.some((r) => r.key === region)) {
-    throw new BadRequest(regions.length ? `region must be one of ${regions.map((r) => r.key).join(', ')}` : 'no concert regions are configured');
+    throw new BadRequest(`region must be one of ${regions.map((r) => r.key).join(', ')}`);
   }
   const since = url.searchParams.get('since');
   let sinceMs = 0;
