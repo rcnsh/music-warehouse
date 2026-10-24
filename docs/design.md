@@ -105,16 +105,18 @@ the query string is never part of a cache key, so callers cannot force a
 recompute.
 
 **Eras and local time.** Plays carry no location. `src/eras.ts` reads eras
-from the `ERAS` setting: periods, each with its own IANA timezone and start.
-Without it there is one era in `TIMEZONE` (default UTC). History starts at the
-first era's `from`, or at the first stored play. A deployment whose era starts
+from the `ERAS` setting: stages of life, each with its own IANA timezone, a
+start and an optional end. Time outside every stage is a gap, read in the zone
+of the stage before it and counted everywhere but never reported by name, so
+the clock stays continuous. Without it there is one era in `TIMEZONE` (default
+UTC). History starts at `HISTORY_FROM`, or at the first stored play. A deployment whose era starts
 are private sets `ERAS` as a secret; the stats publish only the month an era
 began. SQLite has no zone database, so each era's UTC offset is written out in
 SQL as the zone's transitions over the era (found with `Intl`, to the minute),
 and tests check it against `Intl` across DST changes, southern-hemisphere
 zones, half-hour offsets and a change of era. Snapshot keys carry a digest of
-the eras, so changing them recomputes. `eras` compares the latest era with the
-same number of whole calendar months before it, leaving the month it began
+the eras, so changing them recomputes. `eras` compares the latest stage (to its
+end, if it has ended) with the same number of whole calendar months before it, leaving the month it began
 out of both sides.
 
 **What counts.** Rankings credit the primary artist only, because export rows

@@ -138,7 +138,7 @@ describe('date ranges', () => {
   it('allows the same in Wrapped', () => {
     const eras = buildEras(
       parseEras(JSON.stringify([{ key: 'uk', label: 'UK', timeZone: 'Europe/London', from: '2010-01-01T00:00:00Z' }]), undefined),
-      0,
+      Date.parse('2010-01-01T00:00:00Z'),
     );
     const range = (to: string) => new URL(`${BASE}/api/wrapped?from=2010-10-26&to=${to}`);
     expect(wrappedRange(eras, range(span('2010-10-26', 3660)), Date.now()).from).toBe('2010-10-26');
@@ -245,7 +245,7 @@ describe('local time in half-hour zones', () => {
   it('buckets rhythm by local hour where the offset is not whole hours', async () => {
     const eras = buildEras(
       parseEras(JSON.stringify([{ key: 'in', label: 'India', timeZone: 'Asia/Kolkata', from: '2025-01-01T00:00:00Z' }]), undefined),
-      0,
+      Date.parse('2025-01-01T00:00:00Z'),
     );
     // 10:15 in India (UTC+5:30) is 04:45 UTC, whose UTC hour starts at 09:30 local.
     await seed(Array.from({ length: 40 }, (_, i): [number, string] => [Date.UTC(2025, 0, 6 + i, 4, 45), 'a']));

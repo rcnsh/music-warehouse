@@ -3,8 +3,8 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { syncAllSongs } from '../src/play-numbers';
 import { type Era, buildEras, localTimeSql, parseEras, startOfLocalToday, startOfLocalWeek } from '../src/eras';
 import { freshForSeconds, statKey } from '../src/stats';
-import { streaksFrom } from '../src/stats/rhythm';
-import { totalVariation } from '../src/stats/drift';
+import { computeRhythm, streaksFrom } from '../src/stats/rhythm';
+import { computeDrift, totalVariation } from '../src/stats/drift';
 import { localDayKey } from '../src/tz';
 import { edgeRequest } from '../src/snapshots';
 import { freezeClock } from './helpers';
@@ -13,7 +13,7 @@ const BASE = 'https://warehouse.test';
 const READ = { Authorization: 'Bearer test-read-token' };
 const DAY = 86_400_000;
 const STATS = ['on-repeat', 'rhythm', 'top-over-time', 'eras', 'albums'];
-const ERAS = buildEras(parseEras(env.ERAS, env.TIMEZONE), 0);
+const ERAS = buildEras(parseEras(env.ERAS, env.TIMEZONE), Date.parse(env.HISTORY_FROM!));
 const MOVE_MS = ERAS[1]!.fromMs;
 
 function stat(name: string) {
@@ -192,6 +192,32 @@ describe('rhythm', () => {
     // Monday, local midnight in the current era.
     expect(new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Singapore', weekday: 'short' }).format(cutoff)).toBe('Mon');
   });
+
+  it('reports stages by name and leaves the gaps between them out', async () => {
+    const eras = buildEras(
+      parseEras(
+        JSON.stringify([
+          { key: 'uni', label: 'Uni', timeZone: 'Europe/London', from: '2021-01-01T00:00:00Z', to: '2022-01-01T00:00:00Z' },
+          { key: 'abroad', label: 'Abroad', timeZone: 'Asia/Singapore', from: '2022-03-01T00:00:00Z' },
+        ]),
+        undefined,
+      ),
+      Date.UTC(2020, 6, 1),
+    );
+    const plays = [Date.UTC(2020, 7, 3, 12), Date.UTC(2021, 4, 3, 12), Date.UTC(2022, 1, 3, 12), Date.UTC(2022, 5, 3, 12)];
+    await seed(plays.flatMap((ms, i) => session(`t${i}`, ms, 2)));
+    const rhythm = await computeRhythm(env.DB, Date.now(), eras);
+
+    expect(rhythm.eras.map(({ key, from, to }) => ({ key, from, to }))).toEqual([
+      { key: 'uni', from: '2021-01', to: '2021-12' },
+      { key: 'abroad', from: '2022-03', to: null },
+    ]);
+    expect(rhythm.range.from).toBe('2020-07');
+    expect(rhythm.years.find((y) => y.year === '2020')!.eras).toEqual([]);
+    expect(rhythm.years.find((y) => y.year === '2022')!.eras.map((era) => era.key)).toEqual(['abroad']);
+    // Gap plays still count toward the days and streaks.
+    expect(rhythm.years.find((y) => y.year === '2020')!.streaks[0]!.longest).not.toBeNull();
+  });
 });
 
 describe('top over time', () => {
@@ -353,6 +379,33 @@ describe('artist drift', () => {
     expect(body.latest_era).toEqual({ key: 'abroad', label: 'Abroad' });
     expect(body.previous_era).toEqual({ key: 'home', label: 'Home' });
     expect(body.before).toEqual({ from: key(moveMonth - n), to: key(moveMonth - 1) });
+  });
+
+  const stages = (value: unknown[]) => buildEras(parseEras(JSON.stringify(value), undefined), Date.UTC(2020, 0, 1));
+
+  it('compares the latest stage with the stage before it, skipping gaps', async () => {
+    const drift = await computeDrift(
+      env.DB,
+      Date.now(),
+      stages([
+        { key: 'uni', label: 'Uni', timeZone: 'Europe/London', from: '2021-01-01T00:00:00Z', to: '2022-01-01T00:00:00Z' },
+        { key: 'abroad', label: 'Abroad', timeZone: 'Asia/Singapore', from: '2022-03-15T00:00:00Z', to: '2022-09-10T00:00:00Z' },
+      ]),
+    );
+    expect(drift.latest_era).toEqual({ key: 'abroad', label: 'Abroad' });
+    expect(drift.previous_era).toEqual({ key: 'uni', label: 'Uni' });
+    // Ended: whole months strictly between the move month and the month it ended.
+    expect(drift.window_months).toBe(5);
+    expect(drift.latest).toEqual({ from: '2022-04', to: '2022-08' });
+    expect(drift.before).toEqual({ from: '2021-10', to: '2022-02' });
+  });
+
+  it('treats one stage after a gap as a move, and one from the start as none', async () => {
+    const after = await computeDrift(env.DB, Date.now(), stages([{ key: 'x', label: 'X', timeZone: 'UTC', from: '2022-01-01T00:00:00Z' }]));
+    expect(after.latest_era).toEqual({ key: 'x', label: 'X' });
+    expect(after.previous_era).toBeNull();
+    const start = await computeDrift(env.DB, Date.now(), stages([{ key: 'x', label: 'X', timeZone: 'UTC' }]));
+    expect(start.latest_era).toBeNull();
   });
 });
 

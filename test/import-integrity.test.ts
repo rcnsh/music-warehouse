@@ -9,7 +9,7 @@ import { wrappedKey } from '../src/wrapped';
 
 const BASE = 'https://warehouse.test';
 const ADMIN = { Authorization: 'Bearer test-admin-token', 'Content-Type': 'application/json' };
-const ERAS = buildEras(parseEras(env.ERAS, undefined), 0);
+const ERAS = buildEras(parseEras(env.ERAS, undefined), Date.parse(env.HISTORY_FROM!));
 const MIN = 60_000;
 const T = Date.parse('2024-03-05T12:00:00Z');
 

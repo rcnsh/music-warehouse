@@ -48,6 +48,7 @@ export default defineConfig({
             { key: 'home', label: 'Home', timeZone: 'Europe/London', from: '2020-07-01T00:00:00+01:00' },
             { key: 'abroad', label: 'Abroad', timeZone: 'Asia/Singapore', from: '2025-03-10T00:00:00Z' },
           ]),
+          HISTORY_FROM: '2020-07-01T00:00:00+01:00',
           CONCERT_REGIONS: JSON.stringify([
             { key: 'singapore', label: 'Singapore', countryCode: 'SG' },
             { key: 'london', label: 'London', geoPoint: 'gcpvj', radius: 50 },

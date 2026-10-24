@@ -193,21 +193,30 @@ pending sign-ins still holds.
 
 Listening stats and Wrapped read local time in one timezone, `TIMEZONE`
 (default UTC), and start at your first stored play. If you've lived in more
-than one zone, set `ERAS` instead: a JSON list of periods, each with its own
-timezone, for example
+than one zone, set `ERAS` instead: a JSON list of the stages of your life,
+each with its own timezone, for example
 
 ```json
-[{ "key": "home", "label": "Home", "timeZone": "Europe/London", "from": "2020-07-01T00:00:00+01:00" },
- { "key": "abroad", "label": "Abroad", "timeZone": "Asia/Tokyo", "from": "2024-09-01T00:00:00Z" }]
+[{ "key": "uni", "label": "Uni", "timeZone": "Europe/London", "from": "2024-09-16T00:00:00+01:00", "to": "2026-05-18T00:00:00+01:00" },
+ { "key": "abroad", "label": "Abroad", "timeZone": "Asia/Tokyo", "from": "2026-07-28T00:00:00+09:00" }]
 ```
 
 `key` is lowercase letters, digits and `-`, and appears in stats responses;
-`label` is for display. Every era after the first needs `from`. On the first,
-`from` is optional and also marks where history starts, which helps if your
-first few plays are noise. The `eras` stat compares the latest era with the
-months before it. Set `ERAS` as a secret if an era's start is private: the
+`label` is for display. Every era after the first needs `from`; any era can
+have `to`, where it ends. Stages needn't cover everything: time before the
+first, or between one that ended and the next, is a gap. A gap is read in the
+timezone of the stage before it (the first stage's, before the first), counts
+in every total, streak and Wrapped, but gets no time-of-day figures of its
+own. A holiday isn't a stage: it stays on its stage's clock. The `eras` stat
+compares the months since the latest stage began (up to its end, if it has
+one) with the same number of months before it. Set `ERAS` as a secret if a stage's start or end is private: the
 stats only publish the month. See [`src/eras.ts`](src/eras.ts). Ingestion and
 the other routes don't depend on it.
+
+History starts at your first stored play, or at `HISTORY_FROM` (an ISO
+instant) if set, which helps if your first few plays are noise. Before
+`HISTORY_FROM` existed, the first era's `from` did this: if yours relied on
+it, set `HISTORY_FROM` to the same instant.
 
 ### 3. Create the database
 
@@ -508,7 +517,8 @@ locally. `npx wrangler secret list` shows what is set.
 | `SIGN_IN_SCHEMES` | no | Comma-separated custom URL schemes a mobile app may [sign in](#signing-in-with-spotify) to, e.g. `app.remastered`. |
 | `TICKETMASTER_API_KEY` | no | A Ticketmaster Discovery API consumer key, from <https://developer.ticketmaster.com>, for [concerts](#concerts). The consumer secret isn't needed. Unset turns concerts off: no daily check, and `/api/concerts` answers `404`. |
 | `TIMEZONE` | no | IANA timezone the stats read local time in, when `ERAS` is unset. Default `UTC`. Also the zone of the [play-count rollup](#the-play-count-rollup); with only `ERAS` set, the rollup uses the latest era's zone. |
-| `ERAS` | no | JSON list of periods, each read in its own timezone. See [step 2](#2-configure-the-deployment) and [`src/eras.ts`](src/eras.ts). |
+| `ERAS` | no | JSON list of life stages, each read in its own timezone, with gaps allowed between them. See [step 2](#2-configure-the-deployment) and [`src/eras.ts`](src/eras.ts). |
+| `HISTORY_FROM` | no | ISO instant where the stats' history starts; plays before it are ignored. Default: the first stored play. |
 | `CONCERT_REGIONS` | no | JSON list of up to five places to look for [concerts](#concerts). Set it as a secret: a `geoPoint` can locate you. Unset (or `[]`) turns concerts off, like a missing key. |
 | `SPICY_LYRICS_SECRET_KEY` | no | A Spicy Lyrics **secret** key (`sl_sk_…`), from <https://developers.spicylyrics.org>, for [lyrics](#lyrics). Unset turns `/api/lyrics` off (it answers `404`). |
 

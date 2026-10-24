@@ -2,19 +2,25 @@ import { isValidTimeZone, localDayKey, offsetMsAt, startOfLocalDayUtcMs } from '
 import type { Env } from './types';
 
 /**
- * Where the listener lived, and so which clock "local time" means.
+ * Stages of the listener's life, and so which clock "local time" means.
  *
- * Plays carry no location, so the timeline is split into eras, each read in
- * its own timezone. They come from the ERAS setting, a JSON list such as
+ * Plays carry no location, so the timeline is read in the timezone of the
+ * stage it falls in. Stages come from the ERAS setting, a JSON list such as
  *
- *   [{"key":"home","label":"Home","timeZone":"Europe/London","from":"2020-07-01T00:00:00+01:00"},
- *    {"key":"abroad","label":"Abroad","timeZone":"Asia/Tokyo","from":"2024-09-01T00:00:00Z"}]
+ *   [{"key":"uni","label":"Uni","timeZone":"Europe/London","from":"2024-09-16T00:00:00+01:00","to":"2026-05-18T00:00:00+01:00"},
+ *    {"key":"abroad","label":"Abroad","timeZone":"Asia/Tokyo","from":"2026-07-28T00:00:00+09:00"}]
  *
- * Every era after the first needs `from`, an ISO instant. The first era's
- * `from` is optional and also marks where history starts for the stats
- * (plays before it are ignored, useful when the first few are noise);
- * without it history starts at the first stored play. Without ERAS there is
- * one era in TIMEZONE, or UTC.
+ * Every era after the first needs `from`, an ISO instant; any era may have
+ * `to`, the instant it ends. Stages need not cover all of history: time
+ * before the first stage, or after one that has ended and before the next,
+ * is a gap. A gap is read in the zone of the stage before it (the first
+ * stage's, before the first) and counts everywhere, but is never reported
+ * by name. A holiday is not a stage: it stays on the clock of the stage it
+ * falls in. Without ERAS there is one era in TIMEZONE, or UTC.
+ *
+ * History starts at HISTORY_FROM, an ISO instant (plays before it are
+ * ignored, useful when the first few are noise), or else at the first stored
+ * play, never at an era's `from`.
  *
  * Set ERAS as a Worker secret rather than a var if an era's start is private:
  * the stats only ever publish the month an era began, and the exact day would
@@ -25,7 +31,9 @@ export interface Era {
   key: string;
   label: string;
   timeZone: string;
-  /** Inclusive UTC ms at which this era starts. Eras are contiguous and in order. */
+  /** Time outside every stage, on a neighbouring stage's clock; never reported by name. */
+  gap: boolean;
+  /** Inclusive UTC ms at which this era starts. Eras, gaps included, are contiguous and in order. */
   fromMs: number;
   /**
    * SQL for this era's UTC offset in seconds, in terms of `s` (UTC epoch
@@ -40,6 +48,7 @@ export interface EraConfig {
   label: string;
   timeZone: string;
   from?: string;
+  to?: string;
 }
 
 const DAY_MS = 86_400_000;
@@ -66,21 +75,36 @@ export function parseEras(raw: string | undefined, timeZone: string | undefined)
   }
   if (!Array.isArray(parsed) || parsed.length === 0) throw new EraConfigError('ERAS must be a non-empty JSON array');
   const seen = new Set<string>();
+  // The last instant taken: an era's start, or its end if it has one. The
+  // next era may start where one ended, but not where one started.
   let previous = -Infinity;
+  let previousEnded = false;
   return parsed.map((entry: Record<string, unknown>, i): EraConfig => {
     const where = `ERAS[${i}]`;
-    const { key, label, timeZone: zone, from } = entry ?? {};
+    const { key, label, timeZone: zone, from, to } = entry ?? {};
     if (typeof key !== 'string' || !/^[a-z0-9-]{1,32}$/.test(key)) throw new EraConfigError(`${where}.key must be 1-32 of a-z, 0-9, -`);
     if (seen.has(key)) throw new EraConfigError(`${where}.key repeats "${key}"`);
     seen.add(key);
     if (typeof label !== 'string' || !label.trim()) throw new EraConfigError(`${where}.label is required`);
     if (typeof zone !== 'string' || !isValidTimeZone(zone)) throw new EraConfigError(`${where}.timeZone is not an IANA timezone`);
-    if (from === undefined && i === 0) return { key, label, timeZone: zone };
-    const ms = typeof from === 'string' ? Date.parse(from) : Number.NaN;
-    if (!Number.isFinite(ms)) throw new EraConfigError(`${where}.from must be an ISO instant`);
-    if (ms <= previous) throw new EraConfigError(`${where}.from must be after the era before it`);
-    previous = ms;
-    return { key, label, timeZone: zone, from: from as string };
+    const config: EraConfig = { key, label, timeZone: zone };
+    if (from !== undefined || i > 0) {
+      const ms = typeof from === 'string' ? Date.parse(from) : Number.NaN;
+      if (!Number.isFinite(ms)) throw new EraConfigError(`${where}.from must be an ISO instant`);
+      if (ms < previous || (ms === previous && !previousEnded)) throw new EraConfigError(`${where}.from must be after the era before it`);
+      previous = ms;
+      config.from = from as string;
+    }
+    previousEnded = false;
+    if (to !== undefined) {
+      const ms = typeof to === 'string' ? Date.parse(to) : Number.NaN;
+      if (!Number.isFinite(ms)) throw new EraConfigError(`${where}.to must be an ISO instant`);
+      if (ms <= previous) throw new EraConfigError(`${where}.to must be after its from`);
+      previous = ms;
+      previousEnded = true;
+      config.to = to as string;
+    }
+    return config;
   });
 }
 
@@ -138,28 +162,48 @@ export function offsetSqlFor(timeZone: string, fromMs: number, toMs: number): st
 }
 
 /**
- * Eras with their start instants and offset SQL. `historyStartMs` stands in
- * for the first era's start when it has none. The current era's offsets are
- * written out to a year past today, rounded to the day so the SQL (and its
- * cache entry) changes once a day at most.
+ * Stages and the gaps between them, with start instants and offset SQL, from
+ * `historyStartMs` on. The first stage starts there when it has no `from`; a
+ * stage or gap that ends by then is dropped, and the first one kept is cut to
+ * start there. The current era's offsets are written out to a year past
+ * today, rounded to the day so the SQL (and its cache entry) changes once a
+ * day at most.
  */
 export function buildEras(configs: EraConfig[], historyStartMs: number, now = Date.now()): Era[] {
-  const starts = configs.map((config, i) => (config.from ? Date.parse(config.from) : i === 0 ? historyStartMs : Number.NaN));
+  const spans: Array<{ fromMs: number; config: EraConfig; gap: boolean }> = [];
+  configs.forEach((config, i) => {
+    const fromMs = config.from ? Date.parse(config.from) : historyStartMs;
+    if (i === 0 && fromMs > historyStartMs) spans.push({ fromMs: historyStartMs, config, gap: true });
+    spans.push({ fromMs, config, gap: false });
+    const next = configs[i + 1];
+    if (config.to && (!next || Date.parse(next.from!) > Date.parse(config.to))) {
+      spans.push({ fromMs: Date.parse(config.to), config, gap: true });
+    }
+  });
+  let first = 0;
+  while (first + 1 < spans.length && spans[first + 1]!.fromMs <= historyStartMs) first++;
+  const kept = spans.slice(first);
+  kept[0] = { ...kept[0]!, fromMs: Math.max(kept[0]!.fromMs, historyStartMs) };
+
   const horizon = Math.ceil((now + 366 * DAY_MS) / DAY_MS) * DAY_MS;
-  return configs.map((config, i) => {
-    const fromMs = starts[i]!;
-    const toMs = starts[i + 1] ?? horizon;
-    return { key: config.key, label: config.label, timeZone: config.timeZone, fromMs, offsetSql: offsetSqlFor(config.timeZone, fromMs, toMs) };
+  return kept.map(({ fromMs, config, gap }, i) => {
+    const toMs = kept[i + 1]?.fromMs ?? horizon;
+    return { key: config.key, label: config.label, timeZone: config.timeZone, gap, fromMs, offsetSql: offsetSqlFor(config.timeZone, fromMs, toMs) };
   });
 }
 
 /**
- * The deployment's eras. Without a configured start, history starts at the
- * first stored play: one primary-key read.
+ * The deployment's eras. Without HISTORY_FROM, history starts at the first
+ * stored play: one primary-key read.
  */
-export async function loadEras(env: Pick<Env, 'DB' | 'ERAS' | 'TIMEZONE'>, now = Date.now()): Promise<Era[]> {
+export async function loadEras(env: Pick<Env, 'DB' | 'ERAS' | 'TIMEZONE' | 'HISTORY_FROM'>, now = Date.now()): Promise<Era[]> {
   const configs = parseEras(env.ERAS, env.TIMEZONE);
-  if (configs[0]!.from) return buildEras(configs, Date.parse(configs[0]!.from), now);
+  const historyFrom = env.HISTORY_FROM?.trim();
+  if (historyFrom) {
+    const ms = Date.parse(historyFrom);
+    if (!Number.isFinite(ms)) throw new EraConfigError('HISTORY_FROM must be an ISO instant');
+    return buildEras(configs, ms, now);
+  }
   const first = await env.DB.prepare('SELECT played_at_ms FROM plays ORDER BY played_at_ms LIMIT 1').first<{ played_at_ms: number }>();
   return buildEras(configs, first?.played_at_ms ?? now, now);
 }
@@ -169,13 +213,13 @@ export async function loadEras(env: Pick<Env, 'DB' | 'ERAS' | 'TIMEZONE'>, now =
  * one set of eras must not be served after the settings change.
  */
 export function eraDigest(eras: readonly Era[]): string {
-  const text = eras.map((era) => `${era.key}|${era.label}|${era.timeZone}|${era.fromMs}`).join(';');
+  const text = eras.map((era) => `${era.key}|${era.label}|${era.timeZone}|${era.gap ? 'gap|' : ''}${era.fromMs}`).join(';');
   let hash = 2166136261;
   for (let i = 0; i < text.length; i++) hash = Math.imul(hash ^ text.charCodeAt(i), 16777619);
   return (hash >>> 0).toString(36);
 }
 
-/** Where the stats' history starts: the first era's start. */
+/** Where the stats' history starts: the first era's (or gap's) start. */
 export const historyStartMs = (eras: readonly Era[]) => eras[0]!.fromMs;
 
 export function eraAt(eras: readonly Era[], utcMs: number): Era {
@@ -184,7 +228,7 @@ export function eraAt(eras: readonly Era[], utcMs: number): Era {
   return current;
 }
 
-/** UTC ms at which the era after `era` begins, or null for the current one. */
+/** UTC ms at which the era or gap after `era` begins, or null for the last one. */
 export function eraEndMs(eras: readonly Era[], era: Era): number | null {
   const next = eras[eras.indexOf(era) + 1];
   return next ? next.fromMs : null;

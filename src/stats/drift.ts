@@ -1,8 +1,10 @@
-import { type Era, historyStartMs, monthOf } from '../eras';
+import { type Era, eraEndMs, historyStartMs, monthOf } from '../eras';
 import { PRIMARY_ARTIST_SQL } from './sql';
 
 /**
- * Artist drift into the latest era (see src/eras.ts), usually a move.
+ * Artist drift into the latest stage (see src/eras.ts), usually a move.
+ * Gaps between stages count as history but are never the latest or previous
+ * stage. A latest stage that has ended is measured up to its end.
  *
  * The latest era is usually far shorter than everything before it, so it is
  * compared with the same number of months immediately before it began, not
@@ -34,7 +36,7 @@ export interface EraName {
 
 export interface Drift {
   as_of: string;
-  /** The latest era, and the one before it; null with a single era. */
+  /** The latest stage, and the stage before it; null when nothing comes before it. */
   latest_era: EraName | null;
   previous_era: EraName | null;
   /** The UTC month the latest era began. */
@@ -119,8 +121,9 @@ export async function computeDrift(db: D1Database, now: number, eras: readonly E
     months.get(index)!.set(row.k, row.plays);
   }
 
-  const move = eras.length > 1 ? eras.at(-1)! : undefined;
-  const previous = eras.length > 1 ? eras.at(-2)! : undefined;
+  const stages = eras.filter((era) => !era.gap);
+  const move = stages.at(-1) !== eras[0] ? stages.at(-1) : undefined;
+  const previous = move ? stages.at(-2) : undefined;
   const name = (era: Era | undefined): EraName | null => (era ? { key: era.key, label: era.label } : null);
   const empty = {
     as_of: new Date(startOfMonth).toISOString(),
@@ -140,7 +143,10 @@ export async function computeDrift(db: D1Database, now: number, eras: readonly E
 
   const moveMonth = monthIndex(monthOf(move.fromMs, 'UTC'));
   const firstMonth = monthIndex(monthOf(historyStartMs(eras), 'UTC'));
-  const n = currentMonth - moveMonth - 1;
+  // A stage that has ended stops at its last complete month, as the current one does.
+  const endMs = eraEndMs(eras, move);
+  const endMonth = endMs === null ? currentMonth : Math.min(currentMonth, monthIndex(monthOf(endMs, 'UTC')));
+  const n = endMonth - moveMonth - 1;
   if (n < 1) return empty;
 
   const range = (from: number, count: number) => Array.from({ length: count }, (_, i) => from + i);
