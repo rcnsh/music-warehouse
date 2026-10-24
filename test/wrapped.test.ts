@@ -16,7 +16,7 @@ import {
   wrappedPresets,
 } from '../src/wrapped';
 
-const ERAS = buildEras(parseEras(env.ERAS, undefined), 0);
+const ERAS = buildEras(parseEras(env.ERAS, undefined), Date.parse(env.HISTORY_FROM!));
 
 const BASE = 'https://warehouse.test';
 const ADMIN = { Authorization: 'Bearer test-admin-token' };
@@ -237,7 +237,7 @@ describe('wrapped: body', () => {
 });
 
 describe('wrapped: presets', () => {
-  const eras = buildEras(parseEras(env.ERAS, undefined), 0);
+  const eras = buildEras(parseEras(env.ERAS, undefined), Date.parse(env.HISTORY_FROM!));
   // Wednesday 14 October 2026, midday in Singapore.
   const NOW = Date.UTC(2026, 9, 14, 4);
 

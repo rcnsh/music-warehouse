@@ -45,9 +45,15 @@ SIGN_IN_SCHEMES=
 # play-count rollup is built in (the latest era's zone when only ERAS is set).
 TIMEZONE=
 
-# Optional. Periods you lived in different timezones, as a JSON list; each
-# after the first needs `from`. Replaces TIMEZONE. See README, step 2.
-# ERAS=[{"key":"home","label":"Home","timeZone":"Europe/London"},{"key":"abroad","label":"Abroad","timeZone":"Asia/Tokyo","from":"2024-09-01T00:00:00Z"}]
+# Optional. Stages of your life in different timezones, as a JSON list; each
+# after the first needs `from`, and any can end with `to`. Time between
+# stages is a gap on the stage before's clock. Replaces TIMEZONE. See README,
+# step 2.
+# ERAS=[{"key":"home","label":"Home","timeZone":"Europe/London","to":"2024-08-01T00:00:00Z"},{"key":"abroad","label":"Abroad","timeZone":"Asia/Tokyo","from":"2024-09-01T00:00:00Z"}]
+
+# Optional. Where the stats' history starts, as an ISO instant; plays before
+# it are ignored. Default: the first stored play.
+# HISTORY_FROM=2020-07-01T00:00:00+01:00
 
 # Optional. A Ticketmaster Discovery API consumer key and where to look for
 # concerts, as a JSON list of up to five regions: a Ticketmaster countryCode,

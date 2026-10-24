@@ -1,6 +1,6 @@
 import { SELF, env } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
-import { EraConfigError, loadEras, offsetSqlFor, parseEras } from '../src/eras';
+import { EraConfigError, buildEras, loadEras, offsetSqlFor, parseEras } from '../src/eras';
 import { RegionConfigError, parseRegions } from '../src/concerts';
 import { offsetMsAt } from '../src/tz';
 
@@ -30,6 +30,71 @@ describe('ERAS and TIMEZONE', () => {
         { key: 'b', label: 'B', timeZone: 'UTC', from: '2023-01-01T00:00:00Z' },
       ]),
     ).toThrow('after the era before it');
+    expect(bad([{ key: 'a', label: 'A', timeZone: 'UTC', from: '2024-01-01T00:00:00Z', to: 'soon' }])).toThrow('ERAS[0].to');
+    expect(bad([{ key: 'a', label: 'A', timeZone: 'UTC', from: '2024-01-01T00:00:00Z', to: '2024-01-01T00:00:00Z' }])).toThrow(
+      'after its from',
+    );
+    expect(
+      bad([
+        { key: 'a', label: 'A', timeZone: 'UTC', from: '2024-01-01T00:00:00Z', to: '2024-06-01T00:00:00Z' },
+        { key: 'b', label: 'B', timeZone: 'UTC', from: '2024-05-01T00:00:00Z' },
+      ]),
+    ).toThrow('after the era before it');
+  });
+
+  it('lets an era start where the one before it ended', () => {
+    const eras = parseEras(
+      JSON.stringify([
+        { key: 'a', label: 'A', timeZone: 'UTC', to: '2024-06-01T00:00:00Z' },
+        { key: 'b', label: 'B', timeZone: 'UTC', from: '2024-06-01T00:00:00Z' },
+      ]),
+      undefined,
+    );
+    expect(eras.map((era) => [era.key, era.from, era.to])).toEqual([
+      ['a', undefined, '2024-06-01T00:00:00Z'],
+      ['b', '2024-06-01T00:00:00Z', undefined],
+    ]);
+    expect(buildEras(eras, Date.UTC(2020, 0, 1)).map((era) => [era.key, era.gap])).toEqual([
+      ['a', false],
+      ['b', false],
+    ]);
+  });
+
+  it('fills time outside every stage with gaps on the stage before', () => {
+    const configs = parseEras(
+      JSON.stringify([
+        { key: 'uni', label: 'Uni', timeZone: 'Europe/London', from: '2024-09-16T00:00:00+01:00', to: '2026-05-18T00:00:00+01:00' },
+        { key: 'abroad', label: 'Abroad', timeZone: 'Asia/Singapore', from: '2026-07-28T00:00:00+08:00' },
+      ]),
+      undefined,
+    );
+    const history = Date.parse('2020-07-01T00:00:00+01:00');
+    const spans = (start: number) => buildEras(configs, start).map(({ key, gap, timeZone, fromMs }) => ({ key, gap, timeZone, fromMs }));
+    expect(spans(history)).toEqual([
+      { key: 'uni', gap: true, timeZone: 'Europe/London', fromMs: history },
+      { key: 'uni', gap: false, timeZone: 'Europe/London', fromMs: Date.parse('2024-09-16T00:00:00+01:00') },
+      { key: 'uni', gap: true, timeZone: 'Europe/London', fromMs: Date.parse('2026-05-18T00:00:00+01:00') },
+      { key: 'abroad', gap: false, timeZone: 'Asia/Singapore', fromMs: Date.parse('2026-07-28T00:00:00+08:00') },
+    ]);
+    // History starting after the first stage ended drops it and cuts the gap.
+    const late = Date.parse('2026-06-01T00:00:00Z');
+    expect(spans(late)).toEqual([
+      { key: 'uni', gap: true, timeZone: 'Europe/London', fromMs: late },
+      { key: 'abroad', gap: false, timeZone: 'Asia/Singapore', fromMs: Date.parse('2026-07-28T00:00:00+08:00') },
+    ]);
+  });
+
+  it('starts history at HISTORY_FROM, not at the first era', async () => {
+    await env.DB.prepare("INSERT INTO plays (played_at_ms, track_id, source) VALUES (?, 't1', 'api')").bind(Date.UTC(2018, 0, 1)).run();
+    const ERAS = JSON.stringify([{ key: 'a', label: 'A', timeZone: 'UTC', from: '2022-01-01T00:00:00Z' }]);
+    const eras = await loadEras({ DB: env.DB, ERAS, TIMEZONE: undefined, HISTORY_FROM: '2020-01-01T00:00:00Z' });
+    expect(eras.map(({ gap, fromMs }) => ({ gap, fromMs }))).toEqual([
+      { gap: true, fromMs: Date.UTC(2020, 0, 1) },
+      { gap: false, fromMs: Date.UTC(2022, 0, 1) },
+    ]);
+    // Without it, history reaches back to the first play, before the first era.
+    expect((await loadEras({ DB: env.DB, ERAS, TIMEZONE: undefined }))[0]!.fromMs).toBe(Date.UTC(2018, 0, 1));
+    await expect(loadEras({ DB: env.DB, ERAS, TIMEZONE: undefined, HISTORY_FROM: 'July' })).rejects.toThrow('HISTORY_FROM');
   });
 
   it('starts history at the first stored play when the first era has no start', async () => {

@@ -38,12 +38,18 @@ export interface Env {
    */
   ALERT_MENTION?: string;
   /**
-   * JSON list of eras, each read in its own timezone: key, label, IANA
-   * timeZone, and `from` (an ISO instant; optional on the first, where it also
-   * marks where history starts). See src/eras.ts. Optional: unset means one
-   * era in TIMEZONE. Set it as a secret if an era's exact start is private.
+   * JSON list of eras (stages of life), each read in its own timezone: key,
+   * label, IANA timeZone, `from` (an ISO instant; optional on the first) and
+   * an optional `to`. Time outside every stage is a gap on a neighbouring
+   * stage's clock. See src/eras.ts. Optional: unset means one era in
+   * TIMEZONE. Set it as a secret if an era's exact start or end is private.
    */
   ERAS?: string;
+  /**
+   * ISO instant where the stats' history starts; plays before it are
+   * ignored. Optional: unset means the first stored play.
+   */
+  HISTORY_FROM?: string;
   /** IANA timezone for the single era used when ERAS is unset. Default UTC. */
   TIMEZONE?: string;
   /**

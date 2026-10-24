@@ -216,8 +216,9 @@ export async function computeRhythm(db: D1Database, now: number, eras: readonly 
     };
   };
 
-  const eraRhythms = eras.map((_, index) =>
-    eraRhythm(index, sumGrids([...cells[index]!.values()]), historyStartMs(eras), Infinity, true),
+  // Gaps between stages count toward the streaks but have no figures of their own.
+  const eraRhythms = eras.flatMap((era, index) =>
+    era.gap ? [] : [eraRhythm(index, sumGrids([...cells[index]!.values()]), historyStartMs(eras), Infinity, true)],
   );
 
   const currentYear = lastDay.slice(0, 4);
@@ -234,9 +235,9 @@ export async function computeRhythm(db: D1Database, now: number, eras: readonly 
       year,
       partial: live,
       streaks: THRESHOLDS.map((threshold) => streaksFrom(yearDays, threshold, yearLast, { live, firstDay })),
-      eras: eras.flatMap((_, index) => {
+      eras: eras.flatMap((era, index) => {
         const grid = cells[index]!.get(year);
-        return grid ? [eraRhythm(index, grid, fromMs, toMs, live)] : [];
+        return grid && !era.gap ? [eraRhythm(index, grid, fromMs, toMs, live)] : [];
       }),
     };
   });

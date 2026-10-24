@@ -9,7 +9,7 @@ import { buildEras, parseEras } from '../src/eras';
 import { STAT_NAMES, statKey } from '../src/stats';
 
 // The test settings give the first era a start, so these are the eras every route loads.
-const ERAS = buildEras(parseEras(env.ERAS, env.TIMEZONE), 0);
+const ERAS = buildEras(parseEras(env.ERAS, env.TIMEZONE), Date.parse(env.HISTORY_FROM!));
 /** The zones the tests ask /api/home for. */
 const HOME_ZONES = ['UTC', 'Europe/London', 'Asia/Singapore'];
 
