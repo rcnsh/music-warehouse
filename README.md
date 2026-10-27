@@ -1,4 +1,5 @@
 <div align="center">
+<img src="assets/icon.svg" width="96" height="96" alt="">
 <h1>music-warehouse</h1>
 <p><strong>Your Spotify play history, recorded every 30 minutes into a database you own.</strong></p>
 <p>
