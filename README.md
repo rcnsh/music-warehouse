@@ -1201,15 +1201,16 @@ developer account, so these spend it carefully (migration 0021):
   2 s after it should end, at least 10 s and at most 30 s.
   `/api/recently-played` keeps one page of 50 for a minute and gives each
   request its first `limit` (with `limit`, `href`, `next` and `cursors.before`
-  to match). Each colo keeps a copy for up to 10 s in front of D1. `X-Cache`
-  says `hit`, `miss` or `stale`.
+  to match). `/api/top` does the same per list and range, for an hour, as
+  Spotify recomputes top lists about daily. Each colo keeps a copy for up to
+  10 s in front of D1. `X-Cache` says `hit`, `miss` or `stale`.
 - **One pause after a 429.** Any 429 from Spotify, on any route, the poll,
   context names or a backfill, pauses every Spotify call until its
   `Retry-After` has passed (a minute without one, an hour for
   `quota_exceeded`, a day at most); a later 429 only ever extends it. Until
   then nothing is sent and no token is refreshed: these routes answer `429`
-  with `Retry-After` set to the time left, except that `/api/now-playing` and
-  `/api/recently-played` serve their last answer with `X-Cache: stale`. The
+  with `Retry-After` set to the time left, except that a route with a kept
+  answer serves it with `X-Cache: stale`. The
   poll is skipped, not failed, and the cursor waits.
 - **Every call counted.** Each request sent to `api.spotify.com` is counted
   per hour by what sent it and how Spotify answered, kept 14 days, and summed

@@ -170,8 +170,8 @@ describe('GET /api/top', () => {
     expect(body.tracks.items[0]!.name).toBe('a track');
     expect(body.artists.items[0]!.name).toBe('an artist');
     expect(calls.sort()).toEqual([
-      '/v1/me/top/artists?time_range=short_term&limit=5',
-      '/v1/me/top/tracks?time_range=short_term&limit=5',
+      '/v1/me/top/artists?time_range=short_term&limit=50',
+      '/v1/me/top/tracks?time_range=short_term&limit=50',
     ].sort());
   });
 
@@ -191,11 +191,42 @@ describe('GET /api/top', () => {
 
   it('defaults to long_term and a limit of 12', async () => {
     await seedAuthorized();
-    const calls = stubSpotify(() => jsonResponse({ items: [] }));
+    const calls = stubSpotify(() => jsonResponse({ items: Array.from({ length: 50 }, (_, i) => ({ name: `#${i}` })) }));
 
-    await SELF.fetch(`${BASE}/api/top`, { headers: READ });
+    const body = (await (await SELF.fetch(`${BASE}/api/top`, { headers: READ })).json()) as {
+      limit: number;
+      tracks: { items: unknown[] };
+    };
     expect(calls.length).toBe(2);
-    expect(calls.every((call) => call.includes('time_range=long_term&limit=12'))).toBe(true);
+    expect(calls.every((call) => call.includes('time_range=long_term&limit=50'))).toBe(true);
+    expect(body.limit).toBe(12);
+    expect(body.tracks.items).toHaveLength(12);
+  });
+
+  it('serves every limit and repeat from one kept page per list and range', async () => {
+    await seedAuthorized();
+    const href = (limit: number, offset = 0) =>
+      `https://api.spotify.com/v1/me/top/artists?time_range=short_term&limit=${limit}&offset=${offset}`;
+    const items = Array.from({ length: 50 }, (_, i) => ({ name: `Artist ${i}` }));
+    const page = { items, limit: 50, offset: 0, total: 80, href: href(50), next: href(50, 50), previous: null };
+    const calls = stubSpotify(() => jsonResponse(page));
+
+    const five = await SELF.fetch(`${BASE}/api/top?range=short_term&type=artists&limit=5`, { headers: READ });
+    expect(five.headers.get('X-Cache')).toBe('miss');
+    expect(((await five.json()) as { artists: unknown }).artists).toEqual({
+      ...page,
+      items: items.slice(0, 5),
+      limit: 5,
+      href: href(5),
+      next: href(5, 5),
+    });
+
+    for (let n = 0; n < 5; n++) {
+      const again = await SELF.fetch(`${BASE}/api/top?range=short_term&type=artists&limit=20`, { headers: READ });
+      expect(again.headers.get('X-Cache')).toBe('hit');
+      expect(((await again.json()) as { artists: { items: unknown[] } }).artists.items).toEqual(items.slice(0, 20));
+    }
+    expect(calls).toEqual(['/v1/me/top/artists?time_range=short_term&limit=50']);
   });
 
   it('rejects a bad range, limit or type with 400 without asking Spotify', async () => {

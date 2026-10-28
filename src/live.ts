@@ -257,27 +257,79 @@ export async function recentlyPlayed(env: Env, url: URL, ctx?: ExecutionContext)
   return answer(JSON.stringify(slicePlayHistory(JSON.parse(body), limit)), cache);
 }
 
+/** How long one top list is shared. Spotify recomputes them about daily. */
+export const TOP_FRESH_MS = 3_600_000;
+/** Spotify's ceiling for one page, which is what is fetched and kept. */
+const TOP_MAX = 50;
+
+type TopPage = { items?: unknown[] | null; limit?: number; offset?: number; href?: string | null; next?: string | null };
+
+/** The first `limit` entries of a 50-entry top page, as Spotify would have answered for that limit. */
+export function sliceTopPage(payload: unknown, limit: number): unknown {
+  const page = payload as TopPage | null;
+  if (!page || !Array.isArray(page.items)) return payload;
+  const sliced: TopPage = { ...page, items: page.items.slice(0, limit) };
+  if ('limit' in page) sliced.limit = limit;
+  if ('href' in page) sliced.href = withLimit(page.href, limit);
+  if ('offset' in page) sliced.offset = 0;
+  // The next page starts after the entries kept, not after the 50 fetched.
+  if ('next' in page) sliced.next = page.next || page.items.length > limit ? pageAt(page.href, limit) : null;
+  return sliced;
+}
+
+/** One of Spotify's paging URLs moved to start at `offset`, `limit` long. */
+function pageAt(link: string | null | undefined, offset: number): string | null {
+  const limited = withLimit(link, offset);
+  if (!limited) return null;
+  try {
+    const url = new URL(limited);
+    url.searchParams.set('offset', String(offset));
+    return url.href;
+  } catch {
+    return null;
+  }
+}
+
+/** One top list for a range, fetched as a full page and shared (see sharedAnswer). */
+async function sharedTop(env: Env, ctx: ExecutionContext | undefined, list: 'tracks' | 'artists', range: string) {
+  const { body, cache } = await sharedAnswer(
+    env,
+    ctx,
+    `top-${list}:${range}`,
+    async () =>
+      spotifyGet(callerFor(env, 'top', ctx), await accessTokenFor(env), `/me/top/${list}?time_range=${range}&limit=${TOP_MAX}`),
+    () => TOP_FRESH_MS,
+  );
+  return { page: JSON.parse(body) as unknown, cache };
+}
+
 /**
  * `GET /api/top?range=&limit=&type=` → Spotify's top tracks and artists for that
  * range. `type=artists` or `type=tracks` fetches one list and leaves the other
  * null: artists alone skip the edition relabel, the only D1 read here.
+ *
+ * Each list is fetched as one page of 50 and shared for an hour, and each
+ * request is given the first `limit` of it, so polling clients and every
+ * limit asked for cost one call per list and range, not one per request.
  */
 export async function topMusic(env: Env, url: URL, ctx?: ExecutionContext): Promise<Response> {
   const range = url.searchParams.get('range') || 'long_term';
   if (!TOP_RANGES.has(range)) throw new BadRequest('range must be short_term, medium_term or long_term');
-  const limit = intParam(url, 'limit', 12, 1, 50);
+  const limit = intParam(url, 'limit', 12, 1, TOP_MAX);
   const type = url.searchParams.get('type') || null;
   if (type !== null && type !== 'tracks' && type !== 'artists') throw new BadRequest('type must be tracks or artists');
 
-  const accessToken = await accessTokenFor(env);
-  const caller = callerFor(env, 'top', ctx);
   const [tracks, artists] = await Promise.all([
-    type === 'artists' ? null : spotifyGet(caller, accessToken, `/me/top/tracks?time_range=${range}&limit=${limit}`),
-    type === 'tracks' ? null : spotifyGet(caller, accessToken, `/me/top/artists?time_range=${range}&limit=${limit}`),
+    type === 'artists' ? null : sharedTop(env, ctx, 'tracks', range),
+    type === 'tracks' ? null : sharedTop(env, ctx, 'artists', range),
   ]);
+  const trackPage = tracks && sliceTopPage(tracks.page, limit);
+  const artistPage = artists && sliceTopPage(artists.page, limit);
 
-  if (tracks) await relabelEditions(env.DB, tracks);
-  return json({ range, limit, tracks, artists });
+  if (trackPage) await relabelEditions(env.DB, trackPage);
+  const caches = [tracks?.cache, artists?.cache];
+  const cache = caches.includes('miss') ? 'miss' : caches.includes('stale') ? 'stale' : 'hit';
+  return answer(JSON.stringify({ range, limit, tracks: trackPage, artists: artistPage }), cache);
 }
 
 type TopTrack = {

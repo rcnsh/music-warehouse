@@ -32,7 +32,12 @@ beforeEach(async () => {
   await Promise.all(HOME_ZONES.map((zone) => home.delete(homeCacheKey(zone, now))));
   // The shared Spotify answers' colo copies, and this isolate's copy of the pause.
   const answers = await caches.open('spotify-answers');
-  await Promise.all([answers.delete(nowPlayingKey()), answers.delete(sharedAnswerKey('recently-played'))]);
+  const topKeys = ['tracks', 'artists'].flatMap((list) =>
+    ['short_term', 'medium_term', 'long_term'].map((range) => sharedAnswerKey(`top-${list}:${range}`)),
+  );
+  await Promise.all(
+    [nowPlayingKey(), sharedAnswerKey('recently-played'), ...topKeys].map((key) => answers.delete(key)),
+  );
   forgetPauseMemo();
   await env.DB.batch([
     env.DB.prepare('DELETE FROM plays'),
