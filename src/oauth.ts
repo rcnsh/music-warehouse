@@ -1,4 +1,5 @@
 import { SpotifyError, type TokenResponse, authorizeUrl, exchangeCode } from './spotify';
+import { spotifyClient } from './spotify-client';
 import { persistTokenResponse } from './tokens';
 import { recordOwner } from './signin';
 import type { Env } from './types';
@@ -75,7 +76,7 @@ export async function callback(env: Env, url: URL): Promise<Response> {
   // Whose warehouse this is, for sign-in. Not worth failing the grant over:
   // sign-in asks again with the stored grant if it is missing.
   try {
-    await recordOwner(env.DB, token.access_token);
+    await recordOwner(env.DB, spotifyClient(env, 'signin', { auth: { accessToken: token.access_token } }));
   } catch (cause) {
     log('owner-error', { error: cause instanceof Error ? cause.message : cause }, 'error');
   }

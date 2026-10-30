@@ -3,7 +3,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { evaluate, runPollCron } from '../src/alerts';
 import { backfillFromCatalog } from '../src/albums';
 import { poll } from '../src/ingest';
-import { IDLE_FRESH_MS, nowPlayingFreshMs, nowPlayingKey, sharedAnswerKey } from '../src/live';
+import { IDLE_FRESH_MS, nowPlayingFreshMs } from '../src/live';
+import { nowPlayingKey, sharedAnswerKey } from '../src/spotify-client';
 import { CALLS_KEPT_MS, forgetPauseMemo, recordPause, storedPause } from '../src/quota';
 import { freezeClock, jsonResponse, seedAuthorized, syncState, testEnv } from './helpers';
 

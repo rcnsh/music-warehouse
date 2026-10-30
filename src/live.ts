@@ -1,8 +1,6 @@
 import { BadRequest, intParam, json } from './api';
-import { readState } from './db';
-import type { CallSource } from './quota';
-import { SpotifyError, type SpotifyCaller, assertSpotifyOpen, spotifyFetch, spotifyGet, truncate } from './spotify';
-import { getAccessToken } from './tokens';
+import { SpotifyError } from './spotify';
+import { type SpotifyClient, isRateLimit, spotifyClient } from './spotify-client';
 import type { Env } from './types';
 import { log } from './log';
 
@@ -22,108 +20,6 @@ import { log } from './log';
  */
 
 const TOP_RANGES = new Set(['short_term', 'medium_term', 'long_term']);
-
-async function accessTokenFor(env: Env): Promise<string> {
-  const { token } = await readState(env.DB);
-  return getAccessToken(env.DB, env, token, Date.now());
-}
-
-function callerFor(env: Env, source: CallSource, ctx?: ExecutionContext): SpotifyCaller {
-  return { db: env.DB, source, waitUntil: ctx ? (promise) => ctx.waitUntil(promise) : undefined };
-}
-
-/** The longest a colo keeps a shared answer before asking D1 again. */
-const EDGE_TTL_SECONDS = 10;
-/** The Cache API request a shared answer is kept under in each colo. */
-export const sharedAnswerKey = (key: string) => new Request(`https://spotify-answers.internal/v1/${key}`);
-/** The now-playing answer's colo key, which tests clear. */
-export const nowPlayingKey = () => sharedAnswerKey('now-playing');
-
-interface StoredAnswer {
-  body: string;
-  fetched_ms: number;
-  fresh_until_ms: number;
-}
-
-/**
- * One Spotify answer shared by every client in every colo (migration 0021).
- *
- * The development-mode quota is shared with the owner's other apps, so a
- * client polling every 20 seconds from several devices must not cost a call
- * each. The answer is kept in D1 until its `freshMs` has passed, with each
- * colo keeping its own copy for up to EDGE_TTL_SECONDS in front, and after
- * that the next request asks Spotify again. While Spotify calls are paused
- * after a 429, the last answer is served however old (`X-Cache: stale`);
- * with none kept, the 429 goes through as before. Other failures are never
- * kept, and never answered from a stale copy.
- *
- * Concurrent misses can each ask Spotify; with one owner's few clients that
- * costs at most a call or two, and is not worth a lock.
- */
-async function sharedAnswer(
-  env: Env,
-  ctx: ExecutionContext | undefined,
-  key: string,
-  fetchBody: () => Promise<unknown>,
-  freshMs: (body: unknown) => number,
-): Promise<{ body: string; cache: 'hit' | 'miss' | 'stale' }> {
-  const edge = await caches.open('spotify-answers');
-  const edgeKey = sharedAnswerKey(key);
-  const kept = await edge.match(edgeKey);
-  if (kept) return { body: await kept.text(), cache: 'hit' };
-
-  const now = Date.now();
-  const stored = await env.DB.prepare('SELECT body, fetched_ms, fresh_until_ms FROM spotify_answers WHERE key = ?')
-    .bind(key)
-    .first<StoredAnswer>();
-
-  const keepAtEdge = (body: string, freshUntilMs: number) => {
-    const seconds = Math.min(EDGE_TTL_SECONDS, Math.floor((freshUntilMs - Date.now()) / 1000));
-    if (seconds <= 0) return;
-    const put = edge.put(
-      edgeKey,
-      new Response(body, { headers: { 'Content-Type': 'application/json', 'Cache-Control': `max-age=${seconds}` } }),
-    );
-    if (ctx) ctx.waitUntil(put);
-    return put;
-  };
-
-  if (stored && stored.fresh_until_ms > now) {
-    await keepAtEdge(stored.body, stored.fresh_until_ms);
-    return { body: stored.body, cache: 'hit' };
-  }
-
-  let fetched: unknown;
-  try {
-    // Checked before the token, so a paused Worker reads no grant and refreshes nothing.
-    await assertSpotifyOpen(env.DB);
-    fetched = await fetchBody();
-  } catch (error) {
-    const limited = error instanceof SpotifyError && (error.kind === 'rate_limited' || error.kind === 'quota_exceeded');
-    if (limited && stored) {
-      log('spotify-answer-stale', { key, fetched_ms: stored.fetched_ms, kind: error.kind }, 'warn');
-      return { body: stored.body, cache: 'stale' };
-    }
-    throw error;
-  }
-
-  const body = JSON.stringify(fetched);
-  const fetchedMs = Date.now();
-  const freshUntilMs = fetchedMs + freshMs(fetched);
-  const write = env.DB.prepare(
-    `INSERT INTO spotify_answers (key, body, fetched_ms, fresh_until_ms) VALUES (?, ?, ?, ?)
-     ON CONFLICT(key) DO UPDATE SET body = excluded.body, fetched_ms = excluded.fetched_ms,
-                                    fresh_until_ms = excluded.fresh_until_ms
-      WHERE excluded.fetched_ms >= spotify_answers.fetched_ms`,
-  )
-    .bind(key, body, fetchedMs, freshUntilMs)
-    .run()
-    .catch((error) => log('spotify-answer-store-failed', { key, error }, 'error'));
-  if (ctx) ctx.waitUntil(write);
-  else await write;
-  await keepAtEdge(body, freshUntilMs);
-  return { body, cache: 'miss' };
-}
 
 function answer(body: string, cache: 'hit' | 'miss' | 'stale'): Response {
   return new Response(body, {
@@ -152,34 +48,19 @@ export function nowPlayingFreshMs(payload: unknown): number {
 
 /**
  * `GET /api/now-playing` → Spotify's currently-playing payload, or null when
- * idle. One answer serves every client (see sharedAnswer): for a minute when
+ * idle. One answer serves every client (see SpotifyClient.shared): for a minute when
  * idle, and while playing until just after the track should end, at least 10
  * and at most 30 seconds. It is the same for any token, as there is one
  * Spotify account. Failures are not kept.
  */
 export async function nowPlaying(env: Env, ctx?: ExecutionContext): Promise<Response> {
-  const { body, cache } = await sharedNowPlaying(env, ctx);
+  const { body, cache } = await sharedNowPlaying(spotifyClient(env, 'now-playing', { ctx }));
   return answer(`{"item":${body}}`, cache);
 }
 
-function sharedNowPlaying(env: Env, ctx?: ExecutionContext) {
-  return sharedAnswer(
-    env,
-    ctx,
-    'now-playing',
-    async () =>
-      // 204 (nothing playing) comes back as null rather than an error.
-      spotifyGet(callerFor(env, 'now-playing', ctx), await accessTokenFor(env), '/me/player/currently-playing'),
-    nowPlayingFreshMs,
-  );
-}
-
-/** Drop a shared answer from D1 and this colo, so the next reader asks Spotify. */
-async function forgetAnswer(env: Env, key: string): Promise<void> {
-  await Promise.all([
-    env.DB.prepare('DELETE FROM spotify_answers WHERE key = ?').bind(key).run(),
-    caches.open('spotify-answers').then((edge) => edge.delete(sharedAnswerKey(key))),
-  ]);
+function sharedNowPlaying(spotify: SpotifyClient) {
+  // 204 (nothing playing) comes back as null rather than an error.
+  return spotify.shared('now-playing', '/me/player/currently-playing', nowPlayingFreshMs);
 }
 
 /** How long Spotify takes to report a track started through the API. */
@@ -242,16 +123,9 @@ export async function recentlyPlayed(env: Env, url: URL, ctx?: ExecutionContext)
   // Checked before the token, so a bad parameter is a 400 even with the grant lapsed.
   const limit = intParam(url, 'limit', 1, 1, RECENTLY_PLAYED_MAX);
 
-  const { body, cache } = await sharedAnswer(
-    env,
-    ctx,
+  const { body, cache } = await spotifyClient(env, 'recently-played', { ctx }).shared(
     'recently-played',
-    async () =>
-      spotifyGet(
-        callerFor(env, 'recently-played', ctx),
-        await accessTokenFor(env),
-        `/me/player/recently-played?limit=${RECENTLY_PLAYED_MAX}`,
-      ),
+    `/me/player/recently-played?limit=${RECENTLY_PLAYED_MAX}`,
     () => RECENTLY_PLAYED_FRESH_MS,
   );
   return answer(JSON.stringify(slicePlayHistory(JSON.parse(body), limit)), cache);
@@ -290,14 +164,11 @@ function pageAt(link: string | null | undefined, offset: number): string | null 
   }
 }
 
-/** One top list for a range, fetched as a full page and shared (see sharedAnswer). */
-async function sharedTop(env: Env, ctx: ExecutionContext | undefined, list: 'tracks' | 'artists', range: string) {
-  const { body, cache } = await sharedAnswer(
-    env,
-    ctx,
+/** One top list for a range, fetched as a full page and shared (see SpotifyClient.shared). */
+async function sharedTop(spotify: SpotifyClient, list: 'tracks' | 'artists', range: string) {
+  const { body, cache } = await spotify.shared(
     `top-${list}:${range}`,
-    async () =>
-      spotifyGet(callerFor(env, 'top', ctx), await accessTokenFor(env), `/me/top/${list}?time_range=${range}&limit=${TOP_MAX}`),
+    `/me/top/${list}?time_range=${range}&limit=${TOP_MAX}`,
     () => TOP_FRESH_MS,
   );
   return { page: JSON.parse(body) as unknown, cache };
@@ -319,9 +190,10 @@ export async function topMusic(env: Env, url: URL, ctx?: ExecutionContext): Prom
   const type = url.searchParams.get('type') || null;
   if (type !== null && type !== 'tracks' && type !== 'artists') throw new BadRequest('type must be tracks or artists');
 
+  const spotify = spotifyClient(env, 'top', { ctx });
   const [tracks, artists] = await Promise.all([
-    type === 'artists' ? null : sharedTop(env, ctx, 'tracks', range),
-    type === 'tracks' ? null : sharedTop(env, ctx, 'artists', range),
+    type === 'artists' ? null : sharedTop(spotify, 'tracks', range),
+    type === 'tracks' ? null : sharedTop(spotify, 'artists', range),
   ]);
   const trackPage = tracks && sliceTopPage(tracks.page, limit);
   const artistPage = artists && sliceTopPage(artists.page, limit);
@@ -452,16 +324,16 @@ export function playBody(trackId: string, albumId: string | null): Record<string
 }
 
 /** The stored album, else Spotify's; null only if Spotify cannot say either. */
-async function albumOf(env: Env, caller: SpotifyCaller, accessToken: string, trackId: string): Promise<string | null> {
+async function albumOf(env: Env, spotify: SpotifyClient, trackId: string): Promise<string | null> {
   const stored = await env.DB.prepare('SELECT album_id FROM tracks WHERE track_id = ?')
     .bind(trackId)
     .first<{ album_id: string | null }>();
   if (stored?.album_id) return stored.album_id;
   try {
-    const track = (await spotifyGet(caller, accessToken, `/tracks/${trackId}`)) as { album?: { id?: unknown } } | null;
+    const track = (await spotify.get(`/tracks/${trackId}`)) as { album?: { id?: unknown } } | null;
     return typeof track?.album?.id === 'string' ? track.album.id : null;
   } catch (error) {
-    if (error instanceof SpotifyError && (error.kind === 'rate_limited' || error.kind === 'quota_exceeded')) throw error;
+    if (isRateLimit(error)) throw error;
     log('play-album-lookup-failed', { error }, 'warn');
     return null;
   }
@@ -486,43 +358,34 @@ export async function play(env: Env, request: Request, ctx?: ExecutionContext): 
     throw new BadRequest('`track_id` must be a Spotify track id.');
   }
 
-  const path = '/me/player/play';
-  const accessToken = await accessTokenFor(env);
-  const caller = callerFor(env, 'play', ctx);
-  const albumId = await albumOf(env, caller, accessToken, trackId);
-  let response: Response;
+  const spotify = spotifyClient(env, 'play', { ctx });
+  // Before the album lookup, so a dead grant fails here rather than in it.
+  await spotify.ready();
+  const albumId = await albumOf(env, spotify, trackId);
   try {
-    response = await spotifyFetch(caller, `https://api.spotify.com/v1${path}`, {
-      method: 'PUT',
-      headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify(playBody(trackId, albumId)),
-    });
-  } catch (cause) {
-    if (cause instanceof SpotifyError) throw cause;
-    throw new SpotifyError('network', `${path} request failed: ${(cause as Error).message}`);
+    await spotify.put('/me/player/play', playBody(trackId, albumId));
+  } catch (error) {
+    if (!(error instanceof SpotifyError) || error.kind !== 'http') throw error;
+    if (error.status === 404) {
+      return json({ error: 'No Spotify device is active. Start playing on one first.', reason: 'no_active_device' }, 409);
+    }
+    if (error.status === 403) {
+      const detail = error.detail ?? '';
+      log('play-forbidden', { detail }, 'warn');
+      const reason = detail.includes('PREMIUM_REQUIRED') ? 'premium_required' : /scope/i.test(detail) ? 'missing_scope' : 'forbidden';
+      return json({ error: `Spotify refused playback (${reason}).`, reason }, 403);
+    }
+    throw error;
   }
 
-  if (response.ok) {
-    // The shared now-playing answer still names the old track, for up to 30s.
-    // Dropped now, and fetched again once Spotify reports the new one, so a
-    // reader polling in between cannot leave its stale answer behind.
-    await forgetAnswer(env, 'now-playing');
-    const refresh = new Promise((resolve) => setTimeout(resolve, PLAY_SETTLE_MS))
-      .then(() => forgetAnswer(env, 'now-playing'))
-      .then(() => sharedNowPlaying(env, ctx))
-      .catch((error) => log('play-now-playing-refresh-failed', { error }, 'warn'));
-    if (ctx) ctx.waitUntil(refresh);
-    return json({ playing: trackId });
-  }
-  if (response.status === 401) throw new SpotifyError('unauthorized', `${path} returned 401.`, { status: 401 });
-  const detail = truncate(await response.text(), 300);
-  if (response.status === 404) {
-    return json({ error: 'No Spotify device is active. Start playing on one first.', reason: 'no_active_device' }, 409);
-  }
-  if (response.status === 403) {
-    log('play-forbidden', { detail }, 'warn');
-    const reason = detail.includes('PREMIUM_REQUIRED') ? 'premium_required' : /scope/i.test(detail) ? 'missing_scope' : 'forbidden';
-    return json({ error: `Spotify refused playback (${reason}).`, reason }, 403);
-  }
-  throw new SpotifyError('http', `${path} returned ${response.status}: ${detail}`, { status: response.status });
+  // The shared now-playing answer still names the old track, for up to 30s.
+  // Dropped now, and fetched again once Spotify reports the new one, so a
+  // reader polling in between cannot leave its stale answer behind.
+  await spotify.forgetShared('now-playing');
+  const refresh = new Promise((resolve) => setTimeout(resolve, PLAY_SETTLE_MS))
+    .then(() => spotify.forgetShared('now-playing'))
+    .then(() => sharedNowPlaying(spotify.as('now-playing')))
+    .catch((error) => log('play-now-playing-refresh-failed', { error }, 'warn'));
+  if (ctx) ctx.waitUntil(refresh);
+  return json({ playing: trackId });
 }

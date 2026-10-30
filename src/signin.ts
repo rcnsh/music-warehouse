@@ -10,8 +10,9 @@ import {
   tokenName,
 } from './auth';
 import { readState } from './db';
-import { SpotifyError, authorizeUrl, exchangeCode, spotifyGet } from './spotify';
-import { NeedsReauthError, getAccessToken } from './tokens';
+import { SpotifyError, authorizeUrl, exchangeCode } from './spotify';
+import { type SpotifyClient, spotifyClient } from './spotify-client';
+import { NeedsReauthError } from './tokens';
 import type { Env } from './types';
 import { log } from './log';
 
@@ -76,12 +77,18 @@ export function signInRedirectUri(env: Env): string {
   return new URL('/auth/callback', env.SPOTIFY_REDIRECT_URI).href;
 }
 
-/** Store the Spotify user id an access token belongs to as the warehouse's owner. */
-export async function recordOwner(db: D1Database, accessToken: string): Promise<string> {
-  const me = (await spotifyGet({ db, source: 'signin' }, accessToken, '/me')) as { id?: string } | null;
+/** The Spotify user id a client's token belongs to. */
+async function spotifyUserId(spotify: SpotifyClient): Promise<string> {
+  const me = (await spotify.get('/me')) as { id?: string } | null;
   if (!me?.id) throw new SpotifyError('http', '/me returned no user id.');
-  await db.prepare('UPDATE oauth_token SET spotify_user_id = ? WHERE id = 1').bind(me.id).run();
   return me.id;
+}
+
+/** Store the Spotify user id the ingestion grant belongs to as the warehouse's owner. */
+export async function recordOwner(db: D1Database, spotify: SpotifyClient): Promise<string> {
+  const id = await spotifyUserId(spotify);
+  await db.prepare('UPDATE oauth_token SET spotify_user_id = ? WHERE id = 1').bind(id).run();
+  return id;
 }
 
 /**
@@ -93,7 +100,7 @@ async function ownerId(env: Env): Promise<string | null> {
   const { token } = await readState(env.DB);
   if (token.spotify_user_id) return token.spotify_user_id;
   if (!token.refresh_token) return null;
-  return recordOwner(env.DB, await getAccessToken(env.DB, env, token, Date.now()));
+  return recordOwner(env.DB, spotifyClient(env, 'signin', { grant: token }));
 }
 
 /**
@@ -298,9 +305,7 @@ async function finishSignIn(env: Env, request: Request, url: URL, state: string)
   let owner: string | null;
   try {
     const identity = await exchangeCode(env, code, signInRedirectUri(env));
-    const me = (await spotifyGet({ db: env.DB, source: 'signin' }, identity.access_token, '/me')) as { id?: string } | null;
-    if (!me?.id) throw new SpotifyError('http', '/me returned no user id.');
-    signedIn = me.id;
+    signedIn = await spotifyUserId(spotifyClient(env, 'signin', { auth: { accessToken: identity.access_token } }));
     owner = await ownerId(env);
   } catch (error) {
     if (!(error instanceof SpotifyError || error instanceof NeedsReauthError)) throw error;

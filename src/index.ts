@@ -8,9 +8,8 @@ import { cleanupOverlapsRoute, cleanupShortGapsRoute, cleanupSkipsRoute } from '
 import { poll } from './ingest';
 import { alertCheckRoute, runPollCron } from './alerts';
 import { nowPlaying, play, recentlyPlayed, topMusic } from './live';
-import { fetchRecentlyPlayed } from './spotify';
-import { getAccessToken } from './tokens';
-import { dailyTrackSweep, readState } from './db';
+import { spotifyClient } from './spotify-client';
+import { dailyTrackSweep } from './db';
 import { ensureRollup } from './rollup';
 import { accessFor, clientKey, createTokenRoute, listTokensRoute, listedOrigins, revokeTokenRoute } from './auth';
 import { isStatName, statRoute } from './stats';
@@ -50,10 +49,8 @@ function unauthorized(): Response {
  * cursor or sync_state, so it cannot disturb ingestion.
  */
 async function rawRecentlyPlayed(env: Env, url: URL): Promise<Response> {
-  const { token } = await readState(env.DB);
-  const accessToken = await getAccessToken(env.DB, env, token, Date.now());
   const after = Number(url.searchParams.get('after') ?? 0);
-  const payload = await fetchRecentlyPlayed({ db: env.DB, source: 'admin' }, accessToken, Number.isFinite(after) ? after : 0);
+  const payload = await spotifyClient(env, 'admin').recentlyPlayed(Number.isFinite(after) ? after : 0);
   return json(payload);
 }
 

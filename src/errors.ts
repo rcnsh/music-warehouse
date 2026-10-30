@@ -4,6 +4,7 @@ import { LyricsConfigError } from './lyrics';
 import { RegionConfigError } from './concerts';
 import { SnapshotPending } from './snapshots';
 import { SpotifyError } from './spotify';
+import { isRateLimit } from './spotify-client';
 import { NeedsReauthError } from './tokens';
 import { log } from './log';
 
@@ -30,7 +31,7 @@ export function errorResponse(error: unknown): Response {
     // The client only ever sees the error *kind*, so without this an
     // upstream failure is undiagnosable after the fact.
     // A call refused by the pause is expected while it lasts, not an error.
-    const limited = error.kind === 'rate_limited' || error.kind === 'quota_exceeded';
+    const limited = isRateLimit(error);
     log(
       'spotify-error',
       { kind: error.kind, status: error.status, paused: error.paused, message: error.message },

@@ -1,9 +1,8 @@
 import { json } from './api';
 import { MAX_BOUND_PARAMS, buildInserts } from './db';
 import { pickImageUrl } from './normalize';
-import { SpotifyError, appAccessToken, assertSpotifyOpen, spotifyFetch, spotifyGet } from './spotify';
-import { getAccessToken } from './tokens';
-import { readState } from './db';
+import { SpotifyError } from './spotify';
+import { isRateLimit, spotifyClient } from './spotify-client';
 import type { Env, SpotifyAlbum, SpotifyTrack } from './types';
 
 /**
@@ -148,8 +147,7 @@ export async function backfillAlbums(env: Env, request: Request): Promise<Respon
   const startOffset = clampInt(url.searchParams.get('offset'), 0, 0, Number.MAX_SAFE_INTEGER);
   const pages = clampInt(url.searchParams.get('pages'), DEFAULT_PAGES, 1, MAX_PAGES);
 
-  const { token } = await readState(env.DB);
-  const accessToken = await getAccessToken(env.DB, env, token, Date.now());
+  const spotify = spotifyClient(env, 'backfill');
 
   const candidates = new Map<string, AlbumCandidate>();
   let offset = startOffset;
@@ -157,7 +155,7 @@ export async function backfillAlbums(env: Env, request: Request): Promise<Respon
   let exhausted = false;
 
   for (let page = 0; page < pages; page++) {
-    const payload = await spotifyGet({ db: env.DB, source: 'backfill' }, accessToken, pageUrl(source, offset, range));
+    const payload = await spotify.get(pageUrl(source, offset, range));
     const extracted = extractCandidates(source, payload);
     total = extracted.total ?? total;
 
@@ -281,9 +279,10 @@ export async function backfillFromCatalog(env: Env, request: Request): Promise<R
     return json({ done: true, examined: 0, tracks_updated: 0, missing: 0, next_cursor: cursor, rows_written: 0 });
   }
 
+  const spotify = spotifyClient(env, 'backfill', { auth: 'app' });
   // Paused after a 429: say so as a rate limit, as a 429 mid-walk would, and mint no token.
   try {
-    await assertSpotifyOpen(env.DB);
+    await spotify.assertOpen();
   } catch (error) {
     if (!(error instanceof SpotifyError)) throw error;
     return json({
@@ -299,7 +298,8 @@ export async function backfillFromCatalog(env: Env, request: Request): Promise<R
     });
   }
 
-  const { access_token: appToken } = await appAccessToken(env);
+  // Minted before the walk, so a token failure fails the call rather than counting tracks missing.
+  await spotify.ready();
 
   const candidates: AlbumCandidate[] = [];
   let missing = 0;
@@ -310,18 +310,24 @@ export async function backfillFromCatalog(env: Env, request: Request): Promise<R
   for (const trackId of pending) {
     if (examined > 0 && spacingMs > 0) await new Promise((resolve) => setTimeout(resolve, spacingMs));
 
-    let response: Response;
+    let track: SpotifyTrack | null;
     try {
-      response = await spotifyFetch({ db: env.DB, source: 'backfill' }, `https://api.spotify.com/v1/tracks/${trackId}`, {
-        headers: { Authorization: `Bearer ${appToken}` },
-      });
+      track = (await spotify.get(`/tracks/${trackId}`)) as SpotifyTrack | null;
     } catch (error) {
+      if (!(error instanceof SpotifyError)) throw error;
+      // Any other answer, 404 for a track withdrawn from the catalog among
+      // them, means there is nothing to fetch for this one.
+      if (error.status !== null && !isRateLimit(error)) {
+        examined++;
+        missing++;
+        continue;
+      }
       // Stop on a rate limit (which also pauses every other Spotify call) but
       // still write what this call already gathered. Retry-After is the only
       // thing that says how long the wait actually is — Spotify has returned
       // an hour here — so it has to reach the caller rather than leaving it to
       // guess with a blind exponential backoff.
-      if (error instanceof SpotifyError) {
+      if (isRateLimit(error)) {
         rateLimited = true;
         retryAfterSeconds = error.retryAfterSeconds;
       }
@@ -330,17 +336,11 @@ export async function backfillFromCatalog(env: Env, request: Request): Promise<R
       break;
     }
     examined++;
-    // 404 is a track withdrawn from the catalog. Nothing to fetch, ever.
-    if (response.status === 404) {
-      missing++;
-      continue;
-    }
-    if (!response.ok) {
+    if (!track) {
       missing++;
       continue;
     }
 
-    const track = (await response.json()) as SpotifyTrack;
     const candidate = candidateFrom(track, track.album);
     if (candidate) candidates.push(candidate);
     else missing++;

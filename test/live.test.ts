@@ -1,23 +1,11 @@
 import { SELF, env } from 'cloudflare:test';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { freezeClock, jsonResponse, seedAuthorized } from './helpers';
+import { fakeSpotify } from './fake-spotify';
+import { jsonResponse, seedAuthorized } from './helpers';
 
 const BASE = 'https://warehouse.test';
 const ADMIN = { Authorization: 'Bearer test-admin-token' };
 const READ = { Authorization: 'Bearer test-read-token' };
-
-function stubSpotify(handler: (url: URL) => Response) {
-  const calls: string[] = [];
-  vi.stubGlobal(
-    'fetch',
-    vi.fn(async (input: RequestInfo | URL) => {
-      const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url);
-      calls.push(url.pathname + url.search);
-      return handler(url);
-    }),
-  );
-  return calls;
-}
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -46,27 +34,23 @@ describe('read-only token (R11)', () => {
 
 describe('GET /api/now-playing', () => {
   it('passes Spotify\'s payload through unmodified', async () => {
-    await seedAuthorized();
     const item = { name: 'Kids', artists: [{ name: 'MGMT' }] };
-    const calls = stubSpotify(() => jsonResponse({ is_playing: true, progress_ms: 1000, item }));
+    const calls = fakeSpotify(() => jsonResponse({ is_playing: true, progress_ms: 1000, item })).paths;
 
     const body = (await (await SELF.fetch(`${BASE}/api/now-playing`, { headers: READ })).json()) as {
       item: { is_playing: boolean; item: typeof item };
     };
 
-    expect(calls).toEqual(['/v1/me/player/currently-playing']);
+    expect(calls).toEqual(['/me/player/currently-playing']);
     expect(body.item.item).toEqual(item);
   });
 
   it('shares one Spotify call between polls a few seconds apart, but not a failure', async () => {
-    const start = freezeClock('2026-10-16T12:00:00Z');
-    await seedAuthorized();
     let status = 429;
-    const calls = stubSpotify(() => (status === 429 ? new Response('{}', { status }) : jsonResponse({ is_playing: true, item: { name: 'Kids' } })));
+    const calls = fakeSpotify(() => (status === 429 ? new Response('{}', { status }) : jsonResponse({ is_playing: true, item: { name: 'Kids' } }))).paths;
     expect((await SELF.fetch(`${BASE}/api/now-playing`, { headers: READ })).status).toBe(429);
+    // The fake sets no pause, so the next request asks again: the 429 was not kept.
     status = 200;
-    // Past the minute's pause that 429 set.
-    vi.setSystemTime(start + 61_000);
     const first = await SELF.fetch(`${BASE}/api/now-playing`, { headers: READ });
     const second = await SELF.fetch(`${BASE}/api/now-playing`, { headers: ADMIN });
     expect(calls).toHaveLength(2);
@@ -76,8 +60,7 @@ describe('GET /api/now-playing', () => {
   });
 
   it('reports idle as null rather than an error when Spotify returns 204', async () => {
-    await seedAuthorized();
-    stubSpotify(() => new Response(null, { status: 204 }));
+    fakeSpotify(() => new Response(null, { status: 204 }));
 
     const response = await SELF.fetch(`${BASE}/api/now-playing`, { headers: READ });
     expect(response.status).toBe(200);
@@ -96,20 +79,18 @@ describe('GET /api/now-playing', () => {
 
 describe('GET /api/recently-played', () => {
   it('asks Spotify for the latest play only, by default', async () => {
-    await seedAuthorized();
     const items = [{ played_at: '2026-01-01T00:00:00.000Z', track: { name: 'Kids' } }];
-    const calls = stubSpotify(() => jsonResponse({ items }));
+    const calls = fakeSpotify(() => jsonResponse({ items })).paths;
 
     const response = await SELF.fetch(`${BASE}/api/recently-played`, { headers: READ });
 
     // One page of 50 is fetched and kept; the client gets the first.
-    expect(calls).toEqual(['/v1/me/player/recently-played?limit=50']);
+    expect(calls).toEqual(['/me/player/recently-played?limit=50']);
     expect(await response.json()).toEqual({ items });
   });
 
   it('rejects a bad limit with 400, as the stored-data routes do, without asking Spotify', async () => {
-    await seedAuthorized();
-    const calls = stubSpotify(() => jsonResponse({ items: [] }));
+    const calls = fakeSpotify(() => jsonResponse({ items: [] })).paths;
 
     for (const limit of ['500', '0', 'abc', '2.5']) {
       const response = await SELF.fetch(`${BASE}/api/recently-played?limit=${limit}`, { headers: READ });
@@ -120,7 +101,6 @@ describe('GET /api/recently-played', () => {
   });
 
   it('serves every limit from one kept page, sliced as Spotify would have answered', async () => {
-    await seedAuthorized();
     const played = (i: number) => new Date(Date.UTC(2026, 9, 16, 12) - i * 60_000).toISOString();
     const items = Array.from({ length: 50 }, (_, i) => ({ played_at: played(i), track: { name: `Song ${i}` } }));
     const page = {
@@ -130,7 +110,7 @@ describe('GET /api/recently-played', () => {
       next: 'https://api.spotify.com/v1/me/player/recently-played?before=1&limit=50',
       cursors: { after: String(Date.parse(played(0))), before: String(Date.parse(played(49))) },
     };
-    const calls = stubSpotify(() => jsonResponse(page));
+    const calls = fakeSpotify(() => jsonResponse(page)).paths;
 
     const one = await SELF.fetch(`${BASE}/api/recently-played?limit=1`, { headers: READ });
     expect(one.headers.get('X-Cache')).toBe('miss');
@@ -153,10 +133,9 @@ describe('GET /api/recently-played', () => {
 
 describe('GET /api/top', () => {
   it('fetches both lists for the requested range', async () => {
-    await seedAuthorized();
-    const calls = stubSpotify((url) =>
-      jsonResponse({ items: [{ name: url.pathname.includes('tracks') ? 'a track' : 'an artist' }] }),
-    );
+    const calls = fakeSpotify((call) =>
+      jsonResponse({ items: [{ name: call.path.includes('tracks') ? 'a track' : 'an artist' }] }),
+    ).paths;
 
     const body = (await (await SELF.fetch(`${BASE}/api/top?range=short_term&limit=5`, { headers: READ })).json()) as {
       range: string;
@@ -170,14 +149,13 @@ describe('GET /api/top', () => {
     expect(body.tracks.items[0]!.name).toBe('a track');
     expect(body.artists.items[0]!.name).toBe('an artist');
     expect(calls.sort()).toEqual([
-      '/v1/me/top/artists?time_range=short_term&limit=50',
-      '/v1/me/top/tracks?time_range=short_term&limit=50',
+      '/me/top/artists?time_range=short_term&limit=50',
+      '/me/top/tracks?time_range=short_term&limit=50',
     ].sort());
   });
 
   it('fetches only artists for type=artists', async () => {
-    await seedAuthorized();
-    const calls = stubSpotify(() => jsonResponse({ items: [{ name: 'an artist' }] }));
+    const calls = fakeSpotify(() => jsonResponse({ items: [{ name: 'an artist' }] })).paths;
 
     const body = (await (await SELF.fetch(`${BASE}/api/top?range=medium_term&limit=50&type=artists`, { headers: READ })).json()) as {
       tracks: unknown;
@@ -186,12 +164,11 @@ describe('GET /api/top', () => {
 
     expect(body.tracks).toBeNull();
     expect(body.artists.items[0]!.name).toBe('an artist');
-    expect(calls).toEqual(['/v1/me/top/artists?time_range=medium_term&limit=50']);
+    expect(calls).toEqual(['/me/top/artists?time_range=medium_term&limit=50']);
   });
 
   it('defaults to long_term and a limit of 12', async () => {
-    await seedAuthorized();
-    const calls = stubSpotify(() => jsonResponse({ items: Array.from({ length: 50 }, (_, i) => ({ name: `#${i}` })) }));
+    const calls = fakeSpotify(() => jsonResponse({ items: Array.from({ length: 50 }, (_, i) => ({ name: `#${i}` })) })).paths;
 
     const body = (await (await SELF.fetch(`${BASE}/api/top`, { headers: READ })).json()) as {
       limit: number;
@@ -204,12 +181,11 @@ describe('GET /api/top', () => {
   });
 
   it('serves every limit and repeat from one kept page per list and range', async () => {
-    await seedAuthorized();
     const href = (limit: number, offset = 0) =>
       `https://api.spotify.com/v1/me/top/artists?time_range=short_term&limit=${limit}&offset=${offset}`;
     const items = Array.from({ length: 50 }, (_, i) => ({ name: `Artist ${i}` }));
     const page = { items, limit: 50, offset: 0, total: 80, href: href(50), next: href(50, 50), previous: null };
-    const calls = stubSpotify(() => jsonResponse(page));
+    const calls = fakeSpotify(() => jsonResponse(page)).paths;
 
     const five = await SELF.fetch(`${BASE}/api/top?range=short_term&type=artists&limit=5`, { headers: READ });
     expect(five.headers.get('X-Cache')).toBe('miss');
@@ -226,12 +202,11 @@ describe('GET /api/top', () => {
       expect(again.headers.get('X-Cache')).toBe('hit');
       expect(((await again.json()) as { artists: { items: unknown[] } }).artists.items).toEqual(items.slice(0, 20));
     }
-    expect(calls).toEqual(['/v1/me/top/artists?time_range=short_term&limit=50']);
+    expect(calls).toEqual(['/me/top/artists?time_range=short_term&limit=50']);
   });
 
   it('rejects a bad range, limit or type with 400 without asking Spotify', async () => {
-    await seedAuthorized();
-    const calls = stubSpotify(() => jsonResponse({ items: [] }));
+    const calls = fakeSpotify(() => jsonResponse({ items: [] })).paths;
 
     for (const [query, field] of [
       ['range=last_tuesday', /range/],
@@ -278,7 +253,7 @@ describe('GET /api/top edition relabelling', () => {
   }
 
   async function topTrack(item: object) {
-    stubSpotify((url) => jsonResponse({ items: url.pathname.includes('tracks') ? [item] : [] }));
+    fakeSpotify((call) => jsonResponse({ items: call.path.includes('tracks') ? [item] : [] }));
     const body = (await (await SELF.fetch(`${BASE}/api/top`, { headers: READ })).json()) as {
       tracks: { items: Array<{ album: { id: string; name: string; images: Array<{ url: string; width: number }> } }> };
     };
@@ -293,7 +268,6 @@ describe('GET /api/top edition relabelling', () => {
   };
 
   it('labels a track with the edition it was played from most', async () => {
-    await seedAuthorized();
     await seedPlays([
       { track: 't-std', album: 'std', isrc: 'USUM71210785', plays: 5 },
       { track: 't-dlx', album: 'dlx', isrc: 'USUM71210785', plays: 1 },
@@ -307,21 +281,18 @@ describe('GET /api/top edition relabelling', () => {
   });
 
   it('matches by name and lead artist when the stored track has no ISRC', async () => {
-    await seedAuthorized();
     await seedPlays([{ track: 't-std', album: 'std', isrc: null, plays: 3 }]);
 
     expect((await topTrack(deluxeEntry)).album.id).toBe('std');
   });
 
   it('does not count a same-named copy of a different recording', async () => {
-    await seedAuthorized();
     await seedPlays([{ track: 't-std', album: 'std', isrc: 'USUM71299999', plays: 3 }]);
 
     expect((await topTrack(deluxeEntry)).album.id).toBe('dlx');
   });
 
   it("keeps Spotify's label when that edition is played as much", async () => {
-    await seedAuthorized();
     await seedPlays([
       { track: 't-std', album: 'std', isrc: 'USUM71210785', plays: 2 },
       { track: 't-dlx', album: 'dlx', isrc: 'USUM71210785', plays: 2 },
@@ -357,16 +328,7 @@ describe('POST /control/play', () => {
 
   /** `response` answers the play command; a track lookup gets `track` (default: none). */
   function stubPlayer(response: () => Response, track: () => Response = () => new Response('{}', { status: 404 })) {
-    const sent: Array<{ method: string; path: string; body: unknown }> = [];
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-        const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url);
-        sent.push({ method: init?.method ?? 'GET', path: url.pathname, body: init?.body ? JSON.parse(String(init.body)) : null });
-        return url.pathname.startsWith('/v1/tracks/') ? track() : response();
-      }),
-    );
-    return sent;
+    return fakeSpotify((call) => (call.path.startsWith('/tracks/') ? track() : response())).calls;
   }
 
   async function storeTrack(albumId: string | null) {
@@ -376,7 +338,6 @@ describe('POST /control/play', () => {
   }
 
   it('starts the track inside its stored album, asking Spotify nothing else', async () => {
-    await seedAuthorized();
     await storeTrack('1V8Qu6CwkBfYucnCWxynq8');
     const sent = stubPlayer(() => new Response(null, { status: 204 }));
 
@@ -386,17 +347,15 @@ describe('POST /control/play', () => {
     expect(await response.json()).toEqual({ playing: TRACK });
     expect(sent).toEqual([
       {
+        source: 'play',
         method: 'PUT',
-        path: '/v1/me/player/play',
+        path: '/me/player/play',
         body: { context_uri: 'spotify:album:1V8Qu6CwkBfYucnCWxynq8', offset: { uri: `spotify:track:${TRACK}` } },
       },
     ]);
-    const counted = await env.DB.prepare("SELECT SUM(calls) AS calls FROM spotify_calls WHERE source = 'play'").first<{ calls: number }>();
-    expect(counted?.calls).toBe(1);
   });
 
   it('drops the shared now-playing answer, which still names the old track', async () => {
-    await seedAuthorized();
     await storeTrack('1V8Qu6CwkBfYucnCWxynq8');
     const now = Date.now();
     await env.DB.prepare('INSERT INTO spotify_answers (key, body, fetched_ms, fresh_until_ms) VALUES (?, ?, ?, ?)')
@@ -410,7 +369,6 @@ describe('POST /control/play', () => {
   });
 
   it('asks Spotify for the album of a track stored without one', async () => {
-    await seedAuthorized();
     await storeTrack(null);
     const sent = stubPlayer(
       () => new Response(null, { status: 204 }),
@@ -418,20 +376,18 @@ describe('POST /control/play', () => {
     );
 
     expect((await playRequest(CONTROL)).status).toBe(200);
-    expect(sent.map((call) => call.path)).toEqual([`/v1/tracks/${TRACK}`, '/v1/me/player/play']);
+    expect(sent.map((call) => call.path)).toEqual([`/tracks/${TRACK}`, '/me/player/play']);
     expect(sent[1]!.body).toMatchObject({ context_uri: 'spotify:album:0Oq3mWfexhsjUh0aNNBB5u' });
   });
 
   it('falls back to the bare track when no album can be found', async () => {
-    await seedAuthorized();
     const sent = stubPlayer(() => new Response(null, { status: 204 }));
 
     expect((await playRequest(CONTROL)).status).toBe(200);
-    expect(sent.at(-1)).toEqual({ method: 'PUT', path: '/v1/me/player/play', body: { uris: [`spotify:track:${TRACK}`] } });
+    expect(sent.at(-1)).toEqual({ source: 'play', method: 'PUT', path: '/me/player/play', body: { uris: [`spotify:track:${TRACK}`] } });
   });
 
   it('is refused to a read token, and is all a control token reaches', async () => {
-    await seedAuthorized();
     const sent = stubPlayer(() => new Response(null, { status: 204 }));
 
     expect((await playRequest(READ)).status).toBe(401);
@@ -449,20 +405,17 @@ describe('POST /control/play', () => {
   });
 
   it('is open to the admin token', async () => {
-    await seedAuthorized();
     stubPlayer(() => new Response(null, { status: 204 }));
     expect((await playRequest(ADMIN)).status).toBe(200);
   });
 
   it.each([{}, { track_id: 'spotify:track:abc' }, { track_id: 42 }, null])('refuses %j without calling Spotify', async (body) => {
-    await seedAuthorized();
     const sent = stubPlayer(() => new Response(null, { status: 204 }));
     expect((await playRequest(CONTROL, body)).status).toBe(400);
     expect(sent).toEqual([]);
   });
 
   it('says when no device is active', async () => {
-    await seedAuthorized();
     stubPlayer(() => jsonResponse({ error: { status: 404, message: 'Player command failed: No active device found', reason: 'NO_ACTIVE_DEVICE' } }, { status: 404 }));
 
     const response = await playRequest(CONTROL);
@@ -474,7 +427,6 @@ describe('POST /control/play', () => {
     ['Player command failed: Premium required', 'PREMIUM_REQUIRED', 'premium_required'],
     ['Insufficient client scope', undefined, 'missing_scope'],
   ])('names a 403 (%s)', async (message, spotifyReason, reason) => {
-    await seedAuthorized();
     stubPlayer(() => jsonResponse({ error: { status: 403, message, reason: spotifyReason } }, { status: 403 }));
 
     const response = await playRequest(CONTROL);
@@ -485,10 +437,12 @@ describe('POST /control/play', () => {
   it('returns 503 with needs_reauth when the grant is dead', async () => {
     await seedAuthorized();
     await env.DB.prepare('UPDATE oauth_token SET needs_reauth = 1 WHERE id = 1').run();
-    const sent = stubPlayer(() => new Response(null, { status: 204 }));
+    // The real transport, so the stored grant is read.
+    const sent = vi.fn(async () => new Response(null, { status: 204 }));
+    vi.stubGlobal('fetch', sent);
 
     const response = await playRequest(CONTROL);
     expect(response.status).toBe(503);
-    expect(sent).toEqual([]);
+    expect(sent).not.toHaveBeenCalled();
   });
 });

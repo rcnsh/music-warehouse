@@ -2,8 +2,9 @@ import { countStoredPlays, readState, writeStatements } from './db';
 import { CallTally } from './quota';
 import { normalize } from './normalize';
 import { nameContexts } from './contexts';
-import { SpotifyError, type SpotifyCaller, fetchRecentlyPlayed } from './spotify';
-import { NeedsReauthError, getAccessToken } from './tokens';
+import { SpotifyError } from './spotify';
+import { type SpotifyClient, spotifyClient } from './spotify-client';
+import { NeedsReauthError } from './tokens';
 import type { Env, RecentlyPlayedResponse } from './types';
 import { log } from './log';
 
@@ -50,9 +51,9 @@ async function recordFailure(db: D1Database, message: string, now: number): Prom
 }
 
 /** Context names are a nicety: a failure there must never fail the poll. */
-async function nameContextsSafely(db: D1Database, accessToken: string, now: number, tally: CallTally): Promise<number> {
+async function nameContextsSafely(db: D1Database, spotify: SpotifyClient, now: number): Promise<number> {
   try {
-    return await nameContexts(db, accessToken, now, { db, source: 'contexts', tally });
+    return await nameContexts(db, spotify.as('contexts'), now);
   } catch (error) {
     log('context-naming-failed', { message: describe(error) }, 'error');
     return 0;
@@ -77,15 +78,14 @@ async function nameContextsSafely(db: D1Database, accessToken: string, now: numb
  * is 0 before the first poll, when there is nothing to catch up from.
  */
 async function fetchSince(
-  caller: SpotifyCaller,
-  accessToken: string,
+  spotify: SpotifyClient,
   cursorMs: number,
 ): Promise<{ payload: RecentlyPlayedResponse; reachMs: number | null }> {
-  const latest = await fetchRecentlyPlayed(caller, accessToken, 0);
+  const latest = await spotify.recentlyPlayed(0);
   const times = (latest.items ?? []).map((item) => Date.parse(item.played_at ?? '')).filter(Number.isFinite);
   if (cursorMs === 0 || times.length === 0 || Math.min(...times) <= cursorMs) return { payload: latest, reachMs: null };
 
-  const after = await fetchRecentlyPlayed(caller, accessToken, cursorMs);
+  const after = await spotify.recentlyPlayed(cursorMs);
   const reach = (after.items ?? []).map((item) => Date.parse(item.played_at ?? '')).filter(Number.isFinite);
   return {
     payload: { ...latest, items: [...(after.items ?? []), ...(latest.items ?? [])] },
@@ -116,22 +116,22 @@ export async function poll(env: Env, now: number = Date.now()): Promise<PollResu
 async function pollOnce(env: Env, now: number, tally: CallTally): Promise<PollResult> {
   const db = env.DB;
   const { sync, token } = await readState(db);
-  const caller: SpotifyCaller = { db, source: 'poll', tally };
+  const spotify = spotifyClient(env, 'poll', { grant: token, now, tally });
 
   let payload: RecentlyPlayedResponse;
   let reachMs: number | null;
-  let accessToken: string;
   try {
-    accessToken = await getAccessToken(db, env, token, now);
+    await spotify.ready();
 
     try {
-      ({ payload, reachMs } = await fetchSince(caller, accessToken, sync.cursor_ms));
+      ({ payload, reachMs } = await fetchSince(spotify, sync.cursor_ms));
     } catch (error) {
       if (!(error instanceof SpotifyError) || error.kind !== 'unauthorized') throw error;
       // A 401 on the data call despite a token we believed was live. Force one
       // refresh and retry exactly once; a second 401 aborts the run.
-      accessToken = await getAccessToken(db, env, { ...token, access_token: null, access_expires_ms: null }, now);
-      ({ payload, reachMs } = await fetchSince(caller, accessToken, sync.cursor_ms));
+      spotify.refreshToken();
+      await spotify.ready();
+      ({ payload, reachMs } = await fetchSince(spotify, sync.cursor_ms));
     }
   } catch (error) {
     if (error instanceof SpotifyError && error.paused) {
@@ -184,7 +184,7 @@ async function pollOnce(env: Env, now: number, tally: CallTally): Promise<PollRe
       skipped: rows.skipped,
       cursor_ms: sync.cursor_ms,
       needs_reauth: false,
-      contexts_named: await nameContextsSafely(db, accessToken, now, tally),
+      contexts_named: await nameContextsSafely(db, spotify, now),
     };
   }
 
@@ -217,7 +217,7 @@ async function pollOnce(env: Env, now: number, tally: CallTally): Promise<PollRe
       skipped: rows.skipped,
       cursor_ms: Math.max(sync.cursor_ms, cursorMs),
       needs_reauth: false,
-      contexts_named: await nameContextsSafely(db, accessToken, now, tally),
+      contexts_named: await nameContextsSafely(db, spotify, now),
     };
   } catch (error) {
     // The batch is a transaction: either every row landed or none did, and the
