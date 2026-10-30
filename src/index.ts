@@ -1,4 +1,6 @@
-import { BadRequest, dailyCounts, json, recentPlays, topArtists } from './api';
+import { dailyCounts, json, recentPlays, topArtists } from './api';
+import { errorResponse } from './errors';
+import { callback, login } from './oauth';
 import { backfillAlbums, backfillFromCatalog } from './albums';
 import { health } from './health';
 import { importChunk } from './import';
@@ -6,29 +8,26 @@ import { cleanupOverlapsRoute, cleanupShortGapsRoute, cleanupSkipsRoute } from '
 import { poll } from './ingest';
 import { alertCheckRoute, runPollCron } from './alerts';
 import { nowPlaying, play, recentlyPlayed, topMusic } from './live';
-import { SpotifyError, type TokenResponse, authorizeUrl, exchangeCode, fetchRecentlyPlayed } from './spotify';
-import { NeedsReauthError, getAccessToken, persistTokenResponse } from './tokens';
+import { fetchRecentlyPlayed } from './spotify';
+import { getAccessToken } from './tokens';
 import { dailyTrackSweep, readState } from './db';
-import { EraConfigError } from './eras';
 import { ensureRollup } from './rollup';
 import { accessFor, clientKey, createTokenRoute, listTokensRoute, listedOrigins, revokeTokenRoute } from './auth';
-import { SnapshotPending } from './snapshots';
 import { isStatName, statRoute } from './stats';
 import { artistRoute, cachedHistory, onThisDayRoute, topTracksRoute, trackRoute } from './history';
 import { searchRoute } from './search';
 import { homeRoute } from './home';
 import { radioRoute } from './radio';
-import { LyricsConfigError, lyricsRoute } from './lyrics';
+import { lyricsRoute } from './lyrics';
 import { playsCsvRoute } from './export';
 import {
-  RegionConfigError,
   concertArtistsRoute,
   concertCheckRoute,
   concertsRoute,
   pinConcertArtistRoute,
   runConcertCheck,
 } from './concerts';
-import { recordOwner, signInCallback, signInConfirm, signInExchange, signInStart } from './signin';
+import { signInCallback, signInConfirm, signInExchange, signInStart } from './signin';
 import { warmWrappedPresets, wrappedRangesRoute, wrappedRoute } from './wrapped';
 import type { Env } from './types';
 import { log } from './log';
@@ -43,80 +42,6 @@ function unauthorized(): Response {
     status: 401,
     headers: { 'Content-Type': 'application/json', 'WWW-Authenticate': 'Bearer' },
   });
-}
-
-function text(body: string, status = 200): Response {
-  return new Response(body, {
-    status,
-    // nosniff: a browser must never read this as anything but text.
-    headers: { 'Content-Type': 'text/plain; charset=utf-8', 'X-Content-Type-Options': 'nosniff' },
-  });
-}
-
-/**
- * Begin authorization. Returns a 302 whose Location is Spotify's consent page.
- *
- * This route is bearer-authenticated like every other, which means it is driven
- * with curl rather than opened directly in a browser — the admin token stays in
- * a header instead of a URL. See README, "Authorizing".
- */
-async function login(env: Env): Promise<Response> {
-  const state = crypto.randomUUID();
-  await env.DB.prepare(
-    'INSERT INTO oauth_state (id, state, created_ms) VALUES (1, ?, ?) ' +
-      'ON CONFLICT(id) DO UPDATE SET state = excluded.state, created_ms = excluded.created_ms',
-  )
-    .bind(state, Date.now())
-    .run();
-
-  return new Response(null, { status: 302, headers: { Location: authorizeUrl(env, state) } });
-}
-
-/** OAuth redirect target. Unauthenticated by necessity — the `state` value is what proves provenance. */
-async function callback(env: Env, url: URL): Promise<Response> {
-  // Spotify's error is a short code such as `access_denied`. Anything else in
-  // the query string is someone else's text, and is not repeated back.
-  const error = url.searchParams.get('error');
-  if (error) return text(`Spotify refused authorization: ${/^[a-z_]{1,64}$/.test(error) ? error : 'unknown'}`, 400);
-
-  const code = url.searchParams.get('code');
-  const state = url.searchParams.get('state');
-  if (!code || !state) return text('Missing code or state.', 400);
-
-  const stored = await env.DB.prepare('SELECT state, created_ms FROM oauth_state WHERE id = 1').first<{
-    state: string;
-    created_ms: number;
-  }>();
-
-  if (!stored || stored.state !== state) return text('State mismatch. Start again at /login.', 400);
-  if (Date.now() - stored.created_ms > 10 * 60 * 1000) {
-    return text('Authorization request expired. Start again at /login.', 400);
-  }
-
-  // Single use: consume the state before spending the code.
-  await env.DB.prepare('DELETE FROM oauth_state WHERE id = 1').run();
-
-  let token: TokenResponse;
-  try {
-    token = await exchangeCode(env, code);
-    // A fresh authorization restarts the six-month refresh-token clock.
-    await persistTokenResponse(env.DB, token, Date.now(), { resetAuthorizedAt: true });
-  } catch (cause) {
-    // The message can hold Spotify's response body: the log gets it, the page
-    // does not.
-    log('callback-token-exchange-failed', { error: cause instanceof SpotifyError ? cause.message : cause }, 'error');
-    return text('Token exchange with Spotify failed; the Worker log has the details. Start again at /login.', 502);
-  }
-
-  // Whose warehouse this is, for sign-in. Not worth failing the grant over:
-  // sign-in asks again with the stored grant if it is missing.
-  try {
-    await recordOwner(env.DB, token.access_token);
-  } catch (cause) {
-    log('owner-error', { error: cause instanceof Error ? cause.message : cause }, 'error');
-  }
-
-  return text('Authorized. Ingestion will resume on the next cron tick; POST /admin/poll to start now.');
 }
 
 /**
@@ -311,44 +236,7 @@ async function handle(request: Request, env: Env, ctx: ExecutionContext): Promis
       }
     }
   } catch (error) {
-    if (error instanceof BadRequest) return json({ error: error.message }, 400);
-    // A deployment setting is wrong, not the request: name it so the operator
-    // can fix it. The message holds the setting's shape, never its values.
-    if (error instanceof EraConfigError || error instanceof RegionConfigError || error instanceof LyricsConfigError) {
-      log('config-error', { message: error.message }, 'error');
-      return json({ error: `Worker misconfigured: ${error.message}` }, 500);
-    }
-    if (error instanceof SnapshotPending) {
-      const response = json({ error: error.message }, 503);
-      response.headers.set('Retry-After', String(error.retryAfterSeconds));
-      return response;
-    }
-    // The live proxy routes depend on a working Spotify grant, unlike the
-    // stored-data routes. Say which of the two failed rather than a blank 500.
-    if (error instanceof NeedsReauthError) {
-      return json({ error: 'Spotify connection needs re-authorization.', needs_reauth: true }, 503);
-    }
-    if (error instanceof SpotifyError) {
-      // The client only ever sees the error *kind*, so without this an
-      // upstream failure is undiagnosable after the fact.
-      // A call refused by the pause is expected while it lasts, not an error.
-      const limited = error.kind === 'rate_limited' || error.kind === 'quota_exceeded';
-      log(
-        'spotify-error',
-        { kind: error.kind, status: error.status, paused: error.paused, message: error.message },
-        limited ? 'warn' : 'error',
-      );
-      const response = json(
-        { error: `Spotify upstream: ${error.kind}`, retry_after_seconds: error.retryAfterSeconds },
-        limited ? 429 : 502,
-      );
-      if (limited && error.retryAfterSeconds !== null) {
-        response.headers.set('Retry-After', String(error.retryAfterSeconds));
-      }
-      return response;
-    }
-    log('unhandled-error', { error }, 'error');
-    return json({ error: 'Internal error' }, 500);
+    return errorResponse(error);
   }
 }
 
