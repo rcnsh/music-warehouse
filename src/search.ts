@@ -181,7 +181,9 @@ function answer(q: string, limit: number, match: Matches): Response {
   const grouped = new Map<string, Matches['artists']>();
   for (const row of match.artists) {
     const key = foldArtistName(row.name);
-    grouped.set(key, [...(grouped.get(key) ?? []), row]);
+    const rows = grouped.get(key);
+    if (rows) rows.push(row);
+    else grouped.set(key, [row]);
   }
   const artists = new Map<string, { id: string | null; name: string; plays: number }>();
   for (const [key, rows] of grouped) {
