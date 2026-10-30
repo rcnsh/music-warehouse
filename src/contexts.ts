@@ -1,4 +1,5 @@
-import { SpotifyError, type SpotifyCaller, spotifyGet } from './spotify';
+import { SpotifyError } from './spotify';
+import type { SpotifyClient } from './spotify-client';
 
 /**
  * Names for the contexts plays were started from (migration 0013).
@@ -73,12 +74,7 @@ interface Due {
  * limit or a dead grant, leaving the rest for a later poll. Returns how many
  * rows it settled.
  */
-export async function nameContexts(
-  db: D1Database,
-  accessToken: string,
-  now: number,
-  caller: SpotifyCaller = { db, source: 'contexts' },
-): Promise<number> {
+export async function nameContexts(db: D1Database, spotify: SpotifyClient, now: number): Promise<number> {
   const due = await db
     .prepare(
       `SELECT uri, name, ${localName('uri')} AS local FROM contexts
@@ -103,7 +99,7 @@ export async function nameContexts(
       continue;
     }
     try {
-      const body = (await spotifyGet(caller, accessToken, path)) as { name?: unknown } | null;
+      const body = (await spotify.get(path)) as { name?: unknown } | null;
       settled.push([row.uri, typeof body?.name === 'string' && body.name ? body.name : row.name]);
     } catch (error) {
       // A refusal is an answer, and is kept. Anything else (a rate limit, a

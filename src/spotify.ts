@@ -8,12 +8,11 @@ import {
   readPause,
   recordPause,
 } from './quota';
-import type { Env, RecentlyPlayedResponse } from './types';
+import type { Env } from './types';
 import { log } from './log';
 
 export const AUTHORIZE_URL = 'https://accounts.spotify.com/authorize';
 export const TOKEN_URL = 'https://accounts.spotify.com/api/token';
-export const RECENTLY_PLAYED_URL = 'https://api.spotify.com/v1/me/player/recently-played';
 /**
  * `user-read-recently-played` drives ingestion. The next two exist so the
  * Worker can serve a website's live widgets, which keeps the website free of any
@@ -55,11 +54,13 @@ export class SpotifyError extends Error {
   readonly retryAfterSeconds: number | null;
   /** True when the request was never sent, because calls are paused after an earlier 429. */
   readonly paused: boolean;
+  /** The start of Spotify's response body, when it sent one. */
+  readonly detail: string | null;
 
   constructor(
     kind: SpotifyErrorKind,
     message: string,
-    options: { status?: number | null; retryAfterSeconds?: number | null; paused?: boolean } = {},
+    options: { status?: number | null; retryAfterSeconds?: number | null; paused?: boolean; detail?: string | null } = {},
   ) {
     super(message);
     this.name = 'SpotifyError';
@@ -67,6 +68,7 @@ export class SpotifyError extends Error {
     this.status = options.status ?? null;
     this.retryAfterSeconds = options.retryAfterSeconds ?? null;
     this.paused = options.paused ?? false;
+    this.detail = options.detail ?? null;
   }
 }
 
@@ -278,79 +280,4 @@ export async function spotifyFetch(caller: SpotifyCaller, url: string | URL, ini
     }): ${body}`,
     { status: 429, retryAfterSeconds },
   );
-}
-
-/**
- * A plain authenticated GET against the Spotify API, returning the parsed body
- * verbatim. Used by the read-through proxy routes; deliberately does no
- * normalization, so the caller keeps its own view of the response shape.
- *
- * Returns null for 204 (Spotify's "nothing is playing").
- */
-export async function spotifyGet(caller: SpotifyCaller, accessToken: string, path: string): Promise<unknown> {
-  let response: Response;
-  try {
-    response = await spotifyFetch(caller, `https://api.spotify.com/v1${path}`, {
-      headers: { Authorization: `Bearer ${accessToken}` },
-    });
-  } catch (cause) {
-    if (cause instanceof SpotifyError) throw cause;
-    throw new SpotifyError('network', `${path} request failed: ${(cause as Error).message}`);
-  }
-
-  if (response.status === 204) return null;
-  if (response.status === 401) throw new SpotifyError('unauthorized', `${path} returned 401.`, { status: 401 });
-  if (!response.ok) {
-    throw new SpotifyError('http', `${path} returned ${response.status}: ${truncate(await response.text(), 300)}`, {
-      status: response.status,
-    });
-  }
-
-  const body = await response.text();
-  return body.trim() ? JSON.parse(body) : null;
-}
-
-/**
- * Fetch plays strictly after `afterMs`.
- *
- * `afterMs` of 0 means "first ever run" — the `after` parameter is omitted
- * entirely rather than sent as 0, and Spotify returns its most recent window.
- */
-export async function fetchRecentlyPlayed(
-  caller: SpotifyCaller,
-  accessToken: string,
-  afterMs: number,
-): Promise<RecentlyPlayedResponse> {
-  const url = new URL(RECENTLY_PLAYED_URL);
-  url.searchParams.set('limit', '50');
-  // `after` and `before` are mutually exclusive; this Worker never sends `before`,
-  // because `before` cannot reach past the endpoint's hard 50-item ceiling.
-  if (afterMs > 0) url.searchParams.set('after', String(afterMs));
-
-  let response: Response;
-  try {
-    response = await spotifyFetch(caller, url, { headers: { Authorization: `Bearer ${accessToken}` } });
-  } catch (cause) {
-    if (cause instanceof SpotifyError) throw cause;
-    throw new SpotifyError('network', `recently-played request failed: ${(cause as Error).message}`);
-  }
-
-  if (response.status === 401) {
-    throw new SpotifyError('unauthorized', 'recently-played returned 401.', { status: 401 });
-  }
-
-  if (response.status === 403) {
-    // Usually the account fell off the app's allowlist, or the owner's Premium lapsed.
-    throw new SpotifyError('forbidden', `recently-played returned 403: ${truncate(await response.text(), 300)}`, {
-      status: 403,
-    });
-  }
-
-  if (!response.ok) {
-    throw new SpotifyError('http', `recently-played returned ${response.status}: ${truncate(await response.text(), 300)}`, {
-      status: response.status,
-    });
-  }
-
-  return (await response.json()) as RecentlyPlayedResponse;
 }

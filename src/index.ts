@@ -6,9 +6,10 @@ import { cleanupOverlapsRoute, cleanupShortGapsRoute, cleanupSkipsRoute } from '
 import { poll } from './ingest';
 import { alertCheckRoute, runPollCron } from './alerts';
 import { nowPlaying, play, recentlyPlayed, topMusic } from './live';
-import { SpotifyError, type TokenResponse, authorizeUrl, exchangeCode, fetchRecentlyPlayed } from './spotify';
-import { NeedsReauthError, getAccessToken, persistTokenResponse } from './tokens';
-import { dailyTrackSweep, readState } from './db';
+import { SpotifyError, type TokenResponse, authorizeUrl, exchangeCode } from './spotify';
+import { isRateLimit, spotifyClient } from './spotify-client';
+import { NeedsReauthError, persistTokenResponse } from './tokens';
+import { dailyTrackSweep } from './db';
 import { EraConfigError } from './eras';
 import { ensureRollup } from './rollup';
 import { accessFor, clientKey, createTokenRoute, listTokensRoute, listedOrigins, revokeTokenRoute } from './auth';
@@ -111,7 +112,7 @@ async function callback(env: Env, url: URL): Promise<Response> {
   // Whose warehouse this is, for sign-in. Not worth failing the grant over:
   // sign-in asks again with the stored grant if it is missing.
   try {
-    await recordOwner(env.DB, token.access_token);
+    await recordOwner(env.DB, spotifyClient(env, 'signin', { auth: { accessToken: token.access_token } }));
   } catch (cause) {
     log('owner-error', { error: cause instanceof Error ? cause.message : cause }, 'error');
   }
@@ -125,10 +126,8 @@ async function callback(env: Env, url: URL): Promise<Response> {
  * cursor or sync_state, so it cannot disturb ingestion.
  */
 async function rawRecentlyPlayed(env: Env, url: URL): Promise<Response> {
-  const { token } = await readState(env.DB);
-  const accessToken = await getAccessToken(env.DB, env, token, Date.now());
   const after = Number(url.searchParams.get('after') ?? 0);
-  const payload = await fetchRecentlyPlayed({ db: env.DB, source: 'admin' }, accessToken, Number.isFinite(after) ? after : 0);
+  const payload = await spotifyClient(env, 'admin').recentlyPlayed(Number.isFinite(after) ? after : 0);
   return json(payload);
 }
 
@@ -332,7 +331,7 @@ async function handle(request: Request, env: Env, ctx: ExecutionContext): Promis
       // The client only ever sees the error *kind*, so without this an
       // upstream failure is undiagnosable after the fact.
       // A call refused by the pause is expected while it lasts, not an error.
-      const limited = error.kind === 'rate_limited' || error.kind === 'quota_exceeded';
+      const limited = isRateLimit(error);
       log(
         'spotify-error',
         { kind: error.kind, status: error.status, paused: error.paused, message: error.message },
