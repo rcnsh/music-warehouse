@@ -10,7 +10,7 @@ import {
 } from './tz';
 import { NAME_KEY_PREFIX } from './db';
 import { filterTrackIds, playCursor, playFilterParams, selectPlays, withFirstPlay } from './plays';
-import { ROLLUP_STATE_SQL, type RollupState, beginsDay, endsDay, rollupServes, rollupZone, withTrackCounts } from './rollup';
+import { rollupDayCounts, rollupZone, withTrackCounts } from './rollup';
 import type { Env } from './types';
 
 export class BadRequest extends Error {}
@@ -220,32 +220,24 @@ export async function dailyCounts(env: Env, url: URL): Promise<Response> {
   const buckets = () =>
     groupBy === 'day' ? { days: days() } : { group_by: groupBy, [`${groupBy}s`]: groupDays(days(), groupBy) };
 
-  // Unfiltered, the rollup holds each day's count: one row a day instead of
-  // one a play. It answers only when the range runs exactly from local
-  // midnight to local midnight in its zone, so its days are the range's.
-  if (match.ids === null && beginsDay(fromMs, from, timeZone) && endsDay(toMs, to, timeZone)) {
-    const [state, rollup] = await env.DB.batch([
-      env.DB.prepare(ROLLUP_STATE_SQL),
-      env.DB.prepare('SELECT day, plays FROM rollup_days WHERE day >= ? AND day <= ? AND plays > 0').bind(from, to),
-    ]);
-    if (rollupServes(state!.results[0] as RollupState | undefined, timeZone, Date.now())) {
-      for (const row of rollup!.results as Array<{ day: string; plays: number }>) counts.set(row.day, row.plays);
-      const rowsRead = (state!.meta?.rows_read ?? 0) + (rollup!.meta?.rows_read ?? 0);
-      return fromRollup(
-        withRowsRead(
-          json({
-            from,
-            to,
-            tz: timeZone,
-            ...filter,
-            ...buckets(),
-            _meta: { rows_read: rowsRead, duration_ms: rollup!.meta?.duration ?? null },
-          }),
-          rowsRead,
-        ),
-        true,
-      );
-    }
+  // Unfiltered, the rollup may hold each day's count: one row a day instead of one a play.
+  const rollup = match.ids === null ? await rollupDayCounts(env, { from, to, fromMs, toMs, timeZone }) : null;
+  if (rollup) {
+    for (const row of rollup.days) counts.set(row.day, row.plays);
+    return fromRollup(
+      withRowsRead(
+        json({
+          from,
+          to,
+          tz: timeZone,
+          ...filter,
+          ...buckets(),
+          _meta: { rows_read: rollup.rowsRead, duration_ms: rollup.durationMs },
+        }),
+        rollup.rowsRead,
+      ),
+      true,
+    );
   }
 
   // Filtered, idx_plays_track seeks each track's plays in the range, so the

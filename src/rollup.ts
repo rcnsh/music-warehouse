@@ -196,6 +196,29 @@ export async function withTrackCounts<T>(
 }
 
 /**
+ * Plays per local day over [from, to] from the rollup, or null when it cannot
+ * answer exactly: only when the range runs from local midnight to local
+ * midnight in the rollup's zone, so its days are the range's, and the rollup
+ * serves that zone now. Days without plays are left out.
+ */
+export async function rollupDayCounts(
+  env: Env,
+  range: { from: string; to: string; fromMs: number; toMs: number; timeZone: string },
+): Promise<{ days: Array<{ day: string; plays: number }>; rowsRead: number; durationMs: number | null } | null> {
+  if (!beginsDay(range.fromMs, range.from, range.timeZone) || !endsDay(range.toMs, range.to, range.timeZone)) return null;
+  const [state, days] = await env.DB.batch([
+    env.DB.prepare(ROLLUP_STATE_SQL),
+    env.DB.prepare('SELECT day, plays FROM rollup_days WHERE day >= ? AND day <= ? AND plays > 0').bind(range.from, range.to),
+  ]);
+  if (!rollupServes(state!.results[0] as RollupState | undefined, range.timeZone, Date.now())) return null;
+  return {
+    days: days!.results as Array<{ day: string; plays: number }>,
+    rowsRead: (state!.meta?.rows_read ?? 0) + (days!.meta?.rows_read ?? 0),
+    durationMs: days!.meta?.duration ?? null,
+  };
+}
+
+/**
  * Make the rollup match the configured zone. Each day this writes out a
  * little more of the zone's offsets; when the zone changed, its rules
  * changed (a new tzdata), or the offsets ran out before a poll, it rebuilds
