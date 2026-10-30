@@ -1,4 +1,7 @@
+import { NAME_KEY_END, NAME_KEY_PREFIX } from './artists';
 import { insertContexts } from './contexts';
+
+export { NAME_KEY_PREFIX };
 import { songStatements, syncChangedSongs } from './play-numbers';
 import { syncSearchIndex } from './search-index';
 import type { NormalizedRows, OAuthToken, SyncState } from './types';
@@ -48,19 +51,6 @@ export function buildInserts<T extends Record<string, unknown>>(
   }
   return statements;
 }
-
-/**
- * Prefix marking an artist row keyed by name rather than by Spotify id.
- *
- * The Extended Streaming History export carries artist *names* only, and the
- * catalog endpoints that would resolve them to ids are closed to apps in
- * Spotify's development mode. Export-era artists are therefore keyed
- * `name:<artist name>` — unambiguous, because a real Spotify id is 22
- * characters of base62 and can never contain a colon.
- */
-export const NAME_KEY_PREFIX = 'name:';
-/** The first string after every `name:` key, so `>= prefix AND < end` is an index range. */
-export const NAME_KEY_END = 'name;';
 
 /**
  * Fold name-keyed artists into their real id-keyed equivalents, by exact name.

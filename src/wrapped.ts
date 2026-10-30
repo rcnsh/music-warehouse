@@ -1,7 +1,7 @@
 import { BadRequest, json } from './api';
 import { type Era, eraAt, eraDigest, historyStartMs, loadEras, localTimeSql, startOfLocalWeek } from './eras';
 import { peekSnapshot, snapshot } from './snapshots';
-import { NAME_KEY_PREFIX } from './db';
+import { foldArtistName, preferredArtist } from './artists';
 import { songTitle, songTitleSql } from './song-title';
 import { PRIMARY_ARTIST_PAIR_SQL, PRIMARY_ARTIST_SQL } from './stats/sql';
 import { calendarDaysInclusive, endOfLocalDayUtcMs, isRealDay, localDayKey, startOfLocalDayUtcMs } from './tz';
@@ -347,7 +347,7 @@ function summarize(
     }
 
     if (track.artist === null) continue;
-    const artistKey = track.artist.toLowerCase();
+    const artistKey = foldArtistName(track.artist);
     const songKey = `${songTitle(track.name.toLowerCase())}|${artistKey}`;
 
     let song = songs.get(songKey);
@@ -405,11 +405,9 @@ function summarize(
   const topKey = (counts: Map<string, number>) =>
     [...counts].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0]?.[0] ?? null;
   const songId = (key: string | null) => (key ? topKey(songs.get(key)!.editions) : null);
-  /** A real id beats a `name:` placeholder however few plays it has. */
-  const artistId = (artist: Artist) => {
-    const real = new Map([...artist.ids].filter(([id]) => !id.startsWith(NAME_KEY_PREFIX)));
-    return topKey(real.size > 0 ? real : artist.ids)!;
-  };
+  /** The artist's preferred id (src/artists.ts), weighed by minutes. */
+  const artistId = (artist: Artist) =>
+    preferredArtist([...artist.ids].map(([artist_id, ms]) => ({ artist_id, ms })), (id) => id.ms)!.artist_id;
   const byMs = <T extends { ms: number }>(a: [string, T], b: [string, T]) => b[1].ms - a[1].ms || a[0].localeCompare(b[0]);
 
   const rankedArtists = [...artists].sort(byMs);

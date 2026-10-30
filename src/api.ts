@@ -10,7 +10,7 @@ import {
 } from './tz';
 import { ARTIST_TRACKS_CTE, SONG_TRACKS_CTE, textParam } from './history';
 import { CONTEXT_FITS } from './contexts';
-import { NAME_KEY_PREFIX } from './db';
+import { preferredArtistOrderSql } from './artists';
 import { trigramPhrase } from './search-index';
 import { ROLLUP_STATE_SQL, type RollupState, beginsDay, endsDay, rollupServes, rollupZone, withTrackCounts } from './rollup';
 import type { Env } from './types';
@@ -394,7 +394,7 @@ export async function topArtists(env: Env, url: URL): Promise<Response> {
        named AS (
          SELECT top.k, top.plays,
                 (SELECT json_array(a.artist_id, a.name) FROM artists a WHERE a.name = top.k COLLATE NOCASE
-                  ORDER BY instr(a.artist_id, '${NAME_KEY_PREFIX}') = 1, a.artist_id LIMIT 1) AS pair
+                  ORDER BY ${preferredArtistOrderSql('a.artist_id')} LIMIT 1) AS pair
            FROM top
        )
        SELECT json_extract(pair, '$[0]') AS artist_id, json_extract(pair, '$[1]') AS name, plays
