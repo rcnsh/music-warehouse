@@ -1,4 +1,5 @@
-import { BadRequest, intParam, likePattern } from './api';
+import { BadRequest, intParam } from './api';
+import { likePattern } from './plays';
 import { NAME_KEY_PREFIX } from './db';
 import { respond, textParam } from './history';
 import { trigramPhrase } from './search-index';

@@ -1,6 +1,6 @@
 import { SELF, env } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
-import { filterTrackIds, playFilterParams, selectPlays } from '../src/api';
+import { filterTrackIds, playFilterParams, selectPlays } from '../src/plays';
 import { csvField } from '../src/export';
 import { syncSearchIndex } from '../src/search-index';
 
