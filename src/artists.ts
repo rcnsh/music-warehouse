@@ -97,8 +97,10 @@ export function preferredArtist<T extends { artist_id: string }>(
  * allows 100 bound parameters.
  *
  * Three set-based statements, in order:
- *   1. Repoint links from a placeholder to the real id. `OR IGNORE` skips rows
- *      where the track already links to that real artist, leaving them for (2).
+ *   1. Repoint links from a placeholder to the real id; of real twins whose
+ *      names differ only in case, the lowest id, as there is no weight here.
+ *      `OR IGNORE` skips rows where the track already links to that real
+ *      artist, leaving them for (2).
  *   2. Drop placeholder links on tracks that now carry a real link.
  *   3. Delete placeholders nothing points at any more.
  *
@@ -113,10 +115,9 @@ export function reconcileArtists(
 ): D1PreparedStatement[] {
   const placeholder = isNameKeySql('artist_id');
   // The placeholders in scope: all of them, or those named like a polled artist.
-  const placeholders = scope
-    ? `(SELECT p.artist_id FROM json_each(?1) j JOIN artists p ON p.name = j.value COLLATE NOCASE
-         WHERE ${isNameKeySql('p.artist_id')})`
-    : `(SELECT artist_id FROM artists WHERE ${placeholder})`;
+  const placeholders = `(SELECT p.artist_id FROM json_each(?1) j JOIN artists p ON p.name = j.value COLLATE NOCASE
+         WHERE ${isNameKeySql('p.artist_id')})`;
+  const inScope = scope ? `artist_id IN ${placeholders}` : placeholder;
   const real = `FROM artists real
                  WHERE real.name = substr(track_artists.artist_id, ${NAME_KEY_PREFIX.length + 1}) COLLATE NOCASE
                    AND NOT ${isNameKeySql('real.artist_id')}`;
@@ -124,7 +125,7 @@ export function reconcileArtists(
     db.prepare(
       `UPDATE OR IGNORE track_artists
           SET artist_id = (SELECT real.artist_id ${real} ORDER BY real.artist_id LIMIT 1)
-        WHERE artist_id IN ${placeholders}
+        WHERE ${inScope}
           AND EXISTS (SELECT 1 ${real})`,
     ),
     db.prepare(
@@ -137,7 +138,7 @@ export function reconcileArtists(
     ),
     db.prepare(
       `DELETE FROM artists
-        WHERE artist_id IN ${placeholders}
+        WHERE ${inScope}
           AND NOT EXISTS (SELECT 1 FROM track_artists ta WHERE ta.artist_id = artists.artist_id)`,
     ),
   ];
