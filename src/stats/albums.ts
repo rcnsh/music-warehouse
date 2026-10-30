@@ -1,5 +1,5 @@
 import { type Era, historyStartMs, startOfLocalWeek } from '../eras';
-import { songTitleSql } from '../song-title';
+import { SONG_SQL } from '../songs';
 import { PRIMARY_ARTIST_SQL } from './sql';
 
 /**
@@ -48,7 +48,7 @@ export async function computeTopAlbums(db: D1Database, now: number, eras: readon
            FROM plays WHERE played_at_ms >= ?1 AND played_at_ms < ?2 GROUP BY y, track_id
        ),
        tr AS MATERIALIZED (
-         SELECT tr.track_id, ${songTitleSql('lower(tr.name)')} AS song, al.name AS album, al.image_url AS image,
+         SELECT tr.track_id, ${SONG_SQL('tr.track_id')} AS song, al.name AS album, al.image_url AS image,
                 ${PRIMARY_ARTIST_SQL('tr.track_id')} AS artist
            FROM tracks tr JOIN albums al ON al.album_id = tr.album_id
           WHERE tr.track_id IN (SELECT track_id FROM pt)

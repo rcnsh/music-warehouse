@@ -172,7 +172,7 @@ An artist is matched by id and by lowercased name, as the stats group them, so
 export-era `name:` placeholders count; `name` is the fallback for an id the
 warehouse has never seen. Credit is the primary artist's only. A track folds
 every edition with the same title (less a remaster, "single version" or "radio
-edit" tag; src/song-title.ts) and primary artist, and its `id` is the one
+edit" tag; src/songs.ts) and primary artist, and its `id` is the one
 asked for.
 
 `plays` counts every stored play, as `/api/top-artists` does. `minutes` is

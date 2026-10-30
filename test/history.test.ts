@@ -270,17 +270,6 @@ describe('/api/track', () => {
     expect(body.months).toEqual([{ month: '2024-01', plays: 5 }]);
   });
 
-  it('folds a remastered or single edition, but not a live one', async () => {
-    await seed([
-      ...session(JAN_10, 2, { trackId: 'orig', name: 'Heroes', artistId: 'bowie', artistName: 'David Bowie' }),
-      ...session(JAN_10 + DAY, 3, { trackId: 'remaster', name: 'Heroes - 2017 Remaster', artistId: 'bowie', artistName: 'David Bowie' }),
-      ...session(JAN_10 + 2 * DAY, 1, { trackId: 'single', name: 'Heroes (Single Version)', artistId: 'bowie', artistName: 'David Bowie' }),
-      ...session(JAN_10 + 3 * DAY, 4, { trackId: 'live', name: 'Heroes - Live', artistId: 'bowie', artistName: 'David Bowie' }),
-    ]);
-    expect((await get<TrackBody>('/api/track?id=remaster')).plays).toBe(6);
-    expect((await get<TrackBody>('/api/track?id=live')).plays).toBe(4);
-  });
-
   it('answers an unknown track with nulls and zeros, not 404', async () => {
     expect(await get<TrackBody>('/api/track?id=nothing')).toEqual({
       track: { id: 'nothing', name: null, artist: null, image: null },

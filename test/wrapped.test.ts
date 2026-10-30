@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { buildEras, eraAt, parseEras } from '../src/eras';
 import { localDayKey, startOfLocalDayUtcMs } from '../src/tz';
 import { freezeClock } from './helpers';
+import { syncAllSongs } from '../src/play-numbers';
 import { edgeRequest } from '../src/snapshots';
 import {
   type HourRow,
@@ -57,6 +58,7 @@ async function seed(plays: Play[]) {
     );
   }
   await env.DB.batch(statements);
+  await env.DB.batch(syncAllSongs(env.DB));
 }
 
 /** `count` plays of one track, five minutes apart so each counts its full 200 s. */

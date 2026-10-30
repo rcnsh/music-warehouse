@@ -1,16 +1,12 @@
-import { songTitleSql } from './song-title';
-import { PRIMARY_ARTIST_SQL } from './stats/sql';
+import { SONG_KEY_SQL } from './songs';
 import { type TrackScope, trackScope } from './search-index';
 
 /**
  * Upkeep for play numbers (migration 0012): which play of its song each play
  * was, counting every edition of the song, as /api/track folds them.
  *
- * A song's key is its title, lowercased (ASCII only, as SQLite's lower() is)
- * with any edition tag taken off (src/song-title.ts), and its primary
- * artist's name, lowercased. Tracks with two primary credits take the first
- * by id, as PRIMARY_ARTIST_SQL does everywhere. /api/track, /api/top-tracks
- * and on-repeat fold editions by this key.
+ * Each track's song key (src/songs.ts) is stored in track_songs, which
+ * everything that folds editions reads.
  *
  * Every write that stores plays runs songStatements, after its tracks and
  * artists are in place: rekey the tracks it wrote, renumber whole any song a
@@ -26,10 +22,6 @@ import { type TrackScope, trackScope } from './search-index';
  * syncAllSongs).
  */
 
-/** The song key of track `t`. */
-export const songKey = (t: string) =>
-  `COALESCE(${songTitleSql(`lower(${t}.name)`)} || char(31) || lower(${PRIMARY_ARTIST_SQL(`${t}.track_id`)}), char(30) || ${t}.track_id)`;
-
 const UPSERT = `ON CONFLICT(played_at_ms, track_id) DO UPDATE SET song = excluded.song, n = excluded.n
      WHERE play_numbers.song IS NOT excluded.song OR play_numbers.n IS NOT excluded.n`;
 
@@ -39,7 +31,7 @@ function rekey(db: D1Database, tracks?: TrackScope): D1PreparedStatement {
   return scope.bind(
     db.prepare(
       `INSERT INTO track_songs (track_id, song)
-       SELECT t.track_id, ${songKey('t')} FROM tracks t ${scope.where}
+       SELECT t.track_id, ${SONG_KEY_SQL('t')} FROM tracks t ${scope.where}
        ON CONFLICT(track_id) DO UPDATE
           SET song = excluded.song, previous = COALESCE(track_songs.previous, track_songs.song), dirty = 1
         WHERE track_songs.song IS NOT excluded.song`,

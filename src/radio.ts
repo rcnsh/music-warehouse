@@ -1,5 +1,6 @@
 import { BadRequest, intParam } from './api';
 import { ARTIST_TRACKS_CTE, SONG_TRACKS_CTE, respond, textParam } from './history';
+import { SONG_SQL } from './songs';
 import { PRIMARY_ARTIST_PAIR_SQL, PRIMARY_ARTIST_SQL } from './stats/sql';
 import type { Env } from './types';
 import { MIN_PLAY_MS } from './wrapped';
@@ -190,8 +191,7 @@ export async function radioRoute(env: Env, url: URL): Promise<Response> {
     // An artist's songs stay in its radio, so only a track seed excludes any.
     track !== null
       ? env.DB.prepare(
-          `WITH ${SONG_TRACKS_CTE} SELECT COALESCE(s.song, char(30) || ts.track_id) AS song
-             FROM ts LEFT JOIN track_songs s ON s.track_id = ts.track_id`,
+          `WITH ${SONG_TRACKS_CTE} SELECT ${SONG_SQL('ts.track_id')} AS song FROM ts`,
         ).bind(track)
       : env.DB.prepare('SELECT NULL AS song WHERE 0'),
     track !== null
@@ -212,9 +212,8 @@ export async function radioRoute(env: Env, url: URL): Promise<Response> {
   // since D1 allows only 100 bound parameters.
   const near = await env.DB.prepare(
     `WITH r(a, b) AS (SELECT value ->> 0, value ->> 1 FROM json_each(?))
-     SELECT p.played_at_ms AS ms, p.track_id, COALESCE(s.song, char(30) || p.track_id) AS song
+     SELECT p.played_at_ms AS ms, p.track_id, ${SONG_SQL('p.track_id')} AS song
        FROM r CROSS JOIN plays p ON p.played_at_ms >= r.a AND p.played_at_ms <= r.b
-       LEFT JOIN track_songs s ON s.track_id = p.track_id
       ORDER BY p.played_at_ms, p.track_id`,
   )
     .bind(JSON.stringify(seedWindows(seedMs)))

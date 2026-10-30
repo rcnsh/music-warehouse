@@ -1,4 +1,5 @@
 import { type Era, startOfLocalToday } from '../eras';
+import { SONG_SQL } from '../songs';
 
 /**
  * What's on repeat now.
@@ -10,8 +11,8 @@ import { type Era, startOfLocalToday } from '../eras';
  * outranks songs actually on repeat. A play after a long pause can't be checked and is
  * kept.
  *
- * Songs are keyed as play numbers key them (`track_songs`, src/play-numbers.ts):
- * the title less any edition tag, and the lead artist's name. That folds
+ * Songs are keyed as play numbers key them (src/songs.ts): the title less
+ * any edition tag, and the lead artist's name. That folds
  * single, album, remastered and clean/explicit ids of the same recording,
  * and an export-era copy (artist keyed `name:`) with its live one.
  *
@@ -60,10 +61,6 @@ const ARTISTS_OF = (column: string) =>
   `(SELECT group_concat(name, ', ') FROM (SELECT a.name FROM track_artists ta JOIN artists a ON a.artist_id = ta.artist_id
      WHERE ta.track_id = ${column} ORDER BY ta.position))`;
 
-/** A track missing from track_songs stands alone, as songKey() keys one with no lead artist. */
-const SONG_KEY = (trackColumn: string) =>
-  `COALESCE((SELECT song FROM track_songs WHERE track_id = ${trackColumn}), char(30) || ${trackColumn})`;
-
 // The window plus the baseline before it, read off the plays primary key, so
 // the cost follows recent listening rather than the size of the history.
 // D1 binds JS numbers as REAL, and day arithmetic needs integer division,
@@ -79,7 +76,7 @@ const CURRENT_CTE = `
   ),
   counted AS (
     SELECT r.played_at_ms, r.track_id, ((SELECT now_ms FROM params) - r.played_at_ms) / ${DAY_MS} AS day_ago,
-           ${SONG_KEY('r.track_id')} AS song
+           ${SONG_SQL('r.track_id')} AS song
       FROM recent r JOIN tracks t ON t.track_id = r.track_id
      WHERE r.dur_ms IS NULL OR r.dur_ms >= ${MIN_SHORT_PLAY_MS}
   ),
