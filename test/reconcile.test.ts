@@ -1,9 +1,9 @@
 import { env } from 'cloudflare:test';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { NAME_KEY_PREFIX, dailyTrackSweep, reconcileArtistsInPoll, reconcileNameKeyedArtists } from '../src/db';
-import type { NormalizedRows } from '../src/types';
+import { foldArtistName, nameKey, preferredArtist, reconcileArtists } from '../src/artists';
+import { dailyTrackSweep } from '../src/db';
 
-const NAME_KEY = `${NAME_KEY_PREFIX}Porter Robinson`;
+const NAME_KEY = nameKey('Porter Robinson');
 
 async function seed(): Promise<void> {
   await env.DB.batch([
@@ -20,16 +20,40 @@ async function seed(): Promise<void> {
   ]);
 }
 
+/**
+ * A placeholder differing from the real artist in ASCII case only, and one
+ * differing in a non-ASCII letter, which the rule keeps apart.
+ */
+function caseVariants(): D1PreparedStatement[] {
+  return [
+    env.DB.prepare("INSERT INTO tracks (track_id, name, first_seen_ms) VALUES ('casey', 'Shelter', 3), ('accent', 'Hoppípolla', 4)"),
+    env.DB.prepare(
+      "INSERT INTO artists (artist_id, name) VALUES ('name:Porter robinson', 'Porter robinson'), ('sigur', 'Sigur Rós'), ('name:SIGUR RÓS', 'SIGUR RÓS')",
+    ),
+    env.DB.prepare(
+      "INSERT INTO track_artists (track_id, artist_id, position) VALUES ('casey', 'name:Porter robinson', 0), ('accent', 'name:SIGUR RÓS', 0)",
+    ),
+  ];
+}
+
+async function creditOf(trackId: string): Promise<string | null> {
+  return env.DB.prepare('SELECT artist_id FROM track_artists WHERE track_id = ?').bind(trackId).first('artist_id');
+}
+
+async function artistIds(): Promise<string[]> {
+  return (await env.DB.prepare('SELECT artist_id FROM artists ORDER BY artist_id').all<{ artist_id: string }>()).results.map((r) => r.artist_id);
+}
+
 async function links(): Promise<Array<{ track_id: string; artist_id: string }>> {
   const query = await env.DB.prepare('SELECT track_id, artist_id FROM track_artists ORDER BY track_id, artist_id').all();
   return query.results as Array<{ track_id: string; artist_id: string }>;
 }
 
-describe('reconcileNameKeyedArtists', () => {
+describe('reconcileArtists, unscoped', () => {
   beforeEach(seed);
 
   it('repoints an export-only track onto the real artist id', async () => {
-    await env.DB.batch(reconcileNameKeyedArtists(env.DB));
+    await env.DB.batch(reconcileArtists(env.DB));
 
     expect(await links()).toEqual([
       { track_id: 'bothSeen', artist_id: 'realPorterId' },
@@ -38,7 +62,7 @@ describe('reconcileNameKeyedArtists', () => {
   });
 
   it('deletes the orphaned name-keyed artist row', async () => {
-    await env.DB.batch(reconcileNameKeyedArtists(env.DB));
+    await env.DB.batch(reconcileArtists(env.DB));
 
     const remaining = await env.DB.prepare('SELECT artist_id FROM artists').all();
     expect(remaining.results).toEqual([{ artist_id: 'realPorterId' }]);
@@ -47,7 +71,7 @@ describe('reconcileNameKeyedArtists', () => {
   it('counts each play once after merging', async () => {
     await env.DB.batch([
       env.DB.prepare("INSERT INTO plays (played_at_ms, track_id, source) VALUES (100, 'bothSeen', 'api')"),
-      ...reconcileNameKeyedArtists(env.DB),
+      ...reconcileArtists(env.DB),
     ]);
 
     const query = await env.DB.prepare(
@@ -60,11 +84,18 @@ describe('reconcileNameKeyedArtists', () => {
     expect(query.results).toEqual([{ name: 'Porter Robinson', plays: 1 }]);
   });
 
+  it('folds a placeholder whose name differs from the real artist only in ASCII case', async () => {
+    await env.DB.batch([...caseVariants(), ...reconcileArtists(env.DB)]);
+    expect(await creditOf('casey')).toBe('realPorterId');
+    expect(await creditOf('accent')).toBe('name:SIGUR RÓS');
+    expect(await artistIds()).toEqual(['name:SIGUR RÓS', 'realPorterId', 'sigur']);
+  });
+
   it('leaves a name-keyed artist alone when no real id shares its name', async () => {
     await env.DB.batch([
       env.DB.prepare("DELETE FROM track_artists WHERE artist_id = 'realPorterId'"),
       env.DB.prepare("DELETE FROM artists WHERE artist_id = 'realPorterId'"),
-      ...reconcileNameKeyedArtists(env.DB),
+      ...reconcileArtists(env.DB),
     ]);
 
     expect(await links()).toEqual([
@@ -74,19 +105,17 @@ describe('reconcileNameKeyedArtists', () => {
   });
 });
 
-/** A poll's rows as normalize() produces them, holding only what the scoped reconcile reads. */
-function poll(artists: NormalizedRows['artists'], trackArtists: NormalizedRows['trackArtists']): NormalizedRows {
-  return { plays: [], tracks: [], albums: [], artists, trackArtists } as unknown as NormalizedRows;
+/** A poll's scope: the real artists' names it brought and the tracks it credited. */
+function poll(names: string[], tracks: string[]) {
+  return { names, tracks };
 }
 
-describe('reconcileArtistsInPoll', () => {
+describe('reconcileArtists, scoped to a poll', () => {
   beforeEach(seed);
 
   it('merges the name-keyed rows of an artist the poll brought', async () => {
     await env.DB.batch(
-      reconcileArtistsInPoll(env.DB, poll([{ artist_id: 'realPorterId', name: 'Porter Robinson' }], [
-        { track_id: 'bothSeen', artist_id: 'realPorterId', position: 0 },
-      ])),
+      reconcileArtists(env.DB, poll(['Porter Robinson'], ['bothSeen'])),
     );
 
     expect(await links()).toEqual([
@@ -102,9 +131,7 @@ describe('reconcileArtistsInPoll', () => {
       env.DB.prepare("INSERT INTO artists (artist_id, name) VALUES ('realOther', 'Porter Robinson & Friends')"),
       env.DB.prepare("DELETE FROM track_artists WHERE artist_id = 'realPorterId'"),
       env.DB.prepare("INSERT INTO track_artists (track_id, artist_id, position) VALUES ('bothSeen', 'realOther', 0)"),
-      ...reconcileArtistsInPoll(env.DB, poll([{ artist_id: 'realOther', name: 'Porter Robinson & Friends' }], [
-        { track_id: 'bothSeen', artist_id: 'realOther', position: 0 },
-      ])),
+      ...reconcileArtists(env.DB, poll(['Porter Robinson & Friends'], ['bothSeen'])),
     ]);
 
     expect(await links()).toEqual([
@@ -115,9 +142,7 @@ describe('reconcileArtistsInPoll', () => {
 
   it('leaves artists and tracks outside the poll for the daily sweep', async () => {
     await env.DB.batch(
-      reconcileArtistsInPoll(env.DB, poll([{ artist_id: 'someoneElse', name: 'Madeon' }], [
-        { track_id: 'otherTrack', artist_id: 'someoneElse', position: 0 },
-      ])),
+      reconcileArtists(env.DB, poll(['Madeon'], ['otherTrack'])),
     );
 
     expect(await links()).toEqual([
@@ -128,9 +153,39 @@ describe('reconcileArtistsInPoll', () => {
   });
 
   it('copes with an empty poll and names that need quoting', async () => {
-    await env.DB.batch(reconcileArtistsInPoll(env.DB, poll([], [])));
-    await env.DB.batch(reconcileArtistsInPoll(env.DB, poll([{ artist_id: 'x', name: "Guns N' Roses \"live\"" }], [])));
+    await env.DB.batch(reconcileArtists(env.DB, poll([], [])));
+    await env.DB.batch(reconcileArtists(env.DB, poll(["Guns N' Roses \"live\""], [])));
     expect(await links()).toHaveLength(3);
+  });
+
+  it('folds a placeholder the poll names in other ASCII case', async () => {
+    await env.DB.batch([...caseVariants(), ...reconcileArtists(env.DB, poll(['porter ROBINSON', 'Sigur Rós'], []))]);
+    expect(await creditOf('casey')).toBe('realPorterId');
+    expect(await creditOf('accent')).toBe('name:SIGUR RÓS');
+    expect(await artistIds()).toEqual(['name:SIGUR RÓS', 'realPorterId', 'sigur']);
+  });
+});
+
+describe('preferredArtist', () => {
+  const row = (artist_id: string, plays = 0) => ({ artist_id, plays });
+
+  it('prefers a real id to a placeholder however much more the placeholder was played', () => {
+    expect(preferredArtist([row('name:x', 99), row('real', 1)], (r) => r.plays)?.artist_id).toBe('real');
+  });
+
+  it('then the heavier row, then the lowest id', () => {
+    expect(preferredArtist([row('name:a', 1), row('name:b', 3)], (r) => r.plays)?.artist_id).toBe('name:b');
+    expect(preferredArtist([row('b'), row('a'), row('name:c')])?.artist_id).toBe('a');
+    expect(preferredArtist([])).toBeUndefined();
+  });
+});
+
+describe('foldArtistName', () => {
+  it('folds ASCII case only, as SQLite NOCASE and lower() do', async () => {
+    expect(foldArtistName('Porter ROBINSON')).toBe('porter robinson');
+    expect(foldArtistName('SIGUR RÓS')).toBe('sigur rÓs');
+    const sql = await env.DB.prepare("SELECT lower('SIGUR RÓS') AS l, 'Ó' = 'ó' COLLATE NOCASE AS eq").first<{ l: string; eq: number }>();
+    expect(sql).toEqual({ l: foldArtistName('SIGUR RÓS'), eq: 0 });
   });
 });
 

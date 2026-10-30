@@ -80,3 +80,69 @@ export function preferredArtist<T extends { artist_id: string }>(
   }
   return best;
 }
+
+/**
+ * Fold placeholders into the real artist sharing their name (by the rule
+ * above), so `name:Porter robinson` from the export and the polled
+ * `Porter Robinson` become one row once a poll has taught us the real id.
+ *
+ * Unscoped it sweeps every placeholder, sought as an index range; that runs
+ * after an import and once a day. A poll passes `scope`: the names of the
+ * real artists it brought and the tracks it credited, since a placeholder only
+ * becomes mergeable when a real artist with its name arrives or a track it
+ * credits gains a real link, and both happen in the poll that brings them
+ * (about 200 rows read instead of 46k). The daily sweep catches anything a
+ * poll misses, such as a placeholder orphaned through a track whose live
+ * credit is spelled differently. Names and track ids travel as JSON, since D1
+ * allows 100 bound parameters.
+ *
+ * Three set-based statements, in order:
+ *   1. Repoint links from a placeholder to the real id. `OR IGNORE` skips rows
+ *      where the track already links to that real artist, leaving them for (2).
+ *   2. Drop placeholder links on tracks that now carry a real link.
+ *   3. Delete placeholders nothing points at any more.
+ *
+ * Name matches must be indexable: they compare the bare `artists.name`
+ * column (idx_artists_name_nocase) against the key's suffix, never
+ * `'name:' || name`, which no index can serve. Written the wrong way round
+ * this reads 10.6 million rows per call instead of a few thousand.
+ */
+export function reconcileArtists(
+  db: D1Database,
+  scope?: { names: Iterable<string>; tracks: Iterable<string> },
+): D1PreparedStatement[] {
+  const placeholder = isNameKeySql('artist_id');
+  // The placeholders in scope: all of them, or those named like a polled artist.
+  const placeholders = scope
+    ? `(SELECT p.artist_id FROM json_each(?1) j JOIN artists p ON p.name = j.value COLLATE NOCASE
+         WHERE ${isNameKeySql('p.artist_id')})`
+    : `(SELECT artist_id FROM artists WHERE ${placeholder})`;
+  const real = `FROM artists real
+                 WHERE real.name = substr(track_artists.artist_id, ${NAME_KEY_PREFIX.length + 1}) COLLATE NOCASE
+                   AND NOT ${isNameKeySql('real.artist_id')}`;
+  const statements = [
+    db.prepare(
+      `UPDATE OR IGNORE track_artists
+          SET artist_id = (SELECT real.artist_id ${real} ORDER BY real.artist_id LIMIT 1)
+        WHERE artist_id IN ${placeholders}
+          AND EXISTS (SELECT 1 ${real})`,
+    ),
+    db.prepare(
+      `DELETE FROM track_artists
+        WHERE ${placeholder}
+          ${scope ? `AND (track_id IN (SELECT value FROM json_each(?2)) OR artist_id IN ${placeholders})` : ''}
+          AND EXISTS (SELECT 1 FROM track_artists real
+                       WHERE real.track_id = track_artists.track_id
+                         AND NOT ${isNameKeySql('real.artist_id')})`,
+    ),
+    db.prepare(
+      `DELETE FROM artists
+        WHERE artist_id IN ${placeholders}
+          AND NOT EXISTS (SELECT 1 FROM track_artists ta WHERE ta.artist_id = artists.artist_id)`,
+    ),
+  ];
+  if (!scope) return statements;
+  const names = JSON.stringify([...new Set(scope.names)]);
+  const tracks = JSON.stringify([...new Set(scope.tracks)]);
+  return [statements[0]!.bind(names), statements[1]!.bind(names, tracks), statements[2]!.bind(names)];
+}
