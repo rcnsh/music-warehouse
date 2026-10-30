@@ -1,6 +1,6 @@
 import { BadRequest, dateRange, fromRollup, intParam, timeZoneParam } from './api';
 import { withTrackCounts } from './rollup';
-import { NAME_KEY_PREFIX } from './db';
+import { isNameKey, preferredArtist } from './artists';
 import { SONG_SQL, songKey } from './songs';
 import { PRIMARY_ARTIST_SQL } from './stats/sql';
 import { endOfLocalDayUtcMs, isRealDay, localCalendar, localDayKey, startOfLocalDayUtcMs } from './tz';
@@ -274,11 +274,12 @@ export async function artistRoute(env: Env, url: URL): Promise<Response> {
   const plays = playsResult!.results as PlayRow[];
   const meta = new Map((metaResult!.results as MetaRow[]).map((row) => [row.track_id, row]));
   const artists = artistsResult!.results as Array<{ artist_id: string; name: string }>;
-  const real = artists.find((artist) => !artist.artist_id.startsWith(NAME_KEY_PREFIX));
+  const chosen = preferredArtist(artists);
+  const realId = chosen && !isNameKey(chosen.artist_id) ? chosen.artist_id : null;
 
   return respond(
     {
-      artist: { id: id ?? real?.artist_id ?? null, name: known?.name ?? real?.name ?? artists[0]?.name ?? name ?? '' },
+      artist: { id: id ?? realId, name: known?.name ?? chosen?.name ?? name ?? '' },
       ...historyOf(plays, timeZone),
       top_tracks: rankTracks(countBy(plays), meta, songKey)
         .slice(0, TOP_ARTIST_TRACKS)

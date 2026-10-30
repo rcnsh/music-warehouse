@@ -52,10 +52,14 @@ an indexed range, and buckets the results. A 23-hour and a 25-hour local day
 both bucket correctly.
 
 **Export-era artists are keyed by name.** The export carries names, not ids,
-so its artists are stored as `name:<artist name>` (`NAME_KEY_PREFIX` in
-`src/db.ts`). Every write runs `reconcileNameKeyedArtists`, which folds a
-name-keyed artist into its id-keyed twin by exact name once a live poll teaches
-the Worker that id.
+so its artists are stored as `name:<artist name>` placeholders. Artist
+identity lives in `src/artists.ts`: two rows are one artist when their names
+are equal ignoring ASCII case (SQLite's NOCASE and lower(); other letters
+compare exactly), and a real id beats a placeholder when choosing the id and
+spelling to show. Every write runs `reconcileArtists`, scoped to a poll's
+names and tracks or unscoped after an import and daily, which folds a
+placeholder into its id-keyed twin by that rule once a live poll teaches the
+Worker the id. The reads fold by the same rule.
 
 ## Listening stats
 
@@ -322,9 +326,9 @@ Worker secret.
   `/v1/artists`) return 403 to development-mode apps since 27 November 2024.
   - Only the album artist is known, so featured artists are missing and
     compilations collapse to their compilation artist.
-  - The name-to-id fold is exact on name, so a punctuation or casing difference
-    between the export and the API leaves two rows until the same spelling
-    arrives again.
+  - The name-to-id fold ignores ASCII case only, so a punctuation or
+    non-ASCII casing difference (`Rós` vs `RÓS`) between the export and the
+    API leaves two rows until the same spelling arrives again.
   - `albums` is not populated from the export.
 - **Album art reaches most of the history, not all.** `npm run backfill:albums`
   walks Top Tracks, Liked Songs and Saved Albums, whose track objects embed the

@@ -8,7 +8,7 @@ import {
   localDayKey,
   startOfLocalDayUtcMs,
 } from './tz';
-import { NAME_KEY_PREFIX } from './db';
+import { preferredArtistOrderSql } from './artists';
 import { filterTrackIds, playCursor, playFilterParams, selectPlays, withFirstPlay } from './plays';
 import { rollupDayCounts, rollupZone, withTrackCounts } from './rollup';
 import type { Env } from './types';
@@ -157,7 +157,7 @@ export async function topArtists(env: Env, url: URL): Promise<Response> {
        named AS (
          SELECT top.k, top.plays,
                 (SELECT json_array(a.artist_id, a.name) FROM artists a WHERE a.name = top.k COLLATE NOCASE
-                  ORDER BY instr(a.artist_id, '${NAME_KEY_PREFIX}') = 1, a.artist_id LIMIT 1) AS pair
+                  ORDER BY ${preferredArtistOrderSql('a.artist_id')} LIMIT 1) AS pair
            FROM top
        )
        SELECT json_extract(pair, '$[0]') AS artist_id, json_extract(pair, '$[1]') AS name, plays

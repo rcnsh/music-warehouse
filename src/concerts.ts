@@ -1,6 +1,6 @@
 import { BadRequest, json, timeZoneParam } from './api';
 import { localDayKey, startOfLocalDayUtcMs } from './tz';
-import { NAME_KEY_PREFIX } from './db';
+import { preferredArtistIdSql } from './artists';
 import { rollupZone, withTrackCounts } from './rollup';
 import type { Env } from './types';
 import { log } from './log';
@@ -234,8 +234,8 @@ export async function topArtists(env: Env, now: number): Promise<TopArtist[]> {
     'n',
     (cte) =>
       `WITH ${cte}
-       SELECT lower(a.name) AS key, max(a.name) AS name,
-              coalesce(min(CASE WHEN instr(a.artist_id, '${NAME_KEY_PREFIX}') = 1 THEN NULL ELSE a.artist_id END), min(a.artist_id)) AS id,
+       SELECT lower(a.name) AS key, a.name AS name,
+              ${preferredArtistIdSql('a.artist_id')} AS id,
               SUM(c.n) AS plays
          FROM c
          JOIN track_artists ta ON ta.track_id = c.track_id AND ta.position = 0

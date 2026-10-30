@@ -1,5 +1,6 @@
 import { BadRequest, intParam, json } from './api';
-import { NAME_KEY_PREFIX, buildInserts, reconcileNameKeyedArtists } from './db';
+import { nameKey, reconcileArtists } from './artists';
+import { buildInserts } from './db';
 import { songStatements } from './play-numbers';
 import { syncSearchIndex } from './search-index';
 import type { Env } from './types';
@@ -129,7 +130,7 @@ export function normalizeExport(records: ExportRecord[]): ImportRows {
     // compilation artist. Position is always 0 for the same reason.
     const artistName = record.master_metadata_album_artist_name ?? record.artistName;
     if (artistName) {
-      const artistId = `${NAME_KEY_PREFIX}${artistName}`;
+      const artistId = nameKey(artistName);
       if (!artists.has(artistId)) artists.set(artistId, { artist_id: artistId, name: artistName });
       const key = `${trackId}:${artistId}`;
       if (!trackArtists.has(key)) trackArtists.set(key, { track_id: trackId, artist_id: artistId, position: 0 });
@@ -159,7 +160,7 @@ export function normalizeExport(records: ExportRecord[]): ImportRows {
  * matched, so a client can say where the gaps are and check the window.
  *
  * The export carries artist *names* but no Spotify ids, so artists are stored
- * under a `name:<artist name>` key (see NAME_KEY_PREFIX). That is enough for
+ * under a `name:<artist name>` key (see src/artists.ts). That is enough for
  * /api/top-artists to see export-era listening; it is not enough to reconcile
  * with id-keyed artists automatically, so a track that is also polled live has
  * its name-keyed link dropped in favour of the real one. Albums are skipped
@@ -234,7 +235,7 @@ export async function importChunk(env: Env, request: Request): Promise<Response>
     ...buildInserts(env.DB, 'track_artists', ['track_id', 'artist_id', 'position'], rows.trackArtists),
     // Name keys just written for an artist the poller already knows by id are
     // redundant; fold them in rather than leaving a duplicate behind.
-    ...reconcileNameKeyedArtists(env.DB),
+    ...reconcileArtists(env.DB),
     syncSearchIndex(env.DB, rows.tracks.map((track) => track.track_id)),
     ...songStatements(env.DB, rows.tracks.map((track) => track.track_id), rows.plays),
   ]);

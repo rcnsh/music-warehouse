@@ -1,6 +1,6 @@
 import { BadRequest, intParam } from './api';
+import { foldArtistName, isNameKey, preferredArtist } from './artists';
 import { likePattern } from './plays';
-import { NAME_KEY_PREFIX } from './db';
 import { respond, textParam } from './history';
 import { trigramPhrase } from './search-index';
 import { songKey } from './songs';
@@ -176,22 +176,18 @@ export async function searchRoute(env: Env, url: URL): Promise<Response> {
 
 /** Fold and rank the matches into the response. */
 function answer(q: string, limit: number, match: Matches): Response {
-  // One entry per artist name. The id is the real one where there is one,
-  // else null (/api/artist takes the name instead); the shown name is the
-  // real artist's spelling, else the most-played placeholder's.
-  const artists = new Map<string, { id: string | null; name: string; plays: number; best: number }>();
+  // One entry per artist (src/artists.ts), named as its preferred row is.
+  // The id is null when that is a placeholder (/api/artist takes the name).
+  const grouped = new Map<string, Matches['artists']>();
   for (const row of match.artists) {
-    const key = row.name.toLowerCase();
-    const entry = artists.get(key) ?? { id: null, name: row.name, plays: 0, best: -1 };
-    entry.plays += row.plays;
-    if (!row.artist_id.startsWith(NAME_KEY_PREFIX)) {
-      entry.id = row.artist_id;
-      entry.name = row.name;
-    } else if (entry.id === null && row.plays > entry.best) {
-      entry.name = row.name;
-      entry.best = row.plays;
-    }
-    artists.set(key, entry);
+    const key = foldArtistName(row.name);
+    grouped.set(key, [...(grouped.get(key) ?? []), row]);
+  }
+  const artists = new Map<string, { id: string | null; name: string; plays: number }>();
+  for (const [key, rows] of grouped) {
+    const chosen = preferredArtist(rows, (row) => row.plays)!;
+    const plays = rows.reduce((sum, row) => sum + row.plays, 0);
+    artists.set(key, { id: isNameKey(chosen.artist_id) ? null : chosen.artist_id, name: chosen.name, plays });
   }
 
   // One entry per song; the id is the most-played edition's.
