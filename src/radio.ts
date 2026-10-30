@@ -2,7 +2,7 @@ import { BadRequest, intParam } from './api';
 import { ARTIST_TRACKS_CTE, SONG_TRACKS_CTE, respond, textParam } from './history';
 import { PRIMARY_ARTIST_PAIR_SQL, PRIMARY_ARTIST_SQL } from './stats/sql';
 import type { Env } from './types';
-import { MIN_PLAY_MS } from './listen';
+import { counted, gaps } from './listen';
 
 /**
  * GET /api/radio?track= or ?artist=: songs to queue after a seed, from what
@@ -16,8 +16,8 @@ import { MIN_PLAY_MS } from './listen';
  * Seed plays whose windows overlap are one session. A song scores, per
  * session, its best closeness to a seed play (halving every CLOSENESS_MS
  * apart), weighted by how recent that play was (halving every HALF_LIFE_MS),
- * so it counts once per session however often it repeats there. Skips (under
- * 30 s before the next play, as on-repeat measures them) count for nothing.
+ * so it counts once per session however often it repeats there. Skips
+ * (src/listen.ts) count for nothing.
  * The sum is divided by the song's whole play count to the power
  * POPULARITY_DAMPING, so an all-time favourite that turns up near everything
  * doesn't top every radio.
@@ -106,12 +106,15 @@ export function coPlayed(plays: RadioPlay[], seedMs: number[], exclude: Set<stri
   const windows = seedWindows(seeds);
   // Per song: per session its best weight, and how often each edition turned up.
   const songs = new Map<string, { best: Map<number, number>; editions: Map<string, number> }>();
+  // `plays` holds only the windows, so the first play in one is measured from
+  // an older play than its real one: a skip just inside a window can be
+  // missed, but a play is never wrongly dropped.
+  const gapsMs = gaps(plays.map((play) => play.ms));
   let w = 0;
   for (let i = 0; i < plays.length; i++) {
     const play = plays[i]!;
-    const next = plays[i + 1];
     if (exclude.has(play.song)) continue;
-    if (next && next.ms - play.ms < MIN_PLAY_MS) continue;
+    if (!counted(gapsMs[i] ?? null)) continue;
     while (w < windows.length && windows[w]![1] < play.ms) w++;
     if (w >= windows.length || play.ms < windows[w]![0]) continue;
     const at = floorIndex(seeds, play.ms);

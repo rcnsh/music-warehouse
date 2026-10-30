@@ -272,7 +272,7 @@ The seed's newest play in each UTC hour stands for that hour, for the newest
 dozens. Every play within 45 minutes of a seed is near it; overlapping windows
 are one session. Per session a song scores its best `2^(-minutes from the
 nearest seed / 10) × 2^(-age / 1 year)`, so repeating it there adds nothing,
-and skips (under 30 s before the next play) count for nothing. The sum is
+and skips (`src/listen.ts`) count for nothing. The sum is
 divided by `(the song's plays + 5)^0.3`, its play count read as its latest
 play number (one seek), so an all-time favourite doesn't top every radio and
 one played once isn't lifted above one played near the seed often. At most
