@@ -52,10 +52,14 @@ an indexed range, and buckets the results. A 23-hour and a 25-hour local day
 both bucket correctly.
 
 **Export-era artists are keyed by name.** The export carries names, not ids,
-so its artists are stored as `name:<artist name>` (`NAME_KEY_PREFIX` in
-`src/db.ts`). Every write runs `reconcileNameKeyedArtists`, which folds a
-name-keyed artist into its id-keyed twin by exact name once a live poll teaches
-the Worker that id.
+so its artists are stored as `name:<artist name>` placeholders. Artist
+identity lives in `src/artists.ts`: two rows are one artist when their names
+are equal ignoring ASCII case (SQLite's NOCASE and lower(); other letters
+compare exactly), and a real id beats a placeholder when choosing the id and
+spelling to show. Every write runs `reconcileArtists`, scoped to a poll's
+names and tracks or unscoped after an import and daily, which folds a
+placeholder into its id-keyed twin by that rule once a live poll teaches the
+Worker the id. The reads fold by the same rule.
 
 ## Listening stats
 
@@ -150,7 +154,11 @@ small and predictable.
 
 Days and hours are in each era's local time. Minutes are estimated: a play ran
 for at most the gap since the play before it and at most the track's length,
-and plays under 30 seconds are skips worth nothing. Listening age is the age of
+and plays under 30 seconds are skips worth nothing. Plays that ended in the
+same millisecond (export records truncated to the second) each count against
+the play before them all, since the import already dropped any that ran under
+30 seconds. `src/listen.ts` is this estimate, for every skip and minute in
+the warehouse. Listening age is the age of
 someone whose late teens fall in the middle of the five-year span of release
 years played most, and is `null` when fewer than half of the minutes have a
 release date.
@@ -172,7 +180,7 @@ An artist is matched by id and by lowercased name, as the stats group them, so
 export-era `name:` placeholders count; `name` is the fallback for an id the
 warehouse has never seen. Credit is the primary artist's only. A track folds
 every edition with the same title (less a remaster, "single version" or "radio
-edit" tag; src/song-title.ts) and primary artist, and its `id` is the one
+edit" tag; src/songs.ts) and primary artist, and its `id` is the one
 asked for.
 
 `plays` counts every stored play, as `/api/top-artists` does. `minutes` is
@@ -268,7 +276,7 @@ The seed's newest play in each UTC hour stands for that hour, for the newest
 dozens. Every play within 45 minutes of a seed is near it; overlapping windows
 are one session. Per session a song scores its best `2^(-minutes from the
 nearest seed / 10) × 2^(-age / 1 year)`, so repeating it there adds nothing,
-and skips (under 30 s before the next play) count for nothing. The sum is
+and skips (`src/listen.ts`) count for nothing. The sum is
 divided by `(the song's plays + 5)^0.3`, its play count read as its latest
 play number (one seek), so an all-time favourite doesn't top every radio and
 one played once isn't lifted above one played near the seed often. At most
@@ -322,9 +330,9 @@ Worker secret.
   `/v1/artists`) return 403 to development-mode apps since 27 November 2024.
   - Only the album artist is known, so featured artists are missing and
     compilations collapse to their compilation artist.
-  - The name-to-id fold is exact on name, so a punctuation or casing difference
-    between the export and the API leaves two rows until the same spelling
-    arrives again.
+  - The name-to-id fold ignores ASCII case only, so a punctuation or
+    non-ASCII casing difference (`Rós` vs `RÓS`) between the export and the
+    API leaves two rows until the same spelling arrives again.
   - `albums` is not populated from the export.
 - **Album art reaches most of the history, not all.** `npm run backfill:albums`
   walks Top Tracks, Liked Songs and Saved Albums, whose track objects embed the

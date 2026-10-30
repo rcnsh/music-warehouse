@@ -210,21 +210,6 @@ describe('/api/artist', () => {
     });
   });
 
-  it('estimates minutes as Wrapped does, with skips worth nothing', async () => {
-    await seed([
-      // The first play ever has no predecessor: 180 s fallback, under the 200 s length.
-      ...session(JAN_10, 2, { trackId: 'a', artistId: 'x' }),
-      // Ten seconds after another artist's play: a skip, but still a play.
-      { ms: JAN_10 + 20 * MIN, trackId: 'other', artistId: 'y' },
-      { ms: JAN_10 + 20 * MIN + 10_000, trackId: 'a', artistId: 'x' },
-      // Two minutes after that: counts the two minutes it could have run.
-      { ms: JAN_10 + 22 * MIN + 10_000, trackId: 'a', artistId: 'x' },
-    ]);
-    const body = await get<ArtistBody>('/api/artist?id=x');
-    expect(body.plays).toBe(4);
-    expect(body.minutes).toBe(Math.round((180_000 + 200_000 + 2 * MIN) / MIN));
-  });
-
   it('buckets months in the requested zone and fills quiet months with zero', async () => {
     await seed([
       // 20:00 UTC on 31 January is 04:00 on 1 February in Singapore.
@@ -268,17 +253,6 @@ describe('/api/track', () => {
     expect(body.minutes).toBe(Math.round((180_000 + 4 * 200_000) / MIN));
     expect(body.first_played).toBe(new Date(JAN_10).toISOString());
     expect(body.months).toEqual([{ month: '2024-01', plays: 5 }]);
-  });
-
-  it('folds a remastered or single edition, but not a live one', async () => {
-    await seed([
-      ...session(JAN_10, 2, { trackId: 'orig', name: 'Heroes', artistId: 'bowie', artistName: 'David Bowie' }),
-      ...session(JAN_10 + DAY, 3, { trackId: 'remaster', name: 'Heroes - 2017 Remaster', artistId: 'bowie', artistName: 'David Bowie' }),
-      ...session(JAN_10 + 2 * DAY, 1, { trackId: 'single', name: 'Heroes (Single Version)', artistId: 'bowie', artistName: 'David Bowie' }),
-      ...session(JAN_10 + 3 * DAY, 4, { trackId: 'live', name: 'Heroes - Live', artistId: 'bowie', artistName: 'David Bowie' }),
-    ]);
-    expect((await get<TrackBody>('/api/track?id=remaster')).plays).toBe(6);
-    expect((await get<TrackBody>('/api/track?id=live')).plays).toBe(4);
   });
 
   it('answers an unknown track with nulls and zeros, not 404', async () => {

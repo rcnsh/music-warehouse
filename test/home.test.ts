@@ -51,6 +51,15 @@ describe('sessions', () => {
     ]);
   });
 
+  it('counts plays tied on their end time, each against the play before both', () => {
+    const s = sessions([
+      { ms: 0, key: 'spotify:album:a', artist: null },
+      { ms: 4 * MIN, key: 'spotify:album:a', artist: null },
+      { ms: 4 * MIN, key: 'spotify:album:a', artist: null },
+    ]);
+    expect(s.map((x) => [x.key, x.tracks])).toEqual([['spotify:album:a', 3]]);
+  });
+
   it('lets a play from no context break a run', () => {
     const s = sessions([...run(0, 'spotify:album:a', 2), ...run(8 * MIN, null, 1), ...run(12 * MIN, 'spotify:album:a', 2)]);
     expect(s).toHaveLength(2);

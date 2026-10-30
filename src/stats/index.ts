@@ -76,15 +76,17 @@ export function isStatName(name: string): name is StatName {
 
 /**
  * Each stat's body version. Bumping one retires its cached bodies when its
- * shape changes: eras moved to generic field names in v2, and top-over-time's
- * songs gained `track_id` in v2.
+ * shape or its estimate changes: eras moved to generic field names in v2,
+ * top-over-time's songs gained `track_id` in v2, on-repeat counts plays
+ * tied on played_at_ms in v2, and top-over-time and albums read songs from
+ * `track_songs` (src/songs.ts) in v3 and v2.
  */
 const STAT_VERSIONS: Record<StatName, string> = {
-  'on-repeat': 'v1',
+  'on-repeat': 'v2',
   rhythm: 'v1',
-  'top-over-time': 'v2',
+  'top-over-time': 'v3',
   eras: 'v2',
-  albums: 'v1',
+  albums: 'v2',
 };
 
 /**

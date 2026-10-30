@@ -1,6 +1,7 @@
 import { timeZoneParam } from './api';
 import { CONTEXT_FITS } from './contexts';
 import { respond } from './history';
+import { counted, gaps } from './listen';
 import { SnapshotPending, snapshot } from './snapshots';
 import { type LocalCalendar, localCalendar, localDayKey, offsetMsAt } from './tz';
 import type { Env } from './types';
@@ -47,8 +48,6 @@ const HOUR_MS = 3_600_000;
 const DETAIL_MS = 365 * DAY_MS;
 /** A gap between plays' ends longer than this starts a new session. */
 const SESSION_GAP_MS = 40 * 60_000;
-/** A play that ended sooner than this after the one before was skipped. */
-const MIN_PLAY_MS = 30_000;
 const SHORTCUT_HALF_LIFE_MS = 14 * DAY_MS;
 const AROUND_HALF_LIFE_MS = 60 * DAY_MS;
 const REDISCOVER_HALF_LIFE_MS = 730 * DAY_MS;
@@ -107,8 +106,9 @@ export function sessions(plays: HomePlay[]): Session[] {
   const out: Session[] = [];
   let current: Session | null = null;
   let prevMs: number | null = null;
-  for (const play of plays) {
-    const listened = prevMs === null || play.ms - prevMs >= MIN_PLAY_MS;
+  const gapsMs = gaps(plays.map((play) => play.ms));
+  for (const [i, play] of plays.entries()) {
+    const listened = counted(gapsMs[i] ?? null);
     const continues = current !== null && play.key === current.key && prevMs !== null && play.ms - prevMs <= SESSION_GAP_MS;
     if (!continues) {
       if (current && current.tracks > 0) out.push(current);

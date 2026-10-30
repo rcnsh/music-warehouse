@@ -1,3 +1,4 @@
+import { isNameKey, reconcileArtists } from './artists';
 import { insertContexts } from './contexts';
 import { songStatements, syncChangedSongs } from './play-numbers';
 import { syncSearchIndex } from './search-index';
@@ -50,74 +51,6 @@ export function buildInserts<T extends Record<string, unknown>>(
 }
 
 /**
- * Prefix marking an artist row keyed by name rather than by Spotify id.
- *
- * The Extended Streaming History export carries artist *names* only, and the
- * catalog endpoints that would resolve them to ids are closed to apps in
- * Spotify's development mode. Export-era artists are therefore keyed
- * `name:<artist name>` — unambiguous, because a real Spotify id is 22
- * characters of base62 and can never contain a colon.
- */
-export const NAME_KEY_PREFIX = 'name:';
-/** The first string after every `name:` key, so `>= prefix AND < end` is an index range. */
-export const NAME_KEY_END = 'name;';
-
-/**
- * Fold name-keyed artists into their real id-keyed equivalents, by exact name.
- *
- * The export can only key an artist by name, so an artist heard both before and
- * after the Worker existed ends up as two rows — `name:Porter Robinson` and the
- * real Spotify id — and shows up twice in /api/top-artists. Once a live poll has
- * taught us the real id for a name, every name-keyed row for it is redundant.
- *
- * Three set-based statements, in order:
- *   1. Repoint links from the name key to the real id. `OR IGNORE` skips rows
- *      where the track already links to that real artist, leaving them for (2).
- *   2. Drop name-keyed links on tracks that now carry a real link.
- *   3. Delete name-keyed artist rows nothing points at any more.
- *
- * The name match must be indexable: it compares the bare `artists.name` column
- * (covered by idx_artists_name) against the key's suffix, never
- * `'name:' || name`, which no index can serve. Written the wrong way round
- * this reads 10.6 million rows per call instead of a few thousand.
- *
- * This sweeps every name-keyed row, sought as an index range (it was a scan
- * of every credit: about 46k rows read with 4,574 such links left), so it
- * runs after an import and once a day. Polls use
- * reconcileArtistsInPoll, which only looks at what the poll touched.
- */
-export function reconcileNameKeyedArtists(db: D1Database): D1PreparedStatement[] {
-  // The name carried by a key, as a value the index on artists(name) can seek to.
-  // Keys are found as a range, which the artist_id indexes can seek, where
-  // LIKE (case-insensitive) scans every credit and every artist.
-  const nameOfKey = `substr(track_artists.artist_id, ${NAME_KEY_PREFIX.length + 1})`;
-  return [
-    db.prepare(
-      `UPDATE OR IGNORE track_artists
-          SET artist_id = (SELECT real.artist_id FROM artists real
-                            WHERE real.name = ${nameOfKey}
-                              AND real.artist_id NOT LIKE '${NAME_KEY_PREFIX}%')
-        WHERE artist_id >= '${NAME_KEY_PREFIX}' AND artist_id < '${NAME_KEY_END}'
-          AND EXISTS (SELECT 1 FROM artists real
-                       WHERE real.name = ${nameOfKey}
-                         AND real.artist_id NOT LIKE '${NAME_KEY_PREFIX}%')`,
-    ),
-    db.prepare(
-      `DELETE FROM track_artists
-        WHERE artist_id >= '${NAME_KEY_PREFIX}' AND artist_id < '${NAME_KEY_END}'
-          AND EXISTS (SELECT 1 FROM track_artists real
-                       WHERE real.track_id = track_artists.track_id
-                         AND real.artist_id NOT LIKE '${NAME_KEY_PREFIX}%')`,
-    ),
-    db.prepare(
-      `DELETE FROM artists
-        WHERE artist_id >= '${NAME_KEY_PREFIX}' AND artist_id < '${NAME_KEY_END}'
-          AND NOT EXISTS (SELECT 1 FROM track_artists ta WHERE ta.artist_id = artists.artist_id)`,
-    ),
-  ];
-}
-
-/**
  * The daily catch-all after the writes' own upkeep: reconcile every
  * name-keyed artist, then sync the search text and song keys of the tracks
  * marked changed since the last run (migration 0020), which include those
@@ -127,61 +60,10 @@ export function reconcileNameKeyedArtists(db: D1Database): D1PreparedStatement[]
  */
 export function dailyTrackSweep(db: D1Database): D1PreparedStatement[] {
   return [
-    ...reconcileNameKeyedArtists(db),
+    ...reconcileArtists(db),
     syncSearchIndex(db, 'changed'),
     ...syncChangedSongs(db),
     db.prepare('DELETE FROM track_changes'),
-  ];
-}
-
-/**
- * reconcileNameKeyedArtists, limited to one poll's rows: about 200 rows read
- * instead of 46k. A name-keyed row only becomes mergeable when a real artist
- * with its name arrives, or a track it credits gains a real link, and both
- * happen in the poll that brings them, so the poll's names and tracks are the
- * only places to look. The daily full sweep catches anything this misses,
- * such as a name-keyed artist orphaned through a track whose live credit is
- * spelled differently.
- *
- * Names and track ids travel as JSON, since D1 allows 100 bound parameters.
- */
-export function reconcileArtistsInPoll(db: D1Database, rows: NormalizedRows): D1PreparedStatement[] {
-  const names = JSON.stringify([
-    ...new Set(rows.artists.filter((a) => !a.artist_id.startsWith(NAME_KEY_PREFIX)).map((a) => a.name)),
-  ]);
-  const tracks = JSON.stringify([...new Set(rows.trackArtists.map((link) => link.track_id))]);
-  const keys = `(SELECT '${NAME_KEY_PREFIX}' || value FROM json_each(?1))`;
-  const nameOfKey = `substr(track_artists.artist_id, ${NAME_KEY_PREFIX.length + 1})`;
-  return [
-    db
-      .prepare(
-        `UPDATE OR IGNORE track_artists
-            SET artist_id = (SELECT real.artist_id FROM artists real
-                              WHERE real.name = ${nameOfKey}
-                                AND real.artist_id NOT LIKE '${NAME_KEY_PREFIX}%')
-          WHERE artist_id IN ${keys}
-            AND EXISTS (SELECT 1 FROM artists real
-                         WHERE real.name = ${nameOfKey}
-                           AND real.artist_id NOT LIKE '${NAME_KEY_PREFIX}%')`,
-      )
-      .bind(names),
-    db
-      .prepare(
-        `DELETE FROM track_artists
-          WHERE (track_id IN (SELECT value FROM json_each(?2)) OR artist_id IN ${keys})
-            AND artist_id >= '${NAME_KEY_PREFIX}' AND artist_id < '${NAME_KEY_END}'
-            AND EXISTS (SELECT 1 FROM track_artists real
-                         WHERE real.track_id = track_artists.track_id
-                           AND real.artist_id NOT LIKE '${NAME_KEY_PREFIX}%')`,
-      )
-      .bind(names, tracks),
-    db
-      .prepare(
-        `DELETE FROM artists
-          WHERE artist_id IN ${keys}
-            AND NOT EXISTS (SELECT 1 FROM track_artists ta WHERE ta.artist_id = artists.artist_id)`,
-      )
-      .bind(names),
   ];
 }
 
@@ -286,7 +168,10 @@ export function writeStatements(db: D1Database, rows: NormalizedRows, now = Date
 
     // Runs last, after the real artists and links are in place: a poll that
     // teaches us an artist's real id retires every name-keyed row for it.
-    ...reconcileArtistsInPoll(db, rows),
+    ...reconcileArtists(db, {
+      names: rows.artists.filter((a) => !isNameKey(a.artist_id)).map((a) => a.name),
+      tracks: rows.trackArtists.map((link) => link.track_id),
+    }),
     // After the reconcile, so the text names the artists the track ends up with.
     ...(rows.tracks.length ? [syncSearchIndex(db, [...new Set(rows.tracks.map((t) => t.track_id))])] : []),
     // Also after the reconcile: a song's key is its primary artist's name.

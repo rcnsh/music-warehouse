@@ -1,11 +1,11 @@
 import { BadRequest, dateRange, fromRollup, intParam, timeZoneParam } from './api';
+import { gapSeekSql, listenedMsSql } from './listen';
 import { withTrackCounts } from './rollup';
-import { NAME_KEY_PREFIX } from './db';
-import { songTitle } from './song-title';
+import { isNameKey, preferredArtist } from './artists';
+import { SONG_SQL, songKey } from './songs';
 import { PRIMARY_ARTIST_SQL } from './stats/sql';
 import { endOfLocalDayUtcMs, isRealDay, localCalendar, localDayKey, startOfLocalDayUtcMs } from './tz';
 import type { Env } from './types';
-import { FALLBACK_DURATION_MS, MIN_PLAY_MS } from './wrapped';
 
 /**
  * One artist's or one track's whole history, and "on this day", for a client
@@ -17,10 +17,10 @@ import { FALLBACK_DURATION_MS, MIN_PLAY_MS } from './wrapped';
  * editions of the same song (same title, less any edition tag such as
  * "- 2011 Remaster", and primary artist), as Wrapped does.
  *
- * `plays` counts every stored play, as /api/top-artists does. `minutes` uses
- * Wrapped's estimate: a play ran for at most the gap since the play before it
- * (whatever track that was) and at most the track's length, and a play under
- * 30 s by that measure is a skip worth no minutes.
+ * `plays` counts every stored play, as /api/top-artists does. `minutes` is
+ * the estimate Wrapped uses too (src/listen.ts): a play ran for at most the
+ * gap since the play before it (whatever track that was) and at most the
+ * track's length, and a skip is worth no minutes.
  *
  * Months and days are in the `tz` the caller asks for, as /api/daily's are.
  */
@@ -55,20 +55,18 @@ interface History {
 
 /**
  * Per-play listened time for the tracks in a CTE named `ts`. The gap to the
- * play before is one seek on the plays primary key per play, so this reads
- * about two rows per play rather than a window over the whole table.
+ * play before is one seek on the plays primary key per play (gapSeekSql), so
+ * this reads about two rows per play rather than a window over the whole table.
  */
 function playsSql(tracksCte: string): string {
   return `WITH ${tracksCte},
     p AS (
       SELECT p.played_at_ms, p.track_id,
-             p.played_at_ms - (SELECT max(q.played_at_ms) FROM plays q WHERE q.played_at_ms < p.played_at_ms) AS gap_ms
+             ${gapSeekSql('p.played_at_ms')} AS gap_ms
         FROM plays p WHERE p.track_id IN (SELECT track_id FROM ts)
     )
     SELECT p.played_at_ms, p.track_id,
-           CASE WHEN p.gap_ms IS NULL OR p.gap_ms >= ${MIN_PLAY_MS}
-                THEN min(coalesce(p.gap_ms, ${FALLBACK_DURATION_MS}), coalesce(t.duration_ms, ${FALLBACK_DURATION_MS}))
-                ELSE 0 END AS ms
+           ${listenedMsSql('p.gap_ms', 't.duration_ms')} AS ms
       FROM p LEFT JOIN tracks t ON t.track_id = p.track_id
      ORDER BY p.played_at_ms`;
 }
@@ -89,7 +87,7 @@ export const ARTIST_TRACKS_CTE = `n AS (SELECT COALESCE((SELECT name FROM artist
 /**
  * Every edition of track ?1's song, as play numbers count them: the tracks
  * sharing its `track_songs` key, its title less any edition tag
- * (src/song-title.ts) under the same primary artist name. Defines `ts`; an
+ * (src/songs.ts) under the same primary artist name. Defines `ts`; an
  * unknown track is only itself.
  */
 export const SONG_TRACKS_CTE = `ts AS (
@@ -274,13 +272,14 @@ export async function artistRoute(env: Env, url: URL): Promise<Response> {
   const plays = playsResult!.results as PlayRow[];
   const meta = new Map((metaResult!.results as MetaRow[]).map((row) => [row.track_id, row]));
   const artists = artistsResult!.results as Array<{ artist_id: string; name: string }>;
-  const real = artists.find((artist) => !artist.artist_id.startsWith(NAME_KEY_PREFIX));
+  const chosen = preferredArtist(artists);
+  const realId = chosen && !isNameKey(chosen.artist_id) ? chosen.artist_id : null;
 
   return respond(
     {
-      artist: { id: id ?? real?.artist_id ?? null, name: known?.name ?? real?.name ?? artists[0]?.name ?? name ?? '' },
+      artist: { id: id ?? realId, name: known?.name ?? chosen?.name ?? name ?? '' },
       ...historyOf(plays, timeZone),
-      top_tracks: rankTracks(countBy(plays), meta, (row) => songTitle(row.name.toLowerCase()))
+      top_tracks: rankTracks(countBy(plays), meta, songKey)
         .slice(0, TOP_ARTIST_TRACKS)
         .map(({ id, name, plays, image }) => ({ id, name, plays, image })),
     },
@@ -361,7 +360,6 @@ export async function onThisDayRoute(env: Env, url: URL): Promise<Response> {
         .sort((a, b) => b[0] - a[0])
         .map(([year, rows]) => {
           const meta = new Map(rows.filter((row) => row.name !== null).map((row) => [row.track_id, row]));
-          const songKey = (row: MetaRow) => `${songTitle(row.name.toLowerCase())}|${row.artist?.toLowerCase() ?? ''}`;
           return {
             year,
             plays: rows.reduce((sum, row) => sum + row.plays, 0),
@@ -397,11 +395,9 @@ export async function topTracksRoute(env: Env, url: URL): Promise<Response> {
     'plays',
     (cte) =>
       `WITH ${cte},
-       -- A track the song sweep hasn't keyed yet stands alone, as songKey() keys a track with no artist.
        -- MATERIALIZED: e is read twice, and inlined it re-ran c for every top song
        -- (5M rows read for 2.5 months in production; 11k materialized).
-       e AS MATERIALIZED (SELECT COALESCE(ts.song, char(30) || c.track_id) AS song, c.track_id, c.plays
-               FROM c LEFT JOIN track_songs ts ON ts.track_id = c.track_id),
+       e AS MATERIALIZED (SELECT ${SONG_SQL('c.track_id')} AS song, c.track_id, c.plays FROM c),
        top AS (SELECT song FROM e GROUP BY song ORDER BY SUM(plays) DESC, song LIMIT ?)
        SELECT e.song, e.track_id, e.plays, t.name, ${PRIMARY_ARTIST_SQL('e.track_id')} AS artist, al.image_url AS image
          FROM top JOIN e ON e.song = top.song

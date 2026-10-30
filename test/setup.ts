@@ -3,7 +3,7 @@ import { afterEach, beforeEach, vi } from 'vitest';
 import { freezeClock } from './helpers';
 import { edgeRequest } from '../src/snapshots';
 import { detailFromMs, homeCacheKey, olderKey } from '../src/home';
-import { nowPlayingKey, sharedAnswerKey } from '../src/live';
+import { nowPlayingKey, setSpotifyTransport, sharedAnswerKey } from '../src/spotify-client';
 import { forgetPauseMemo } from '../src/quota';
 import { buildEras, parseEras } from '../src/eras';
 import { STAT_NAMES, statKey } from '../src/stats';
@@ -83,6 +83,8 @@ beforeEach(async () => {
 });
 
 // A test that froze the clock (freezeClock, or TEST_NOW above) gets it back.
+// So does one that answered Spotify with test/fake-spotify.ts.
 afterEach(() => {
   vi.useRealTimers();
+  setSpotifyTransport(null);
 });

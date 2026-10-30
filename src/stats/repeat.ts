@@ -1,17 +1,16 @@
 import { type Era, startOfLocalToday } from '../eras';
+import { countedSql, gapWindowSql } from '../listen';
+import { SONG_SQL } from '../songs';
 
 /**
  * What's on repeat now.
  *
- * `played_at_ms` is when a play *ended*, so the gap since the previous play
- * bounds how long it ran. Plays under 30 s by that measure are dropped —
- * Spotify's own threshold for a stream. The export carries every skip (22% of
+ * Skips (src/listen.ts) are dropped. The export carries every skip (22% of
  * its rows are provably short), and without this a 2020 skipping spree
- * outranks songs actually on repeat. A play after a long pause can't be checked and is
- * kept.
+ * outranks songs actually on repeat.
  *
- * Songs are keyed as play numbers key them (`track_songs`, src/play-numbers.ts):
- * the title less any edition tag, and the lead artist's name. That folds
+ * Songs are keyed as play numbers key them (src/songs.ts): the title less
+ * any edition tag, and the lead artist's name. That folds
  * single, album, remastered and clean/explicit ids of the same recording,
  * and an export-era copy (artist keyed `name:`) with its live one.
  *
@@ -23,7 +22,6 @@ import { type Era, startOfLocalToday } from '../eras';
 const DAY_MS = 86_400_000;
 const WINDOW_DAYS = 14;
 const BASELINE_DAYS = 90;
-const MIN_SHORT_PLAY_MS = 30_000;
 const TRACK_LIMIT = 10;
 const ALBUM_LIMIT = 5;
 
@@ -60,10 +58,6 @@ const ARTISTS_OF = (column: string) =>
   `(SELECT group_concat(name, ', ') FROM (SELECT a.name FROM track_artists ta JOIN artists a ON a.artist_id = ta.artist_id
      WHERE ta.track_id = ${column} ORDER BY ta.position))`;
 
-/** A track missing from track_songs stands alone, as songKey() keys one with no lead artist. */
-const SONG_KEY = (trackColumn: string) =>
-  `COALESCE((SELECT song FROM track_songs WHERE track_id = ${trackColumn}), char(30) || ${trackColumn})`;
-
 // The window plus the baseline before it, read off the plays primary key, so
 // the cost follows recent listening rather than the size of the history.
 // D1 binds JS numbers as REAL, and day arithmetic needs integer division,
@@ -72,16 +66,16 @@ const CURRENT_CTE = `
   WITH params AS (SELECT CAST(?1 AS INTEGER) AS now_ms),
   recent AS (
     SELECT played_at_ms, track_id,
-           played_at_ms - lag(played_at_ms) OVER (ORDER BY played_at_ms) AS dur_ms
+           ${gapWindowSql('played_at_ms')} AS gap_ms
       FROM plays
      WHERE played_at_ms >= (SELECT now_ms FROM params) - ${(WINDOW_DAYS + BASELINE_DAYS) * DAY_MS}
        AND played_at_ms < (SELECT now_ms FROM params)
   ),
   counted AS (
     SELECT r.played_at_ms, r.track_id, ((SELECT now_ms FROM params) - r.played_at_ms) / ${DAY_MS} AS day_ago,
-           ${SONG_KEY('r.track_id')} AS song
+           ${SONG_SQL('r.track_id')} AS song
       FROM recent r JOIN tracks t ON t.track_id = r.track_id
-     WHERE r.dur_ms IS NULL OR r.dur_ms >= ${MIN_SHORT_PLAY_MS}
+     WHERE ${countedSql('r.gap_ms')}
   ),
   agg AS (
     SELECT song, max(played_at_ms) AS last_ms,

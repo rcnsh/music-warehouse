@@ -1,8 +1,9 @@
 import { BadRequest, intParam } from './api';
 import { ARTIST_TRACKS_CTE, SONG_TRACKS_CTE, respond, textParam } from './history';
+import { SONG_SQL } from './songs';
 import { PRIMARY_ARTIST_PAIR_SQL, PRIMARY_ARTIST_SQL } from './stats/sql';
 import type { Env } from './types';
-import { MIN_PLAY_MS } from './wrapped';
+import { counted, gaps } from './listen';
 
 /**
  * GET /api/radio?track= or ?artist=: songs to queue after a seed, from what
@@ -16,8 +17,8 @@ import { MIN_PLAY_MS } from './wrapped';
  * Seed plays whose windows overlap are one session. A song scores, per
  * session, its best closeness to a seed play (halving every CLOSENESS_MS
  * apart), weighted by how recent that play was (halving every HALF_LIFE_MS),
- * so it counts once per session however often it repeats there. Skips (under
- * 30 s before the next play, as on-repeat measures them) count for nothing.
+ * so it counts once per session however often it repeats there. Skips
+ * (src/listen.ts) count for nothing.
  * The sum is divided by the song's whole play count to the power
  * POPULARITY_DAMPING, so an all-time favourite that turns up near everything
  * doesn't top every radio.
@@ -106,12 +107,15 @@ export function coPlayed(plays: RadioPlay[], seedMs: number[], exclude: Set<stri
   const windows = seedWindows(seeds);
   // Per song: per session its best weight, and how often each edition turned up.
   const songs = new Map<string, { best: Map<number, number>; editions: Map<string, number> }>();
+  // `plays` holds only the windows, so the first play in one is measured from
+  // an older play than its real one: a skip just inside a window can be
+  // missed, but a play is never wrongly dropped.
+  const gapsMs = gaps(plays.map((play) => play.ms));
   let w = 0;
   for (let i = 0; i < plays.length; i++) {
     const play = plays[i]!;
-    const next = plays[i + 1];
     if (exclude.has(play.song)) continue;
-    if (next && next.ms - play.ms < MIN_PLAY_MS) continue;
+    if (!counted(gapsMs[i] ?? null)) continue;
     while (w < windows.length && windows[w]![1] < play.ms) w++;
     if (w >= windows.length || play.ms < windows[w]![0]) continue;
     const at = floorIndex(seeds, play.ms);
@@ -190,8 +194,7 @@ export async function radioRoute(env: Env, url: URL): Promise<Response> {
     // An artist's songs stay in its radio, so only a track seed excludes any.
     track !== null
       ? env.DB.prepare(
-          `WITH ${SONG_TRACKS_CTE} SELECT COALESCE(s.song, char(30) || ts.track_id) AS song
-             FROM ts LEFT JOIN track_songs s ON s.track_id = ts.track_id`,
+          `WITH ${SONG_TRACKS_CTE} SELECT ${SONG_SQL('ts.track_id')} AS song FROM ts`,
         ).bind(track)
       : env.DB.prepare('SELECT NULL AS song WHERE 0'),
     track !== null
@@ -212,9 +215,8 @@ export async function radioRoute(env: Env, url: URL): Promise<Response> {
   // since D1 allows only 100 bound parameters.
   const near = await env.DB.prepare(
     `WITH r(a, b) AS (SELECT value ->> 0, value ->> 1 FROM json_each(?))
-     SELECT p.played_at_ms AS ms, p.track_id, COALESCE(s.song, char(30) || p.track_id) AS song
+     SELECT p.played_at_ms AS ms, p.track_id, ${SONG_SQL('p.track_id')} AS song
        FROM r CROSS JOIN plays p ON p.played_at_ms >= r.a AND p.played_at_ms <= r.b
-       LEFT JOIN track_songs s ON s.track_id = p.track_id
       ORDER BY p.played_at_ms, p.track_id`,
   )
     .bind(JSON.stringify(seedWindows(seedMs)))
