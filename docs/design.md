@@ -150,7 +150,11 @@ small and predictable.
 
 Days and hours are in each era's local time. Minutes are estimated: a play ran
 for at most the gap since the play before it and at most the track's length,
-and plays under 30 seconds are skips worth nothing. Listening age is the age of
+and plays under 30 seconds are skips worth nothing. Plays that ended in the
+same millisecond (export records truncated to the second) each count against
+the play before them all, since the import already dropped any that ran under
+30 seconds. `src/listen.ts` is this estimate, for every skip and minute in
+the warehouse. Listening age is the age of
 someone whose late teens fall in the middle of the five-year span of release
 years played most, and is `null` when fewer than half of the minutes have a
 release date.

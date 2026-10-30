@@ -1,5 +1,6 @@
 import { BadRequest, json } from './api';
 import { type Era, eraAt, eraDigest, historyStartMs, loadEras, localTimeSql, startOfLocalWeek } from './eras';
+import { countedSql, gapWindowSql, listenedMsSql } from './listen';
 import { peekSnapshot, snapshot } from './snapshots';
 import { NAME_KEY_PREFIX } from './db';
 import { songTitle, songTitleSql } from './song-title';
@@ -21,16 +22,11 @@ import type { Env } from './types';
  * Local time is the era's, as everywhere else: a range that spans a change
  * of era buckets each play in the timezone of the era it fell in.
  *
- * Minutes are estimated. `played_at_ms` is when a play ended, so a play ran
- * for at most the gap since the one before, and at most the track's length.
- * Plays under 30 s by that measure are skips and count for nothing, the same
- * rule on-repeat uses.
+ * Minutes are estimated, and skips count for nothing, as src/listen.ts
+ * estimates them everywhere.
  */
 
 const DAY_MS = 86_400_000;
-export const MIN_PLAY_MS = 30_000;
-/** Used when a track has no stored duration. */
-export const FALLBACK_DURATION_MS = 180_000;
 const MAX_RANGE_DAYS = 3660;
 const TOP_N = 5;
 const NEW_ARTISTS = 3;
@@ -183,20 +179,20 @@ function add<K>(map: Map<K, number>, key: K, value: number) {
 }
 
 /**
- * Per-play listened time, in local time, for plays ending in [?1, ?2).
- * The lag looks a day back so the first play in the range has a predecessor.
+ * Per-play listened time (0 for a skip), in local time, for plays ending in [?1, ?2).
+ * The window looks a day back so the first play in the range has a play before it.
  */
 export function playsCte(eras: readonly Era[]): string {
   const { local } = localTimeSql(eras);
   return `WITH raw AS (
       SELECT p.played_at_ms, p.track_id,
-             p.played_at_ms - lag(p.played_at_ms) OVER (ORDER BY p.played_at_ms) AS gap_ms
+             ${gapWindowSql('p.played_at_ms')} AS gap_ms
         FROM plays p
        WHERE p.played_at_ms >= ?1 - ${DAY_MS} AND p.played_at_ms < ?2
     ),
     p AS MATERIALIZED (
       SELECT r.track_id, r.gap_ms,
-             min(coalesce(r.gap_ms, ${FALLBACK_DURATION_MS}), coalesce(t.duration_ms, ${FALLBACK_DURATION_MS})) AS ms,
+             ${listenedMsSql('r.gap_ms', 't.duration_ms')} AS ms,
              ${local} AS ls
         FROM (SELECT *, played_at_ms / 1000 AS s FROM raw) r
         JOIN tracks t ON t.track_id = r.track_id
@@ -210,7 +206,7 @@ export async function computeWrapped(
   range: { from: string; to: string; fromMs: number; toMs: number },
 ): Promise<Wrapped> {
   const cte = playsCte(eras);
-  const counted = `(gap_ms IS NULL OR gap_ms >= ${MIN_PLAY_MS})`;
+  const counted = countedSql('gap_ms');
   const [hourly, meta, prior] = await db.batch([
     // One pass over the range's plays for days, hours and skips alike: each
     // statement re-reads the plays, so this was three.
@@ -218,7 +214,7 @@ export async function computeWrapped(
       .prepare(
         `${cte}
          SELECT track_id, date(ls, 'unixepoch') AS day, CAST(strftime('%H', ls, 'unixepoch') AS INTEGER) AS hour,
-                SUM(${counted}) AS plays, SUM(CASE WHEN ${counted} THEN ms ELSE 0 END) AS ms, SUM(NOT ${counted}) AS skips
+                SUM(${counted}) AS plays, SUM(ms) AS ms, SUM(NOT ${counted}) AS skips
            FROM p GROUP BY track_id, day, hour ORDER BY track_id, day, hour`,
       )
       .bind(range.fromMs, range.toMs),
@@ -608,12 +604,13 @@ function closedRange(eras: readonly Era[], from: string, to: string, now: number
 }
 
 /**
- * The version suffix retires every stored body when the shape changes (v3
- * added track and artist ids), and
+ * The version suffix retires every stored body when the shape or the
+ * estimate changes (v3 added track and artist ids, v4 counts plays tied on
+ * played_at_ms), and
  * the era digest every body cut on eras that have since been reconfigured.
  */
 export const wrappedKey = (eras: readonly Era[], range: { from: string; to: string }) =>
-  `wrapped:v3:${eraDigest(eras)}:${range.from}:${range.to}`;
+  `wrapped:v4:${eraDigest(eras)}:${range.from}:${range.to}`;
 
 /**
  * A range that ended a while ago will never change; one that just ended might

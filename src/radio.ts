@@ -2,7 +2,7 @@ import { BadRequest, intParam } from './api';
 import { ARTIST_TRACKS_CTE, SONG_TRACKS_CTE, respond, textParam } from './history';
 import { PRIMARY_ARTIST_PAIR_SQL, PRIMARY_ARTIST_SQL } from './stats/sql';
 import type { Env } from './types';
-import { MIN_PLAY_MS } from './wrapped';
+import { MIN_PLAY_MS } from './listen';
 
 /**
  * GET /api/radio?track= or ?artist=: songs to queue after a seed, from what
