@@ -107,9 +107,10 @@ describe('concert check', () => {
 
   it('lists each billed artist whole, with our id, or null for a name only Ticketmaster knows', async () => {
     await seedArtist('Tyler, The Creator', 5);
-    // Export-era plays carry only a placeholder; the real id wins when both exist.
+    // Export-era plays carry only a placeholder, here in other case; the real
+    // id and its spelling win when both exist.
     await env.DB.batch([
-      env.DB.prepare("INSERT INTO artists (artist_id, name) VALUES ('name:tyler, the creator', 'Tyler, The Creator')"),
+      env.DB.prepare("INSERT INTO artists (artist_id, name) VALUES ('name:tyler, the creator', 'tyler, the creator')"),
       env.DB.prepare("INSERT INTO tracks (track_id, name, first_seen_ms) VALUES ('t-old', 'Old', ?)").bind(NOW),
       env.DB.prepare("INSERT INTO track_artists (track_id, artist_id, position) VALUES ('t-old', 'name:tyler, the creator', 0)"),
       env.DB.prepare("INSERT INTO plays (played_at_ms, track_id, source) VALUES (?, 't-old', 'import')").bind(NOW - 2 * DAY),
