@@ -95,8 +95,9 @@ function httpTransport(env: Env, options: SpotifyClientOptions): SpotifyTranspor
     if (auth === 'app') return (await appAccessToken(env)).access_token;
     grant ??= (await readState(env.DB)).token;
     const stored = stale ? { ...grant, access_token: null, access_expires_ms: null } : grant;
+    const accessToken = await getAccessToken(env.DB, env, stored, options.now ?? Date.now());
     stale = false;
-    return getAccessToken(env.DB, env, stored, options.now ?? Date.now());
+    return accessToken;
   };
   const accessToken = () => {
     // Shared by the client's calls; a failure is not kept, so the next call tries again.

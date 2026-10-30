@@ -314,9 +314,10 @@ export async function backfillFromCatalog(env: Env, request: Request): Promise<R
     try {
       track = (await spotify.get(`/tracks/${trackId}`)) as SpotifyTrack | null;
     } catch (error) {
+      if (!(error instanceof SpotifyError)) throw error;
       // Any other answer, 404 for a track withdrawn from the catalog among
       // them, means there is nothing to fetch for this one.
-      if (error instanceof SpotifyError && error.status !== null && !isRateLimit(error)) {
+      if (error.status !== null && !isRateLimit(error)) {
         examined++;
         missing++;
         continue;
