@@ -2,7 +2,7 @@ import { json } from './api';
 import { DUPLICATE_WINDOW_MS, type ExportRecord, exportKey, isShortRecord } from './import';
 import { renumberSongsOf } from './play-numbers';
 import type { Env } from './types';
-import { MIN_PLAY_MS } from './wrapped';
+import { MIN_PLAY_MS, gapSeekSql } from './listen';
 
 /**
  * One-off repairs for export rows stored before the import learned to drop
@@ -207,7 +207,7 @@ export async function cleanupShortGapsRoute(env: Env, url: URL): Promise<Respons
   const { results } = await env.DB.prepare(
     `SELECT played_at_ms, track_id, gap FROM (
        SELECT e.played_at_ms, e.track_id,
-              e.played_at_ms - (SELECT MAX(q.played_at_ms) FROM plays q WHERE q.played_at_ms < e.played_at_ms) AS gap
+              ${gapSeekSql('e.played_at_ms')} AS gap
          FROM plays e
         WHERE e.source = 'export' AND (e.played_at_ms, e.track_id) < (?1, ?2))
       WHERE gap < ?3

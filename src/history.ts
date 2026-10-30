@@ -1,11 +1,11 @@
 import { BadRequest, dateRange, fromRollup, intParam, timeZoneParam } from './api';
+import { gapSeekSql, listenedMsSql } from './listen';
 import { withTrackCounts } from './rollup';
 import { isNameKey, preferredArtist } from './artists';
 import { SONG_SQL, songKey } from './songs';
 import { PRIMARY_ARTIST_SQL } from './stats/sql';
 import { endOfLocalDayUtcMs, isRealDay, localCalendar, localDayKey, startOfLocalDayUtcMs } from './tz';
 import type { Env } from './types';
-import { FALLBACK_DURATION_MS, MIN_PLAY_MS } from './wrapped';
 
 /**
  * One artist's or one track's whole history, and "on this day", for a client
@@ -17,10 +17,10 @@ import { FALLBACK_DURATION_MS, MIN_PLAY_MS } from './wrapped';
  * editions of the same song (same title, less any edition tag such as
  * "- 2011 Remaster", and primary artist), as Wrapped does.
  *
- * `plays` counts every stored play, as /api/top-artists does. `minutes` uses
- * Wrapped's estimate: a play ran for at most the gap since the play before it
- * (whatever track that was) and at most the track's length, and a play under
- * 30 s by that measure is a skip worth no minutes.
+ * `plays` counts every stored play, as /api/top-artists does. `minutes` is
+ * the estimate Wrapped uses too (src/listen.ts): a play ran for at most the
+ * gap since the play before it (whatever track that was) and at most the
+ * track's length, and a skip is worth no minutes.
  *
  * Months and days are in the `tz` the caller asks for, as /api/daily's are.
  */
@@ -55,20 +55,18 @@ interface History {
 
 /**
  * Per-play listened time for the tracks in a CTE named `ts`. The gap to the
- * play before is one seek on the plays primary key per play, so this reads
- * about two rows per play rather than a window over the whole table.
+ * play before is one seek on the plays primary key per play (gapSeekSql), so
+ * this reads about two rows per play rather than a window over the whole table.
  */
 function playsSql(tracksCte: string): string {
   return `WITH ${tracksCte},
     p AS (
       SELECT p.played_at_ms, p.track_id,
-             p.played_at_ms - (SELECT max(q.played_at_ms) FROM plays q WHERE q.played_at_ms < p.played_at_ms) AS gap_ms
+             ${gapSeekSql('p.played_at_ms')} AS gap_ms
         FROM plays p WHERE p.track_id IN (SELECT track_id FROM ts)
     )
     SELECT p.played_at_ms, p.track_id,
-           CASE WHEN p.gap_ms IS NULL OR p.gap_ms >= ${MIN_PLAY_MS}
-                THEN min(coalesce(p.gap_ms, ${FALLBACK_DURATION_MS}), coalesce(t.duration_ms, ${FALLBACK_DURATION_MS}))
-                ELSE 0 END AS ms
+           ${listenedMsSql('p.gap_ms', 't.duration_ms')} AS ms
       FROM p LEFT JOIN tracks t ON t.track_id = p.track_id
      ORDER BY p.played_at_ms`;
 }

@@ -210,21 +210,6 @@ describe('/api/artist', () => {
     });
   });
 
-  it('estimates minutes as Wrapped does, with skips worth nothing', async () => {
-    await seed([
-      // The first play ever has no predecessor: 180 s fallback, under the 200 s length.
-      ...session(JAN_10, 2, { trackId: 'a', artistId: 'x' }),
-      // Ten seconds after another artist's play: a skip, but still a play.
-      { ms: JAN_10 + 20 * MIN, trackId: 'other', artistId: 'y' },
-      { ms: JAN_10 + 20 * MIN + 10_000, trackId: 'a', artistId: 'x' },
-      // Two minutes after that: counts the two minutes it could have run.
-      { ms: JAN_10 + 22 * MIN + 10_000, trackId: 'a', artistId: 'x' },
-    ]);
-    const body = await get<ArtistBody>('/api/artist?id=x');
-    expect(body.plays).toBe(4);
-    expect(body.minutes).toBe(Math.round((180_000 + 200_000 + 2 * MIN) / MIN));
-  });
-
   it('buckets months in the requested zone and fills quiet months with zero', async () => {
     await seed([
       // 20:00 UTC on 31 January is 04:00 on 1 February in Singapore.

@@ -4,7 +4,7 @@ import { buildInserts } from './db';
 import { songStatements } from './play-numbers';
 import { syncSearchIndex } from './search-index';
 import type { Env } from './types';
-import { MIN_PLAY_MS } from './wrapped';
+import { MIN_PLAY_MS } from './listen';
 
 /**
  * How far apart an export record and a stored play of the same track may end
@@ -12,7 +12,7 @@ import { MIN_PLAY_MS } from './wrapped';
  *
  * Both timestamps mark the end of playback: the export's `ts` is "when the
  * track stopped playing", and the API's `played_at` is the same moment (see
- * wrapped.ts). The export truncates it to whole seconds
+ * listen.ts). The export truncates it to whole seconds
  * (`2026-09-08T18:51:38Z`) while the API keeps milliseconds
  * (`…:38.235Z`, fixtures/NOTES.md), so one play arrives up to a second apart
  * and an exact key match never sees it; the rest of the margin is for the two

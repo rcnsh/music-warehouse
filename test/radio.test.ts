@@ -51,12 +51,13 @@ describe('coPlayed', () => {
   it('ignores skips and plays outside the windows', () => {
     const plays = [
       ...run(NOW - DAY, ['seed', 'kept']),
-      { ms: NOW - DAY + 8 * MIN, track_id: 'skipped', song: 'skipped' },
-      { ms: NOW - DAY + 8 * MIN + 10_000, track_id: 'after', song: 'after' },
+      { ms: NOW - DAY + 8 * MIN, track_id: 'played', song: 'played' },
+      // Ended 10 s after the play before it ended, so it ran 10 s at most.
+      { ms: NOW - DAY + 8 * MIN + 10_000, track_id: 'skipped', song: 'skipped' },
       { ms: NOW - DAY + 3 * WINDOW_MS, track_id: 'far', song: 'far' },
     ];
     const ranked = coPlayed(plays, seedTimes(plays, 'seed'), new Set(['seed']), NOW);
-    expect(ranked.map((r) => r.song)).toEqual(['kept', 'after']);
+    expect(ranked.map((r) => r.song)).toEqual(['kept', 'played']);
   });
 
   it('weights recent sessions above old ones', () => {
