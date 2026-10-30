@@ -2,7 +2,7 @@ import { BadRequest, json } from './api';
 import { type Era, eraAt, eraDigest, historyStartMs, loadEras, localTimeSql, startOfLocalWeek } from './eras';
 import { peekSnapshot, snapshot } from './snapshots';
 import { NAME_KEY_PREFIX } from './db';
-import { songTitle, songTitleSql } from './song-title';
+import { SONG_SQL } from './songs';
 import { PRIMARY_ARTIST_PAIR_SQL, PRIMARY_ARTIST_SQL } from './stats/sql';
 import { calendarDaysInclusive, endOfLocalDayUtcMs, isRealDay, localDayKey, startOfLocalDayUtcMs } from './tz';
 import type { Access } from './auth';
@@ -147,6 +147,8 @@ type MetaRow = {
   image: string | null;
   release_date: string | null;
   first_ever_ms: number;
+  /** The song key (src/songs.ts). */
+  song: string;
 };
 type PriorRow = { kind: 'artist' | 'song'; k: string };
 
@@ -227,7 +229,7 @@ export async function computeWrapped(
     db
       .prepare(
         `SELECT t.track_id, t.name, ${PRIMARY_ARTIST_PAIR_SQL('t.track_id')} AS artist_pair, t.album_id,
-                al.name AS album, al.image_url AS image, al.release_date,
+                al.name AS album, al.image_url AS image, al.release_date, ${SONG_SQL('t.track_id')} AS song,
                 (SELECT min(played_at_ms) FROM plays x WHERE x.track_id = t.track_id) AS first_ever_ms
            FROM tracks t LEFT JOIN albums al ON al.album_id = t.album_id
           WHERE t.track_id IN (SELECT DISTINCT track_id FROM plays WHERE played_at_ms >= ?1 AND played_at_ms < ?2)`,
@@ -235,16 +237,17 @@ export async function computeWrapped(
       .bind(range.fromMs, range.toMs),
     // Artists and songs heard before the range, keyed the same way as below,
     // so a new edition of an old song or a placeholder id of a known artist
-    // doesn't count as a discovery.
+    // doesn't count as a discovery. Artist names come as stored, to be
+    // lowercased in JS as below: SQLite's lower() leaves "Ó" as it is.
     db
       .prepare(
         `WITH before AS (
-           SELECT t.name, ${PRIMARY_ARTIST_SQL('t.track_id')} AS an
+           SELECT ${SONG_SQL('t.track_id')} AS song, ${PRIMARY_ARTIST_SQL('t.track_id')} AS an
              FROM tracks t WHERE t.track_id IN (SELECT DISTINCT track_id FROM plays WHERE played_at_ms < ?1)
          )
-         SELECT DISTINCT 'artist' AS kind, lower(an) AS k FROM before WHERE an IS NOT NULL
+         SELECT DISTINCT 'artist' AS kind, an AS k FROM before WHERE an IS NOT NULL
          UNION ALL
-         SELECT DISTINCT 'song', ${songTitleSql('lower(name)')} || '|' || lower(an) FROM before WHERE an IS NOT NULL`,
+         SELECT DISTINCT 'song', song FROM before WHERE an IS NOT NULL`,
       )
       .bind(range.fromMs),
   ]);
@@ -302,7 +305,7 @@ function summarize(
   skips: number,
 ): Wrapped {
   const meta = new Map(metaRows.map((row) => [row.track_id, row]));
-  const priorArtists = new Set(priorRows.filter((r) => r.kind === 'artist').map((r) => r.k));
+  const priorArtists = new Set(priorRows.filter((r) => r.kind === 'artist').map((r) => r.k.toLowerCase()));
   const priorSongs = new Set(priorRows.filter((r) => r.kind === 'song').map((r) => r.k));
 
   type Song = {
@@ -348,7 +351,7 @@ function summarize(
 
     if (track.artist === null) continue;
     const artistKey = track.artist.toLowerCase();
-    const songKey = `${songTitle(track.name.toLowerCase())}|${artistKey}`;
+    const songKey = track.song;
 
     let song = songs.get(songKey);
     if (!song) {

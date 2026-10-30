@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { buildEras, eraAt, parseEras } from '../src/eras';
 import { localDayKey, startOfLocalDayUtcMs } from '../src/tz';
 import { freezeClock } from './helpers';
+import { syncAllSongs } from '../src/play-numbers';
 import { edgeRequest } from '../src/snapshots';
 import {
   type HourRow,
@@ -57,6 +58,7 @@ async function seed(plays: Play[]) {
     );
   }
   await env.DB.batch(statements);
+  await env.DB.batch(syncAllSongs(env.DB));
 }
 
 /** `count` plays of one track, five minutes apart so each counts its full 200 s. */
@@ -216,6 +218,15 @@ describe('wrapped: body', () => {
     expect(body.discoveries.artists).toBe(1);
     expect(body.discoveries.songs).toBe(2);
     expect(body.discoveries.top.map((a) => a.name)).toEqual(['Newcomer']);
+  });
+
+  it('knows an artist and song with a non-ASCII capital from before the range', async () => {
+    await seed([
+      ...session('old', Date.UTC(2023, 5, 1, 12), 2, { artist: 'Ólafur Arnalds', name: 'Ára bátur' }),
+      ...session('old-again', MARCH_2, 3, { artist: 'Ólafur Arnalds', name: 'Ára bátur - 2020 Remaster' }),
+    ]);
+    const body = (await (await wrapped('2024-03-01', '2024-03-31')).json()) as Wrapped;
+    expect(body.discoveries).toMatchObject({ artists: 0, songs: 0 });
   });
 
   it('buckets days and hours in each era’s local time', async () => {

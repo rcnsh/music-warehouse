@@ -3,7 +3,7 @@ import { likePattern } from './plays';
 import { NAME_KEY_PREFIX } from './db';
 import { respond, textParam } from './history';
 import { trigramPhrase } from './search-index';
-import { songTitle } from './song-title';
+import { songKey } from './songs';
 import { PRIMARY_ARTIST_SQL } from './stats/sql';
 import type { Env } from './types';
 
@@ -197,7 +197,7 @@ function answer(q: string, limit: number, match: Matches): Response {
   // One entry per song; the id is the most-played edition's.
   const tracks = new Map<string, { id: string; name: string; artist: string | null; plays: number; best: number }>();
   for (const row of match.tracks) {
-    const key = `${songTitle(row.name.toLowerCase())}|${row.artist?.toLowerCase() ?? ''}`;
+    const key = songKey(row);
     const entry = tracks.get(key);
     if (!entry) {
       tracks.set(key, { id: row.track_id, name: row.name, artist: row.artist, plays: row.plays, best: row.plays });
