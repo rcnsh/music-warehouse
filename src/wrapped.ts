@@ -237,14 +237,15 @@ export async function computeWrapped(
       .bind(range.fromMs, range.toMs),
     // Artists and songs heard before the range, keyed the same way as below,
     // so a new edition of an old song or a placeholder id of a known artist
-    // doesn't count as a discovery.
+    // doesn't count as a discovery. Artist names come as stored, to be
+    // lowercased in JS as below: SQLite's lower() leaves "Ó" as it is.
     db
       .prepare(
         `WITH before AS (
            SELECT ${SONG_SQL('t.track_id')} AS song, ${PRIMARY_ARTIST_SQL('t.track_id')} AS an
              FROM tracks t WHERE t.track_id IN (SELECT DISTINCT track_id FROM plays WHERE played_at_ms < ?1)
          )
-         SELECT DISTINCT 'artist' AS kind, lower(an) AS k FROM before WHERE an IS NOT NULL
+         SELECT DISTINCT 'artist' AS kind, an AS k FROM before WHERE an IS NOT NULL
          UNION ALL
          SELECT DISTINCT 'song', song FROM before WHERE an IS NOT NULL`,
       )
@@ -304,7 +305,7 @@ function summarize(
   skips: number,
 ): Wrapped {
   const meta = new Map(metaRows.map((row) => [row.track_id, row]));
-  const priorArtists = new Set(priorRows.filter((r) => r.kind === 'artist').map((r) => r.k));
+  const priorArtists = new Set(priorRows.filter((r) => r.kind === 'artist').map((r) => r.k.toLowerCase()));
   const priorSongs = new Set(priorRows.filter((r) => r.kind === 'song').map((r) => r.k));
 
   type Song = {
