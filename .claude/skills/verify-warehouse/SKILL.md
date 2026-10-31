@@ -58,7 +58,7 @@ $S/db.sh <label> "SELECT …"        # read-only SQL on this run's local D1
 - To read `run.env` values in your shell: `. "$VERIFY_RUN/run.env"` (or the newest run dir).
 - The agent shell is zsh. Never name a variable `path` (it is tied to `$PATH`; assigning it breaks every command after it); use `req` or similar when looping over pages.
 
-Route behaviour, parameters and errors are documented in `README.md` ("API reference") and `docs/openapi.yaml`. The feature files give exact commands and the seed's expected values.
+Route behaviour, parameters and errors are documented in `docs/api.md` and `docs/openapi.yaml`. The feature files give exact commands and the seed's expected values.
 
 ## Evidence
 
@@ -102,7 +102,7 @@ Wrangler also writes build output to `.wrangler/tmp/` in the repo (gitignored, s
 
 ## Secondary surfaces (no harness here)
 
-These clients live in separate repos under `~/dev/` and read this API with a device token. Verify them in their own repos; from here, prove the API contract they depend on (README "Clients" lists the routes each reads):
+These clients live in separate repos under `~/dev/` and read this API with a device token. Verify them in their own repos; from here, prove the API contract they depend on (`docs/api.md` "Clients" lists the routes each reads):
 
 - `music-warehouse-gui`: native macOS app.
 - `music-warehouse-mcp`: MCP server.

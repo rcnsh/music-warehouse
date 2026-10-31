@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  Runs scripts/backup.sh weekly on a Mac. See README, "Backups and recovery".
+  Runs scripts/backup.sh weekly on a Mac. See docs/operations.md, "Backups and recovery".
 
   Replace every /Users/YOU with your home directory (and the checkout path if
   it is not ~/dev/music-warehouse), and make sure PATH below reaches the node

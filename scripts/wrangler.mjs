@@ -25,7 +25,7 @@ if (!explicit && existsSync(local)) {
   args.push('-c', local);
 } else if (!explicit && (args[0] === 'deploy' || args.includes('--remote'))) {
   // The template's placeholders would only fail further in, less clearly.
-  console.error('No wrangler.local.jsonc. Copy wrangler.jsonc to it and fill in your own values (see README).');
+  console.error('No wrangler.local.jsonc. Copy wrangler.jsonc to it and fill in your own values (see docs/setup.md).');
   process.exit(1);
 } else if (!explicit) {
   console.error('scripts/wrangler.mjs: no wrangler.local.jsonc, so using the wrangler.jsonc template.');
