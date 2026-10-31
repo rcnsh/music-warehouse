@@ -69,7 +69,7 @@ export async function health(env: Env, now: number = Date.now()): Promise<Respon
               : `No successful poll for ${minutesSinceSuccess} minutes.`) +
             (spotify.paused_until_iso
               ? ` Spotify calls are paused after a 429 (${spotify.pause_kind}) until ${spotify.paused_until_iso}; polling resumes then.`
-              : ' See last_error, and README "Checking ingestion".')
+              : ' See last_error, and docs/operations.md "Checking ingestion".')
           : daysUntilExpiry !== null && daysUntilExpiry <= 14
             ? `Refresh token expires in ${daysUntilExpiry} days. Re-authorize soon.`
             : concerts?.failing

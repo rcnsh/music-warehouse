@@ -1,7 +1,7 @@
 # Design notes
 
-The why behind music-warehouse. The [README](../README.md) covers setting it
-up and calling it; this is for changing it.
+The why behind music-warehouse. [Setup](setup.md) and the [API reference](api.md) cover
+setting it up and calling it; this is for changing it.
 
 - [Ingestion](#ingestion)
 - [Listening stats](#listening-stats)

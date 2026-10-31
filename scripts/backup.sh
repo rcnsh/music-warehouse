@@ -4,7 +4,7 @@
 #
 # D1 is the only copy of every play older than Spotify's 50-item window, and
 # Time Travel only reaches back 30 days (7 on Free). This is the copy that
-# outlives both. See README, "Backups and recovery".
+# outlives both. See docs/operations.md, "Backups and recovery".
 #
 #   scripts/backup.sh              # the production database (--remote)
 #   scripts/backup.sh --local      # the wrangler dev database, to try it out
@@ -36,7 +36,7 @@ repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo"
 
 if [[ "$where" == "--remote" && ! -f "$repo/wrangler.local.jsonc" ]]; then
-  echo "backup: no wrangler.local.jsonc, so no database to back up. Copy wrangler.jsonc to it and fill in your own values (see README)." >&2
+  echo "backup: no wrangler.local.jsonc, so no database to back up. Copy wrangler.jsonc to it and fill in your own values (see docs/setup.md)." >&2
   exit 1
 fi
 

@@ -19,7 +19,7 @@ The owner gives each device its own token: minted with the admin token (`POST /a
 
 ## How to get to it (user POV)
 
-- Owner in a shell: `curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" … /admin/tokens` (README "Device tokens").
+- Owner in a shell: `curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" … /admin/tokens` (`docs/setup.md` "Device tokens").
 - A browser: open `/auth/login?name=laptop`, press Allow or Cancel.
 - A desktop app, CLI or the MCP server: `/auth/login?name=…&return_to=http://127.0.0.1:<port>/…&code_challenge=…`, then `POST /auth/token`.
 - Android app: the same with a `SIGN_IN_SCHEMES` scheme (not configured on this run).

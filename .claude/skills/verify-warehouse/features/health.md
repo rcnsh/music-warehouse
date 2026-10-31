@@ -13,7 +13,7 @@ The owner checks whether ingestion is working with `GET /health`: whether a Spot
 
 ## How to get to it (user POV)
 
-- Owner: `curl -H "Authorization: Bearer $ADMIN_TOKEN" "$WORKER_URL/health"` (README "Health").
+- Owner: `curl -H "Authorization: Bearer $ADMIN_TOKEN" "$WORKER_URL/health"` (`docs/operations.md` "Health").
 - Monitoring (the healthchecks heartbeat is separate and not in scope).
 
 ## Driving it with api.sh

@@ -30,7 +30,7 @@ Preconditions:
 
 - **First page.** Run `$S/api.sh read history/page-1 GET '/api/plays?limit=1'`. `HTTP 200`; `plays[0].track_name` is `Driftwood Telephone`, `source` is `export`, `artist_list[0].id` is `name:Juniper & The Tides`, and `next_before` is `1791579600000.mwverify00000000000010`.
 - **Resume inside the tie.** Pass the cursor back. Run `$S/api.sh read history/page-2 GET '/api/plays?limit=1&before=1791579600000.mwverify00000000000010'`. `plays[0].track_name` is `Café Lumière` with the same `played_at_ms` `1791579600000`; `next_before` is `1791579600000.mwverify00000000000004`.
-- **Bare millisecond.** Run `$S/api.sh read history/bare-ms GET '/api/plays?limit=1&before=1791579600000'`. `plays[0]` is `Fernlight` at `1791398833000`: both tied plays are skipped, as the README warns.
+- **Bare millisecond.** Run `$S/api.sh read history/bare-ms GET '/api/plays?limit=1&before=1791579600000'`. `plays[0]` is `Fernlight` at `1791398833000`: both tied plays are skipped, as `docs/api.md` warns.
 - **Walk to the end.** Follow `next_before` with `limit=100`, URL-encoding nothing (the cursor is URL-safe), labels `history/walk-1`, `history/walk-2`, …, until `next_before` is `null`. Four pages of 100, 100, 100 and 26; the 326 `played_at_ms`+`track_id` pairs are all distinct (`jq -s` over the `.body` files).
 - **Text filter.** Run `$S/api.sh read history/q GET '/api/plays?q=cafe&limit=500'`. `q` is echoed as `cafe`; 43 plays, all `Café Lumière`; `next_before` is `null`.
 - **Song filter.** Run `$S/api.sh read history/track GET '/api/plays?track_id=mwverify00000000000001&limit=500'`. 56 plays: 42 of `Harbour Lights` and 14 of `Harbour Lights - Remastered 2024`, the edition folded in. `track_id` is echoed.
