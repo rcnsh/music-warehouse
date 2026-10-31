@@ -147,8 +147,10 @@ in the list.
 Keep `ADMIN_TOKEN` in a password manager as the way back in if every device
 token is lost.
 
-Don't set `READ_TOKEN`: it is a deprecated shared secret that can't be revoked
-for one reader. Each use logs a `read-token-deprecated` warning.
+Don't set `READ_TOKEN` on a new deployment: it is a deprecated shared secret
+that can't be revoked for one reader. If yours has one, each use logs a
+`read-token-deprecated` warning (`npx wrangler tail`). Move each client that
+sends it to a device token, then `npx wrangler secret delete READ_TOKEN`.
 
 ### Signing in with Spotify
 
@@ -253,3 +255,17 @@ before. The migration builds it in UTC. For any other zone it is rebuilt by
 the daily cron, or at once with `POST /admin/rollup` (one large read of every
 play). Changing `TIMEZONE` or `ERAS` later rebuilds
 it the same way.
+
+## npm scripts
+
+| Script | Runs |
+|---|---|
+| `npm run dev` | `wrangler dev`, with `wrangler.local.jsonc` if it exists |
+| `npm run deploy` | `wrangler deploy -c wrangler.local.jsonc` (refused without it) |
+| `npm run wrangler -- <args>` | Any Wrangler command, with `wrangler.local.jsonc` if it exists |
+| `npm test` / `npm run test:watch` | Vitest, once or watching |
+| `npm run typecheck` | `tsc --noEmit` |
+| `npm run migrate:local` / `migrate:remote` | Apply D1 migrations locally or to the deployed database |
+| `npm run authorize` | [Authorize](../README.md#authorizing) ingestion |
+| `npm run import` / `clean:export` | [Import the export](import.md), or clean up an older import |
+| `npm run backfill:albums` / `backfill:catalog` | [Backfill album art](import.md#album-art) |

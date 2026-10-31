@@ -19,12 +19,12 @@
   // and, for a custom domain instead of workers.dev, add to the copy:
   //   "routes": [{ "pattern": "music.example.com", "custom_domain": true }],
   // Neither id is a credential, but neither belongs in a public repository.
-  // See README, "Setting it up from scratch".
+  // See docs/setup.md.
   // ---------------------------------------------------------------------
 
   // Poll cadence. 48 invocations/day, well inside either plan (the Free plan
   // allows 100,000 requests a day).
-  // Tighten to "*/15 * * * *" if gaps ever appear (see README, "Configuration").
+  // Tighten to "*/15 * * * *" if gaps ever appear (see docs/setup.md, "Crons").
   // Three cron triggers (Free allows five, Paid 250): ingestion every 30 minutes,
   // each followed by the alert check that pushes to ALERT_WEBHOOK_URL when
   // something needs a human; a daily maintenance sweep; and the daily concert
@@ -67,7 +67,7 @@
     // ALERT_MENTION is deliberately not here. It identifies a specific person
     // to a specific chat service, so it is set as a secret instead:
     //   npx wrangler secret put ALERT_MENTION
-    // See README, "Alerting".
+    // See docs/operations.md, "Alerting".
   },
 
   // Used only by the test pool (vitest.config.ts), so Wrangler reads the

@@ -8,7 +8,7 @@
 <a href="https://workers.cloudflare.com"><img alt="Cloudflare Workers" src="https://img.shields.io/badge/Cloudflare%20Workers-F38020?style=flat-square&logo=cloudflareworkers&logoColor=white"></a>
 <a href="https://github.com/rcnsh/music-warehouse#clients"><img alt="Part of music-warehouse" src="https://img.shields.io/badge/part%20of-music--warehouse-1DB954?style=flat-square"></a>
 </p>
-<p><a href="#what-it-does">What it does</a> · <a href="#quick-start">Quick start</a> · <a href="#documentation">Documentation</a> · <a href="#clients">Clients</a></p>
+<p><a href="#what-it-does">What it does</a> · <a href="#quick-start">Quick start</a> · <a href="#clients">Clients</a> · <a href="#configuration">Configuration</a> · <a href="#documentation">Documentation</a></p>
 </div>
 
 
@@ -160,6 +160,42 @@ from 14 days before. Run the same `npm run authorize` again; the six months
 restart. Adding a scope to `SCOPE` in `src/spotify.ts` also needs a
 re-authorization.
 
+## Device tokens
+
+Give each client its own token rather than copying `ADMIN_TOKEN` around:
+
+```bash
+curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"name": "iPhone Wrapped"}' "$WORKER_URL/admin/tokens"
+```
+
+The token is shown once. Tokens are `read` by default and expire after 90
+days; [docs/setup.md](docs/setup.md#device-tokens) covers the options,
+listing and revoking.
+
+### Signing in with Spotify
+
+A client can also get a read token by signing in with the Spotify account
+that owns the warehouse. In a browser, open `$WORKER_URL/auth/login?name=laptop`.
+How it works: [docs/setup.md](docs/setup.md#signing-in-with-spotify); for app
+developers: [docs/api.md](docs/api.md#signing-in-from-an-app).
+
+## Configuration
+
+Besides the three required secrets in the quick start, the settings you're
+most likely to want:
+
+| Name | |
+|---|---|
+| `TIMEZONE` or `ERAS` | The timezone stats and Wrapped read local time in. Default `UTC`. |
+| `CORS_ORIGINS` | Browser origins allowed to call `/api/*`. The Spicetify and Wrapped clients need theirs here. |
+| `ALERT_WEBHOOK_URL` | Discord, Slack or ntfy URL for [alerts](docs/operations.md#alerting). |
+
+Every setting is in [docs/setup.md](docs/setup.md#configuration). Concerts and
+lyrics are off until you give them a key: see
+[Setting up concerts](docs/optional-features.md#setting-up-concerts) and
+[Setting up lyrics](docs/optional-features.md#setting-up-lyrics).
+
 ## Documentation
 
 | | |
@@ -182,7 +218,8 @@ npm run typecheck
 ```
 
 To authorize locally, register `http://127.0.0.1:8787/callback` with Spotify
-and run `npm run authorize` without `--url`. `npm audit` flags `sharp`, pulled
+and run `npm run authorize` without `--url`. All the scripts are listed in
+[docs/setup.md](docs/setup.md#npm-scripts). `npm audit` flags `sharp`, pulled
 in by the test runner's `miniflare`; it never reaches the deployed Worker.
 
 ## Licence
