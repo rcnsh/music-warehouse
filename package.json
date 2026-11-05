@@ -23,9 +23,9 @@
     "authorize": "node scripts/authorize.mjs"
   },
   "devDependencies": {
-    "@cloudflare/vitest-plugin": "^1.4.9",
+    "@cloudflare/vitest-plugin": "^1.4.12",
     "@cloudflare/workers-types": "^5.20261019.1",
-    "@types/node": "^26.6.5",
+    "@types/node": "^26.6.6",
     "typescript": "^7.0.2",
     "vitest": "^5.0.5",
     "wrangler": "^4.151.0"
