@@ -14,6 +14,9 @@ Every route except `/callback` and `/auth/*` takes `Authorization: Bearer <token
 | A `read` device token, or `READ_TOKEN` | `/api/*` only. Wrapped: presets and ranges already computed. |
 | `CONTROL_TOKEN` | [`POST /control/play`](#playback-control) only. Not a device token: it reads nothing. |
 
+Another Worker on the same Cloudflare account can read `/api/*` with no
+token at all, through a service binding. See [From another Worker](#from-another-worker).
+
 Responses are JSON. Errors are `{ "error": "..." }` with:
 
 | Status | Meaning |
@@ -59,8 +62,46 @@ this table first, and bump `info.version` in [`openapi.yaml`](openapi.yaml).
 | [music-warehouse-spicetify](https://github.com/rcnsh/music-warehouse-spicetify) | `/api/plays`, `/api/home`, `/api/stats/*`, `/api/top-*`, `/api/wrapped`, `/api/wrapped/ranges`, `/api/concerts`, `/api/track`, `/api/artist`, `/api/on-this-day` |
 | [music-warehouse-wrapped](https://github.com/rcnsh/music-warehouse-wrapped) | `/api/wrapped`, `/api/wrapped/ranges`, `/api/top` |
 
+A Worker can also read through the [`ReadApi` binding](#from-another-worker)
+instead of a token; those clients are listed in their own repos.
+
 Browser clients (Spicetify, Wrapped) need their origin in
 [`CORS_ORIGINS`](setup.md#configuration).
+
+## From another Worker
+
+The Worker exports a named entrypoint, `ReadApi`, for other Workers on the
+same Cloudflare account. Bind it in the reading Worker's config:
+
+```jsonc
+// wrangler.jsonc
+"services": [{ "binding": "MUSIC", "service": "music-warehouse", "entrypoint": "ReadApi" }]
+```
+
+```ts
+// cloudflare.config.ts (cf CLI)
+MUSIC: bindings.worker({ service: "music-warehouse", entrypoint: "ReadApi" })
+```
+
+`service` is the warehouse Worker's name. Then call it like the HTTP API, with
+any hostname and no `Authorization` header:
+
+```ts
+const response = await env.MUSIC.fetch("https://warehouse/api/top-artists?from=2026-01-01&to=2026-01-31");
+```
+
+- It reaches what a `read` token reaches, the `/api/*` routes with the same
+  parameters, responses and errors, except the [live Spotify routes](#live-from-spotify),
+  which spend the Spotify grant's rate limit that ingestion shares. Those and
+  every path outside `/api/*` are a `404`. The hostname is ignored.
+- It has no URL. Cloudflare only lets a Worker bind it if the Worker is on the
+  same account, so no secret is stored, sent, rotated or expires.
+- It skips CORS, the WAF and the sign-in rate limiter, none of which apply to
+  a call inside Cloudflare.
+- Unbound, it does nothing: a deployment that never binds it is unchanged.
+  To cut a Worker off, remove the binding from its config and redeploy it.
+- Deploy the warehouse before the reading Worker, so the entrypoint exists
+  when the binding is created.
 
 ## Endpoints at a glance
 

@@ -9,6 +9,7 @@ declare global {
       TEST_MIGRATIONS: D1Migration[];
       TEST_FIXTURE: RecentlyPlayedResponse;
       TEST_NOW: string;
+      READ_API: Fetcher;
     }
   }
 }

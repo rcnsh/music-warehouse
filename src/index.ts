@@ -1,3 +1,4 @@
+import { WorkerEntrypoint } from 'cloudflare:workers';
 import { dailyCounts, json, recentPlays, topArtists } from './api';
 import { errorResponse } from './errors';
 import { callback, login } from './oauth';
@@ -11,7 +12,7 @@ import { nowPlaying, play, recentlyPlayed, topMusic } from './live';
 import { spotifyClient } from './spotify-client';
 import { dailyTrackSweep } from './db';
 import { ensureRollup } from './rollup';
-import { accessFor, clientKey, createTokenRoute, listTokensRoute, listedOrigins, revokeTokenRoute } from './auth';
+import { type Access, accessFor, clientKey, createTokenRoute, listTokensRoute, listedOrigins, revokeTokenRoute } from './auth';
 import { isStatName, statRoute } from './stats';
 import { artistRoute, cachedHistory, onThisDayRoute, topTracksRoute, trackRoute } from './history';
 import { searchRoute } from './search';
@@ -65,11 +66,66 @@ function allowedOrigin(request: Request, env: Env): string | null {
   return allowed.includes('*') || allowed.includes(origin) ? origin : null;
 }
 
+/** `METHOD /path` with trailing slashes dropped: what the route switches match on. */
+function routeOf(request: Request, url: URL): string {
+  return `${request.method} ${url.pathname.replace(/\/+$/, '') || '/'}`;
+}
+
+/**
+ * The /api/* routes: everything a read token reaches. Shared by the bearer
+ * path (handle) and the ReadApi entrypoint, so the two cannot drift. Callers
+ * have already decided the caller may read; errors propagate to them.
+ */
+async function routeApi(route: string, url: URL, env: Env, ctx: ExecutionContext, access: Access): Promise<Response> {
+  switch (route) {
+    case 'GET /api/plays':
+      return await recentPlays(env, url);
+    case 'GET /api/plays.csv':
+      return await playsCsvRoute(env, url);
+    case 'GET /api/top-artists':
+      return await cachedHistory(env, url, () => topArtists(env, url));
+    case 'GET /api/top-tracks':
+      return await cachedHistory(env, url, () => topTracksRoute(env, url));
+    case 'GET /api/daily':
+      return await cachedHistory(env, url, () => dailyCounts(env, url));
+    case 'GET /api/now-playing':
+      return await nowPlaying(env, ctx);
+    case 'GET /api/recently-played':
+      return await recentlyPlayed(env, url, ctx);
+    case 'GET /api/top':
+      return await topMusic(env, url, ctx);
+    case 'GET /api/wrapped':
+      return await wrappedRoute(env, ctx, url, access);
+    case 'GET /api/wrapped/ranges':
+      return await wrappedRangesRoute(env);
+    case 'GET /api/artist':
+      return await cachedHistory(env, url, () => artistRoute(env, url));
+    case 'GET /api/track':
+      return await cachedHistory(env, url, () => trackRoute(env, url));
+    case 'GET /api/on-this-day':
+      return await cachedHistory(env, url, () => onThisDayRoute(env, url));
+    case 'GET /api/home':
+      return await homeRoute(env, ctx, url);
+    case 'GET /api/radio':
+      return await cachedHistory(env, url, () => radioRoute(env, url));
+    case 'GET /api/concerts':
+      return await concertsRoute(env, url);
+    case 'GET /api/search':
+      return await searchRoute(env, url);
+    case 'GET /api/lyrics':
+      return await lyricsRoute(env, url);
+    default: {
+      const stat = /^GET \/api\/stats\/([a-z-]+)$/.exec(route)?.[1];
+      if (stat && isStatName(stat)) return await statRoute(env, ctx, stat);
+      return json({ error: 'Not found' }, 404);
+    }
+  }
+}
+
 async function handle(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   const url = new URL(request.url);
   const path = url.pathname.replace(/\/+$/, '') || '/';
-
-  const route = `${request.method} ${path}`;
+  const route = routeOf(request, url);
 
   try {
     // Sign-in is open to anyone, so when the deployment has a rate limiter
@@ -106,6 +162,7 @@ async function handle(request: Request, env: Env, ctx: ExecutionContext): Promis
     // token, playback alone.
     if (access === 'read' && !path.startsWith('/api/')) return unauthorized();
     if (access === 'control' && route !== 'POST /control/play') return unauthorized();
+    if (path.startsWith('/api/')) return await routeApi(route, url, env, ctx, access);
 
     switch (route) {
       case 'GET /':
@@ -155,42 +212,6 @@ async function handle(request: Request, env: Env, ctx: ExecutionContext): Promis
         return await login(env);
       case 'GET /health':
         return await health(env);
-      case 'GET /api/plays':
-        return await recentPlays(env, url);
-      case 'GET /api/plays.csv':
-        return await playsCsvRoute(env, url);
-      case 'GET /api/top-artists':
-        return await cachedHistory(env, url, () => topArtists(env, url));
-      case 'GET /api/top-tracks':
-        return await cachedHistory(env, url, () => topTracksRoute(env, url));
-      case 'GET /api/daily':
-        return await cachedHistory(env, url, () => dailyCounts(env, url));
-      case 'GET /api/now-playing':
-        return await nowPlaying(env, ctx);
-      case 'GET /api/recently-played':
-        return await recentlyPlayed(env, url, ctx);
-      case 'GET /api/top':
-        return await topMusic(env, url, ctx);
-      case 'GET /api/wrapped':
-        return await wrappedRoute(env, ctx, url, access);
-      case 'GET /api/wrapped/ranges':
-        return await wrappedRangesRoute(env);
-      case 'GET /api/artist':
-        return await cachedHistory(env, url, () => artistRoute(env, url));
-      case 'GET /api/track':
-        return await cachedHistory(env, url, () => trackRoute(env, url));
-      case 'GET /api/on-this-day':
-        return await cachedHistory(env, url, () => onThisDayRoute(env, url));
-      case 'GET /api/home':
-        return await homeRoute(env, ctx, url);
-      case 'GET /api/radio':
-        return await cachedHistory(env, url, () => radioRoute(env, url));
-      case 'GET /api/concerts':
-        return await concertsRoute(env, url);
-      case 'GET /api/search':
-        return await searchRoute(env, url);
-      case 'GET /api/lyrics':
-        return await lyricsRoute(env, url);
       case 'POST /control/play':
         return await play(env, request, ctx);
       case 'POST /admin/poll':
@@ -226,11 +247,8 @@ async function handle(request: Request, env: Env, ctx: ExecutionContext): Promis
         return await listTokensRoute(env);
       case 'DELETE /admin/tokens':
         return await revokeTokenRoute(env, url);
-      default: {
-        const stat = /^GET \/api\/stats\/([a-z-]+)$/.exec(route)?.[1];
-        if (stat && isStatName(stat)) return await statRoute(env, ctx, stat);
+      default:
         return json({ error: 'Not found' }, 404);
-      }
     }
   } catch (error) {
     return errorResponse(error);
@@ -342,3 +360,35 @@ const worker = {
 } satisfies ExportedHandler<Env>;
 
 export default worker;
+
+/**
+ * Routes ReadApi refuses although a read token reaches them: they call
+ * Spotify live and spend the grant's rate limit, which ingestion shares. A
+ * bound Worker has no token to revoke, so it gets stored history only.
+ */
+const READ_API_EXCLUDED = new Set(['GET /api/now-playing', 'GET /api/recently-played', 'GET /api/top']);
+
+/**
+ * The read API for another Worker on the same Cloudflare account, through a
+ * service binding:
+ *
+ *   "services": [{ "binding": "MUSIC", "service": "music-warehouse", "entrypoint": "ReadApi" }]
+ *
+ * It has no URL: only a Worker whose deployed config names this entrypoint
+ * can call it, so the account boundary is the credential and no token is
+ * sent. It reaches what a read token reaches (the /api/* routes) minus the
+ * live Spotify ones, and nothing else. Unbound, it does nothing. To cut a
+ * caller off, remove its binding. See docs/api.md, "From another Worker".
+ */
+export class ReadApi extends WorkerEntrypoint<Env> {
+  override async fetch(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+    const route = routeOf(request, url);
+    if (READ_API_EXCLUDED.has(route)) return json({ error: 'Not found' }, 404);
+    try {
+      return await routeApi(route, url, this.env, this.ctx, 'read');
+    } catch (error) {
+      return errorResponse(error);
+    }
+  }
+}

@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { cloudflareTest, readD1Migrations } from '@cloudflare/vitest-plugin';
+import { kCurrentWorker } from 'miniflare';
 import { configDefaults, defineConfig } from 'vitest/config';
 
 // Migrations and fixtures are read here, on the Node side, and handed to the
@@ -32,6 +33,9 @@ export default defineConfig({
       // tests and CI needs no .dev.vars.
       wrangler: { configPath: './wrangler.jsonc', environment: 'test' },
       miniflare: {
+        // A binding back to this Worker's own ReadApi entrypoint, so tests
+        // reach it the way another Worker would (test/read-api.test.ts).
+        serviceBindings: { READ_API: { name: kCurrentWorker, entrypoint: 'ReadApi' } },
         bindings: {
           TEST_MIGRATIONS: migrations,
           TEST_FIXTURE: loadFixture() as never,
