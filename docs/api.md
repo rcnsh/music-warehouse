@@ -80,7 +80,7 @@ same Cloudflare account. Bind it in the reading Worker's config:
 
 ```ts
 // cloudflare.config.ts (cf CLI)
-MUSIC: bindings.worker({ service: "music-warehouse", entrypoint: "ReadApi" })
+MUSIC: bindings.worker({ worker: "music-warehouse", exportName: "ReadApi" })
 ```
 
 `service` is the warehouse Worker's name. Then call it like the HTTP API, with
