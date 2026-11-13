@@ -51,7 +51,7 @@ flowchart LR
   spotify["Spotify Web API"] -- "cron, every 30 min" --> worker["music-warehouse Worker"]
   export["Extended streaming history export"] -. "npm run import" .-> worker
   worker <--> d1[("D1")]
-  clients["gui · mcp · spicetify · wrapped"] -- "/api/* with a read token" --> worker
+  clients["gui · mcp · spicetify · wrapped · remastered"] -- "/api/* with a read token" --> worker
 ```
 
 The Worker is the only thing that talks to Spotify or the database. Clients
@@ -66,10 +66,11 @@ polls anything itself.
 
 | Repo | What it is |
 |---|---|
-| [music-warehouse-gui](https://github.com/rcnsh/music-warehouse-gui) | Native macOS app (Rust, GPUI): history, search, stats, artist and song pages |
+| [music-warehouse-gui](https://github.com/rcnsh/music-warehouse-gui) | Native desktop app for macOS, Linux and Windows (Rust, GPUI): history, search, stats, artist and song pages |
 | [music-warehouse-mcp](https://github.com/rcnsh/music-warehouse-mcp) | MCP server, so an AI agent can query your history |
 | [music-warehouse-spicetify](https://github.com/rcnsh/music-warehouse-spicetify) | Spicetify custom app: stats inside the Spotify client |
 | [music-warehouse-wrapped](https://github.com/rcnsh/music-warehouse-wrapped) | Wrapped-style stories in the browser, exportable as video |
+| [spotify-remastered-client](https://github.com/rcnsh/spotify-remastered-client) | Android client that drives the installed Spotify app, with History, Stats and Wrapped from your warehouse |
 
 ## Requirements
 
