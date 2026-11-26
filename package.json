@@ -23,13 +23,13 @@
     "authorize": "node scripts/authorize.mjs"
   },
   "devDependencies": {
-    "@cloudflare/vitest-plugin": "^1.6.0",
-    "@cloudflare/workers-types": "^5.20261019.1",
+    "@cloudflare/vitest-plugin": "^1.9.0",
+    "@cloudflare/workers-types": "^5.20261123.1",
     "@types/node": "^26.6.6",
     "miniflare": "5.20261104.0-beta",
     "typescript": "^7.0.2",
-    "vitest": "^5.1.0",
-    "wrangler": "^4.151.0"
+    "vitest": "^5.1.1",
+    "wrangler": "^4.166.0"
   },
   "allowScripts": {
     "esbuild@0.28.2": true,
